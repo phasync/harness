@@ -26,16 +26,22 @@ $parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Read
 When the child ends awaiting input, the parent's call ends with `needsInput()`, so the parent turn
 ends `AwaitingInput` too, and a web host sees one `Pending` list:
 
-- One pending child call passes its needs up unchanged: the child's `Approval`, or its questions.
-- Several become one list of questions: an approval as question `<child call id>` with choices
-  `allow`/`deny`, a question as `<child call id>/<question id>`.
+- The parent's call lists every need of every pending child call, each keeping its type and
+  reason, its id prefixed with the child's call id: the child's `Approval` `approval` on call `w1`
+  becomes `Approval('w1/approval', 'write_file changes files')`. Nested agents prefix again
+  (`m1/w1/approval`).
 - `state` holds the child's messages and pending calls, as JSON. The host answers the parent's call
-  like any other (`new Answer($parentCallId, Decision::allow())`), in any process; `AgentTool`
-  restores the child from the state, gives it the answers and lets it run on. A denial reaches the
-  child's model as `Denied: <reason>`.
+  like any other, by need id (`new Answer($parentCallId, ['w1/approval' => Decision::allow()])`),
+  in any process; `AgentTool` restores the child from the state, routes each answer to its call
+  and lets the child run on. A `Decision::deny($reason)` reaches the child with its reason: the
+  child's model gets `Denied: <reason>`, or the child's tool its denied `Decision` when it asked
+  with state.
 
-A policy in the parent that gates the sub-agent itself checks both `decision()` and `answers()`, so a
-resumed call is not asked again (see the README's policy).
+A policy in the parent that gates the sub-agent itself checks `answers()`, so a resumed call is not
+asked again (`[] === $context->answers()`; see the README's policy, and `Harness\Policy`).
+
+A CLI can answer nested needs at once, without ending the turn: the README's inline idiom loops
+while `$context->pending()` is set, and each `$next()` resumes the child with the answers.
 
 ## Rendering concurrent sub-agents
 

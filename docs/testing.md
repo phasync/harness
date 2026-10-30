@@ -26,9 +26,19 @@ receives the events the call emits (`progress()`).
 ```php
 $call   = TestCall::make(new ToolSpec('write', 'Writes', ['type' => 'object'], new Hints(destructive: true)));
 $result = $policy->call(new ToolCall('test', 'write', []), $call, fn () => Result::text('ran'));
-assert($call->pending()?->needs instanceof Approval);
+assert($call->pending()?->needs[0] instanceof Approval);
+$call->answer(['approval' => Decision::allow()]);     // then call the policy again
 
 $events = [];
 $shell  = new Shell('/tmp');
 $shell->call(['command' => 'echo hi'], TestCall::make($shell->spec(), emit: function ($e) use (&$events) { $events[] = $e; }));
+```
+
+`TestPrompt::make(?string $system = null, array $messages = [], array $tools = [], Options $options = new Options())`
+is a `Prompt` with a `Cancel` that is never set, for calling a `ModelMiddleware` directly:
+
+```php
+$model  = new FakeModel([new TextDelta('ok'), new Finish(FinishReason::Stop)]);
+$deltas = [...$compact->stream(TestPrompt::make('sys', $messages), fn (Prompt $p) => $model->stream($p))];
+assert($model->prompts[0]->messages !== $messages);   // what the middleware handed on
 ```

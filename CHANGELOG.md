@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.0.1-beta3
+
+Implements SPEC.md revision 3, from what the round-2 users needed.
+
+### Changed (breaking)
+
+- **A pause is a list of needs, each with an id.** `Need` is the new abstract base of `Approval` and
+  `Question`. `Call::needsInput(array $needs, mixed $state = null)` takes a non-empty list of them
+  (before: one `Approval`, or a list of `Question`s), so one call can ask for an approval and
+  questions at once, and a sub-agent's several pending calls no longer have to be flattened into
+  questions that lost the approvals' type and reasons.
+- **`Approval(string $id = 'approval', ?string $reason = null)`** (before `Approval(string $reason = '')`):
+  write `new Approval(reason: '...')`. The reason is null when not given.
+- **`Question(string $id, string $text, ?array $choices = null)`**: null means any answer (before an
+  empty array did); an empty list throws. The id `approval` is reserved for `Approval`, so
+  `Call::decision()` is never a question's answer.
+- **`Pending::$needs` is a `list<Need>`**, and `toArray()` writes it as
+  `[{"type": "approval", "id", "reason"}, {"type": "question", "id", "text", "choices"}]`.
+  `Pending::fromArray()` throws, naming the beta2 shape, on a single `{"type": ...}` object.
+- **`Answer(string $callId, array $answers)`** keyed by need id, a `Decision` or a value each (before
+  `Decision|array`); empty throws. `toArray()` keeps decisions and values apart:
+  `{"callId", "decisions": {id: {"allowed", "reason"}}, "values": {id: value}}`.
+- **`Call::answer(array $answers)`** keyed by need id (before `Decision|array`): a CLI writes
+  `$context->answer(['approval' => Decision::allow()])`.
+- **`Call::answers()` returns an array, empty until the host answered** (before null); it holds every
+  answer, decisions included. `Call::decision()` is `answers()['approval']`. The policy idiom
+  "unless the host answered" is `[] === $context->answers()`.
+- **A `Question` may be answered with `Decision::deny($reason)`**, declining it; the tool is called
+  again with the `Decision` among its answers. `Decision::allow()` on a question throws.
+- **The denial rule is now stated as a rule** (`Approval`'s docblock, the README): state means "call
+  me back with the answer, whatever it is". A call asked without state is not called again when any
+  of its approvals is denied, and the model gets `Denied: <reasons>` (joined with `; `); with state it
+  is called again. Unchanged from beta2 for a single approval.
+- **`ToolDecided` is emitted for the answer to the need `approval`** (`Call::decision()`), so for a
+  sub-agent's approval only the child's call emits it (with `parent` set), not also the parent's
+  call that forwarded it.
+- **`Agents\AgentTool` passes every need of every pending child call up with its type and reason**,
+  the id prefixed with the child's call id (`w1/approval`, `q1/colour`; nested agents prefix again),
+  even for a single child call. Before, one pending call passed up unchanged and several became
+  questions with choices allow/deny, so the reasons were lost and a denial reached the child as
+  "The host denied it". Now each answer is routed to its child call, and a denial keeps its reason.
+- **`Mcp\McpTool` asks a form without fields as an `Approval`** with the request key as id and the
+  message as reason (before a question with choices accept/decline), and sends `decline` for a form
+  whose approval or any question was answered with `Decision::deny()`. Questions for fields
+  without `enum` have `choices: null`.
+- **require-dev: `fiber-interop/phasync` and `fiber-interop/revolt` at `dev-main`** (with
+  `fiber-interop/api`), whose main branches allow `fiber-interop/scope ^0.5`; the suites run on
+  `phasync/phasync` 2.0.7 and `fiber-interop/scope` 0.5.0.
+
+### Added
+
+- Module `Harness\Compact`: `Compact`, a `ModelMiddleware` that keeps each step's prompt within a
+  token budget by replacing the oldest half of the messages with a summary from a side call, never
+  splitting a tool call from its result, reusing the summary while it fits; `Compact::approximate()`,
+  the default counter; `Compaction`, what `Compact::last()` reports. The constructor takes a PSR-3
+  logger (`log:`) and `?Closure $count = null` (PHP 8.2 cannot default a parameter to a closure).
+- Module `Harness\Policy`: `Policy`, a `ToolMiddleware` over `Rule::tool()`, `Rule::hints()` and
+  `Rule::when()` with a `Verdict` (`Allow`, `Deny`, `Ask`), and `Policy::describe()` for a system
+  prompt. `Rule::hints()` takes the verdict first (`Rule::hints(Verdict::Allow, readOnly: true)`):
+  PHP allows no positional argument after a named one. `Rule::when()` takes a text naming the rule.
+- `Testing\TestPrompt::make()`: a `Prompt` with a never-set `Cancel`, for testing a `ModelMiddleware`.
+- Examples `compact.php` and `policy.php`; `files.php` and `mcp.php` answer any need.
+- Docs: docs/compact.md, docs/policy.md; docs/mcp.md "Writing a server" (the JSON of
+  `input_required` and its retry, one round and two, `requestState` carrying earlier answers),
+  the hints derivation, images in results, `decline`; docs/transcript.md with both files in one
+  host; docs/testing.md `TestPrompt`; the README's events of nested runs and the `parent` check,
+  the inline answering loop, and cancellation latency in numbers.
+
 ## 0.0.1-beta2
 
 Implements SPEC.md revision 2, from what the five round-1 users needed.

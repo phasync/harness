@@ -38,6 +38,26 @@ foreach ($run->turn($message) as $event) {
 foreach ((new JsonlEvents($path))->replay() as $line => $event) { ... }
 ```
 
+## Both in one host
+
+A host that keeps the conversation and a log of every event, and resumes a pause in a later request:
+
+```php
+$log    = new JsonlTranscript("$dir/chat.jsonl");
+$events = new JsonlEvents("$dir/events.jsonl");
+$state  = \is_file("$dir/pending.json") ? \json_decode(\file_get_contents("$dir/pending.json"), true) : [];
+$run    = new Run($model, $tools, messages: $log->load(), pending: \array_map(Pending::fromArray(...), $state));
+
+foreach ($run->turn($input) as $event) {    // a user Message, or the Answers to $state
+    $events->write($event);                 // and render or forward it
+}
+$log->append($run->ended()->appended);
+\file_put_contents("$dir/pending.json", \json_encode(\array_map(fn (Pending $p) => $p->toArray(), $run->ended()->pending)));
+```
+
+`JsonlEvents` takes a path (or `php://stdout`). To stream to a browser, a Swerve route writes SSE
+itself: `"data: " . json_encode($event) . "\n\n"` per event, which `JsonlEvents` cannot frame.
+
 ## Writes
 
 Both open their file in append mode and write a whole line (or a whole `append()`) at once, so

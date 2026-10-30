@@ -80,6 +80,11 @@ added (`Harness\Transcript` keeps it in a file). To continue elsewhere, pass `me
 started get a "cancelled" result. The turn ends `Cancelled` without the partial assistant message:
 `Ended::$appended` never holds it. `cancel()` with no turn running does nothing.
 
+Latency: a turn waiting on the model ends within 250 ms of `cancel()` (the `StreamTransport` poll;
+at once when a delta arrives first). A turn in a tool call ends when the tool returns: within
+250 ms for `Shell` (which then kills the process group) and for `Mcp` over stdio, and for your own
+tools as soon as they check `Call::isCancelled()`.
+
 ### Tools
 
 `Tool::call(array $input, Call $call): Result`. A `ToolSpec`'s schema must have `"type": "object"`;
@@ -146,7 +151,7 @@ MessageEnded(id, message, usage, finish)                           InputRequeste
 {"type":"tool_call_ready","turn":1,"parent":null,"id":"call_2ce8","name":"remember","input":{"note":"Favourite colour: green"}}
 {"type":"tool_ended","turn":1,"parent":null,"id":"call_2ce8","outcome":{"content":[{"type":"text","text":"Saved"}],"value":null,"meta":[],"error":false}}
 {"type":"tool_ended","turn":1,"parent":null,"id":"call_9f1a","outcome":{"class":"RuntimeException","message":"disk full"}}
-{"type":"input_requested","turn":1,"parent":null,"pending":[{"call":{"type":"tool_call","id":"call_2ce8","name":"remember","input":{"note":"Favourite colour: green"}},"needs":{"type":"approval","reason":"Save a note"},"state":null}]}
+{"type":"input_requested","turn":1,"parent":null,"pending":[{"call":{"type":"tool_call","id":"call_2ce8","name":"remember","input":{"note":"Favourite colour: green"}},"needs":[{"type":"approval","id":"approval","reason":"Save a note"}],"state":null}]}
 {"type":"turn_ended","turn":1,"parent":null,"reason":"awaiting_input","usage":{"input":396,"output":59,"cacheRead":0,"cacheWrite":0},"error":null,"finish":"tool_calls"}
 ```
 
@@ -156,6 +161,12 @@ prompt, a tool writing a file) happens after the host handled that event, so the
 with the side effects. The consumer sets the pace: a slow SSE write slows the model read. Concurrent
 tool calls emit from their own fibers and wait their turn. Stopping the iteration cancels the turn.
 
+A nested run (`Agents\AgentTool`) emits the same event classes into the same stream, with `parent`
+set to the tool call it runs in. A renderer that reacts to turn boundaries (`TurnStarted`,
+`StepStarted`, `StepEnded`, `TurnEnded`, `InputRequested`) checks `null === $event->parent` first,
+or it renders a sub-agent's turn as the host's and a nested pause twice: the child's
+`InputRequested`, then the parent's, which carries the same needs.
+
 ## Middleware
 
 The only interception mechanism. A class implements `ModelMiddleware`, `ToolMiddleware` or both;
@@ -163,13 +174,13 @@ the array order is outermost first.
 
 ```php
 // Policy: anything not read-only needs approval, unless the host answered this call already.
+// (Harness\Policy does this from rules: docs/policy.md.)
 final class ApproveWrites implements ToolMiddleware
 {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {
-        if (null === $context->decision() && null === $context->answers()
-            && null !== $context->spec && !$context->spec->hints->readOnly) {
-            return $context->needsInput(new Approval("{$call->name} changes files"));
+        if ([] === $context->answers() && null !== $context->spec && !$context->spec->hints->readOnly) {
+            return $context->needsInput([new Approval(reason: "{$call->name} changes files")]);
         }
 
         return $next($call, $context);
@@ -179,7 +190,8 @@ final class ApproveWrites implements ToolMiddleware
 
 Deny by returning `new Result([...], error: true)`; truncate by rewriting the `Result`; compact by
 rewriting the `Prompt` (`ModelMiddleware::stream($prompt, $next)`, passing `$prompt->cancel` on to
-the new one); trace by wrapping both. To observe without altering, read the events.
+the new one; `Harness\Compact` does it); trace by wrapping both. To observe without altering, read
+the events.
 
 Retry by wrapping `$next`, but only before the first delta went on: the run's accumulator folds each
 delta as it is yielded, so a stream restarted after that would add its text a second time. Past the
@@ -212,23 +224,31 @@ final class RetryModel implements ModelMiddleware
 
 ## Pause and resume
 
-A turn that ends `AwaitingInput` lists `Pending(call, needs, state)`: `needs` is an `Approval` or a
-list of `Question`s, `state` is the tool's own JSON-safe data. The next turn takes one
-`Answer(callId, Decision::allow() | Decision::deny($reason) | ['questionId' => answer])` per pending
-call: approved calls run (`$call->decision()` is set), denied ones go to the model as error results
-(`Denied: <reason>`), a tool that asked questions is called again with `$call->answers()`. `state()`
-is the state it passed. A tool that asked for approval *with* a state is called again on a denial
-too and handles it itself (`Agents\AgentTool` does, to tell its sub-agent).
+A tool (or a tool middleware) that needs the host returns `$call->needsInput($needs, $state)`. The
+turn ends `AwaitingInput` once the step's other calls are done, listing `Pending(call, needs, state)`:
+`needs` is a list of `Approval(id = 'approval', reason)` and `Question(id, text, choices)`, each
+with an id unique within the call; `state` is the tool's own JSON-safe data. The next turn takes one
+`Answer(callId, [needId => answer])` per pending call: a `Decision::allow()` or
+`Decision::deny($reason)` for each approval, and for each question a value (one of `choices` when
+given) or `Decision::deny($reason)` to decline it. The call is made again with `$call->answers()`
+(`$call->decision()` is the answer to `approval`) and `$call->state()`.
 
-`Pending::toArray()`, with an approval and with questions:
+**Who handles a denial.** State means "call me back with the answer, whatever it is". A call that
+asked *with* a state is always made again, a denial included, and handles it itself
+(`Agents\AgentTool` tells its sub-agent, `Mcp` declines the form). A call that asked *without* state
+is not made again when one of its approvals is denied: the model gets the error result
+`Denied: <reason>`. A declined question always reaches the tool.
+
+`Pending::toArray()`, one approval, then two questions with state:
 
 ```json
 {"call":{"type":"tool_call","id":"call_1","name":"write_file","input":{"path":"a.txt","content":"..."}},
- "needs":{"type":"approval","reason":"write_file changes files"},
+ "needs":[{"type":"approval","id":"approval","reason":"write_file changes files"}],
  "state":null}
-{"call":{"type":"tool_call","id":"call_2","name":"ask_user","input":{"question":"Which colour?"}},
- "needs":{"type":"questions","questions":[{"id":"colour","text":"Which colour?","choices":["red","blue"]}]},
- "state":{"step":2}}
+{"call":{"type":"tool_call","id":"call_2","name":"deploy","input":{}},
+ "needs":[{"type":"question","id":"env","text":"Where to?","choices":["staging","prod"]},
+          {"type":"question","id":"note","text":"Release note?","choices":null}],
+ "state":{"build":42}}
 ```
 
 Everything is plain data, so a web request can end the turn and another process resume it:
@@ -242,20 +262,53 @@ $store = ['messages' => array_map(fn ($m) => $m->toArray(), $run->messages()),
 $run = new Run($model, $tools, middleware: [new ApproveWrites()],
     messages: array_map(Message::fromArray(...), $store['messages']),
     pending: array_map(Pending::fromArray(...), $store['pending']));
-foreach ($run->turn([new Answer($callId, Decision::allow())]) as $event) { ... }
+foreach ($run->turn([new Answer($callId, ['approval' => Decision::allow()])]) as $event) { ... }
 ```
 
 [`examples/web.php`](examples/web.php) is this host, one request per invocation.
 
-The rule for approvals: gate in one `ToolMiddleware`, and reach for `needsInput()` only when the
-turn must end. A host that can answer at once (a CLI) asks in the middleware itself, then calls
-`$next()` or returns an error `Result` ([`examples/shell.php`](examples/shell.php)); a web host,
-which answers in a later request, returns `needsInput()`. [`examples/files.php`](examples/files.php)
-shows a policy shared by both: the terminal middleware outside it answers the pending call at once
-with `$context->answer(...)` and calls `$next()` again.
+A host that can answer at once (a CLI) does not end the turn: a middleware placed before (outside)
+the one that asks calls `$next`, and while the call is pending asks the user, answers in place and
+calls `$next` again. The same loop answers a paused sub-agent inline, round after round:
 
-A sub-agent that pauses pauses its parent: the parent's call carries the sub-agent's approval or
-questions, and the answer goes back down ([docs/agents.md](docs/agents.md)).
+```php
+final class Terminal implements ToolMiddleware
+{
+    public function call(ToolCall $call, Call $context, Closure $next): Result
+    {
+        $result = $next($call, $context);
+        while (null !== ($pending = $context->pending())) {
+            $answers = [];
+            $denied  = false;
+            foreach ($pending->needs as $need) {
+                if ($need instanceof Approval) {
+                    $answers[$need->id] = ask("Allow {$call->name}? {$need->reason}") ? Decision::allow() : Decision::deny('the user said no');
+                    $denied             = $denied || !$answers[$need->id]->allowed;
+                } else {
+                    $answers[$need->id] = ask($need->text);   // or Decision::deny() to decline
+                }
+            }
+            $context->answer($answers);
+            // The rule the run applies: without state, a denied approval is not called again.
+            if ($denied && null === $pending->state) {
+                return new Result([new Text('Denied: the user said no')], error: true);
+            }
+            $result = $next($call, $context);
+        }
+
+        return $result;
+    }
+}
+$run = new Run($model, $tools, middleware: [new Terminal(), new ApproveWrites()]);
+```
+
+A host that only ever answers on the terminal can instead ask in a single middleware and call
+`$next()` or return an error `Result` ([`examples/shell.php`](examples/shell.php)).
+[`examples/files.php`](examples/files.php) and [`examples/policy.php`](examples/policy.php) use the loop.
+
+A sub-agent that pauses pauses its parent: the parent's call carries every need of the sub-agent's
+pending calls, ids prefixed with the child call id (`w1/approval`), and the answers go back down
+([docs/agents.md](docs/agents.md)).
 
 ## Modules
 
@@ -271,7 +324,9 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Agents` | `AgentTool`: a sub-agent as a tool | [docs/agents.md](docs/agents.md) |
 | `Harness\Mcp` | `McpServer`: an MCP server's tools, over stdio or Streamable HTTP | [docs/mcp.md](docs/mcp.md) |
 | `Harness\Transcript` | `JsonlTranscript`, `JsonlEvents`: the conversation and the events in files | [docs/transcript.md](docs/transcript.md) |
-| `Harness\Testing` | `FakeModel`, `FakeTransport`, `TestCall` | [docs/testing.md](docs/testing.md) |
+| `Harness\Compact` | `Compact`: keeps the prompt within a token budget with a summary | [docs/compact.md](docs/compact.md) |
+| `Harness\Policy` | `Policy`, `Rule`, `Verdict`: allow, deny or ask by tool name and hints | [docs/policy.md](docs/policy.md) |
+| `Harness\Testing` | `FakeModel`, `FakeTransport`, `TestCall`, `TestPrompt` | [docs/testing.md](docs/testing.md) |
 
 `Options::$provider` is keyed by the provider module's lowercase name (`openai`, `anthropic`); a
 third-party provider documents its own key. `Sse` parses `text/event-stream` only; a backend that
@@ -289,6 +344,8 @@ php examples/shell.php ./project "task"     # a shell; every command needs appro
 php examples/subagent.php ./project "question"   # delegates reading to sub-agents, rendered per line
 php examples/mcp.php "task"                 # a chat with an MCP server's tools (the test server by default)
 php examples/web.php state.json say "hi"    # one turn per request, events as JSON lines, state in a file
+php examples/compact.php [budget]           # a session that compacts to stay within a token budget
+php examples/policy.php ./project "task"    # the file tools under a Policy: reads run, writes ask
 ```
 
 ## Tests
