@@ -237,7 +237,8 @@ given) or `Decision::deny($reason)` to decline it. The call is made again with `
 asked *with* a state is always made again, a denial included, and handles it itself
 (`Agents\AgentTool` tells its sub-agent, `Mcp` declines the form). A call that asked *without* state
 is not made again when one of its approvals is denied: the model gets the error result
-`Denied: <reason>`. A declined question always reaches the tool.
+`Denied: <reason>`. A declined question reaches the tool, unless an approval of the same call
+was denied too.
 
 `Pending::toArray()`, one approval, then two questions with state:
 
