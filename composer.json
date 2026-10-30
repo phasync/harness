@@ -5,7 +5,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.2",
-        "fiber-interop/api": "^0.3",
+        "fiber-interop/api": "dev-main",
         "psr/log": "^1 || ^2 || ^3"
     },
     "require-dev": {
