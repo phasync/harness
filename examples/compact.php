@@ -34,7 +34,7 @@ use Psr\Log\AbstractLogger;
 fiber\setup(new FiberInterop\Phasync\Adapter());
 
 $url    = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_OPENAI_URL (and HARNESS_MODEL)\n");
-$budget = (int) ($argv[1] ?? 2000);
+$budget = (int) ($argv[1] ?? 1500);
 $model  = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default');
 
 // A catalogue with long entries, so a few lookups fill the budget.
@@ -92,7 +92,7 @@ fiber\run(function () use ($run, $compact, $questions) {
         $last = $compact->last();
         echo "\e[2m" . (null === $last
             ? 'last step: no compaction'
-            : "last step: {$last->removed} messages summarized" . ($last->reused ? ' (summary reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2))
+            : "last step: {$last->removed} messages summarized" . ($last->reused ? ' (summary reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2) . ', offset ' . \round($last->offset))
             . ', ' . \count($run->messages()) . " messages in the run\e[0m\n";
     }
 });

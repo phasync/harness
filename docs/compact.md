@@ -59,20 +59,25 @@ reasoning, tool names and inputs, tool results and tool specs, plus 1000 per med
 and 10 per tool spec. Another counter is a closure:
 `new Compact($model, 100000, fn (Prompt $p): int => $tokenizer->count($p))`.
 
-Compact calibrates whichever counter it has. After each step it passes on, it divides the input
-tokens the provider reported for that step (its `Usage`) by its own count of the prompt it handed
-on, and multiplies later counts by that ratio; the last ratio wins, and a step that reports no input
-tokens leaves it. Bytes / 4 undercounts a chat template (by about half on Qwen behind llama.cpp, more
-with many tool specs); after one step the count is the provider's. The budget is in the provider's
-tokens: set it below the context window by the output tokens a step needs.
+Compact calibrates whichever counter it has, from the input tokens the provider reports for each
+step it passes on (its `Usage`; a report of zero is ignored). A chat template adds a fixed preamble
+(Qwen's tool instructions are some 270 tokens behind llama.cpp) and wraps every message, so the
+calibrated count is `ratio * count + offset`, the line through the smallest and the largest prompt
+reported, once the largest counts at least twice the smallest (two close prompts give a slope the
+next large tool result would multiply). Until then the ratio is 1 and the offset the largest
+prompt's difference. A ratio alone would have scaled the preamble with the prompt: a 4x ratio from
+a first prompt of 86 counted tokens, 354 reported. The budget is in the provider's tokens: set it below the context window by
+the output tokens a step needs.
 
 ## The budget floor
 
 The budget must leave room above the fixed part of the prompt (system text, tool specs, the first
 `$keepFirst` messages) for a summary and the recent half. Compact counts the fixed part at first use
-and requires it to be at most half the budget, compared with the calibrated count; otherwise the
-step throws a `\LogicException` naming the fixed size and the budget. A budget that passes at first
-use can fail on a later step, once the provider's report shows the counter undercounted.
+and requires it to be at most half the budget, compared with the calibrated count once there is a
+line (one report's difference, from a long restored conversation, says little about the
+fixed part); otherwise the step throws a `\LogicException` naming the fixed size and the budget. A
+budget that passes at first use can fail on a later step, once the provider's reports show the
+counter undercounted.
 
 ## One instance, several conversations
 
@@ -82,14 +87,14 @@ at once: the forks `Agents\AgentTool` runs share the template's middleware, and 
 own summary, reused on its next step, not recomputed in turn with the others. What it costs: beyond
 8 conversations compacting at once, the oldest summary is evicted and recomputed (one side call)
 when its conversation needs it again; `last()` is the instance's latest step, of any conversation;
-the ratio and the floor are the instance's, so share an instance only among conversations with the
+the calibration and the floor are the instance's, so share an instance only among conversations with the
 same model and fixed part. A host that wants `last()` per child gives each template its own Compact.
 
 ## Seeing it
 
 The core has no event for compaction. Each new summary is logged at `info` (messages removed,
-summary size, budget, counter ratio), and `last(): ?Compaction` tells what the last step did:
+summary size, budget, counter ratio and offset), and `last(): ?Compaction` tells what the last step did:
 `removed`, `kept`, `summary`, `before` and `after` (calibrated tokens), `reused` (an earlier
 summary served), `previousSummaryBytes` (the summary this one replaced, null for the first) and
-`ratio`. It is null when the step's prompt went on unchanged.
+`ratio` and `offset` (the calibration). It is null when the step's prompt went on unchanged.
 [`examples/compact.php`](../examples/compact.php) prints both.

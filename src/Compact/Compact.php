@@ -45,13 +45,16 @@ use Psr\Log\NullLogger;
  * back empty, or shorter than a quarter of the summary it replaces, is asked for once more; a
  * second such summary fails the step with a `\RuntimeException` naming both sizes.
  *
- * The count is `$count($prompt)` times a ratio Compact calibrates itself: after each step it passes
- * on, the provider's reported input tokens divided by `$count` of that prompt (the last ratio wins;
- * a report of zero is ignored), so an approximation that undercounts a chat template is corrected
- * after one step. The fixed part of the prompt (system text, tool specs, the first `$keepFirst`
- * messages), counted at first use, must count at most half the budget, by the calibrated count, or
- * the step throws a `\LogicException`: a budget that passes at first use fails on a later step
- * when the provider's report shows the counter undercounted.
+ * The count is `$count($prompt)` calibrated by the provider's reported input tokens of the prompts
+ * Compact passed on (a report of zero is ignored): `ratio * $count + offset`, the line through the
+ * smallest and the largest prompt reported, once the largest counts at least twice the smallest;
+ * until then the ratio is 1 and the offset the largest one's difference. A chat template adds a
+ * fixed preamble (a Qwen template's tool instructions are some 270 tokens) and wraps every
+ * message, so the offset holds the one and the ratio the other. The fixed part of the prompt
+ * (system text, tool specs, the first `$keepFirst` messages), counted at first use, must count at
+ * most half the budget, by the calibrated count once there is a line, or the step throws a
+ * `\LogicException`: a budget that passes at first use fails on a later step when the provider's
+ * reports show the counter undercounted.
  */
 final class Compact implements ModelMiddleware
 {
@@ -79,6 +82,13 @@ final class Compact implements ModelMiddleware
      */
     private array $cache      = [];
     private float $ratio      = 1.0;
+    private float $offset     = 0.0;
+    /** @var array{0: int, 1: int}|null the smallest prompt reported: `$count` of it and the report */
+    private ?array $low       = null;
+    /** @var array{0: int, 1: int}|null the largest prompt reported */
+    private ?array $high      = null;
+    /** Whether ratio and offset are the line through low and high, not high's difference alone. */
+    private bool $fitted      = false;
     /** The fixed part of the prompt, by `$count`, at first use. */
     private ?int $fixed       = null;
     private ?Compaction $last = null;
@@ -137,20 +147,34 @@ final class Compact implements ModelMiddleware
             }
             yield $delta;
         }
-        if ($reported > 0 && $counted > 0) {
-            $this->ratio = $reported / $counted;
+        if ($reported > 0) {
+            if (null === $this->low || $counted <= $this->low[0]) {
+                $this->low = [$counted, $reported];
+            }
+            if (null === $this->high || $counted >= $this->high[0]) {
+                $this->high = [$counted, $reported];
+            }
+            [[$c0, $r0], [$c1, $r1]] = [$this->low, $this->high];
+            // Two close prompts give a slope that the next large tool result would multiply.
+            $this->fitted = $c1 > $c0 && $c1 >= 2 * $c0;
+            $this->ratio  = $this->fitted ? ($r1 - $r0) / ($c1 - $c0) : 1.0;
+            $this->offset = $r1 - $this->ratio * $c1;
         }
     }
 
     /** @return array{0: Prompt, 1: int} the prompt to hand on and `$count` of it */
     private function compact(Prompt $prompt): array
     {
-        $ratio  = $this->ratio;   // another conversation's step may change it while this one waits
-        $tokens = fn (int $counted): int => (int) \ceil($counted * $ratio);
-        // Counted at first use, compared calibrated: a provider's report can show it too large later.
+        // Another conversation's step may change the calibration while this one waits.
+        [$ratio, $constant, $fitted] = [$this->ratio, $this->offset, $this->fitted];
+        $tokens                      = fn (int $counted): int => (int) \ceil($ratio * $counted + $constant);
+        $calibration                 = 'counter ratio ' . \round($ratio, 3) . ', offset ' . \round($constant);
+        // Counted at first use, compared calibrated once there is a line: one report's difference,
+        // taken from a long restored conversation, says little about the fixed part.
         $this->fixed ??= ($this->count)(self::with($prompt, \array_slice($prompt->messages, 0, $this->keepFirst)));
-        if (2 * $tokens($this->fixed) > $this->budgetTokens) {
-            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($tokens($this->fixed)) . ' tokens' . (1.0 === $ratio ? '' : ' (counter ratio ' . \round($ratio, 3) . ')') . ', over half the budget of ' . \number_format($this->budgetTokens) . ': the budget must leave room above it for a summary and the recent half. Raise budgetTokens to ' . \number_format(4 * $tokens($this->fixed)) . ' or more, or shorten the system prompt and tool descriptions');
+        $fixed = $fitted ? $tokens($this->fixed) : $this->fixed;
+        if (2 * $fixed > $this->budgetTokens) {
+            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens' . ($fitted ? " ($calibration)" : '') . ', over half the budget of ' . \number_format($this->budgetTokens) . ': the budget must leave room above it for a summary and the recent half. Raise budgetTokens to ' . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
         }
         $counted = ($this->count)($prompt);
         $before  = $tokens($counted);
@@ -215,7 +239,7 @@ final class Compact implements ModelMiddleware
             $offset = $known - \count($entry['replacement']);
             $floor  = \count($entry['replacement']);
             ++$rounds;
-            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens, counter ratio {ratio})', ['removed' => $entry['removed'], 'bytes' => \strlen($summary), 'budget' => $this->budgetTokens, 'ratio' => \round($ratio, 3)]);
+            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens, {calibration})', ['removed' => $entry['removed'], 'bytes' => \strlen($summary), 'budget' => $this->budgetTokens, 'calibration' => $calibration]);
         }
         if (null === $entry || $view === $messages) {
             $this->last = null;
@@ -223,7 +247,7 @@ final class Compact implements ModelMiddleware
             return [$prompt, $counted];
         }
         $this->remember($entry);
-        $this->last = new Compaction($entry['removed'], \count($messages) - \count($entry['summarized']), $entry['summary'], $before, $after, 0 === $rounds, $entry['previous'], $ratio);
+        $this->last = new Compaction($entry['removed'], \count($messages) - \count($entry['summarized']), $entry['summary'], $before, $after, 0 === $rounds, $entry['previous'], $ratio, $constant);
 
         return [self::with($prompt, $view), $counted];
     }

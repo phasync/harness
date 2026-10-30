@@ -271,38 +271,81 @@ it('throws at first use when the fixed part of the prompt is over half the budge
     expect(fn () => step($tight, agentic(5), 'sys', [$spec]))
         ->toThrow(LogicException::class, 'Compact: the fixed part of the prompt (system text, tool specs and the first 1 messages) counts 162 tokens, over half the budget of 300: the budget must leave room above it for a summary and the recent half. Raise budgetTokens to 648 or more');
 
-    // Compared calibrated: once the provider reported twice the count, 324 is over half of 400.
+    // Compared calibrated once there is a line: twice the count, 324 is over half of 400. One report
+    // is not enough: the difference of a long prompt may belong to the rest of it.
+    $larger = [user('the task'), assistant(new Text('Which file?')), user(\str_repeat('a.txt ', 120))];
+    step($compact, $larger, 'sys', [$spec], reported: 2 * Compact::approximate(TestPrompt::make('sys', $larger, [$spec])));
     step($compact, agentic(0), 'sys', [$spec], reported: 2 * Compact::approximate(TestPrompt::make('sys', agentic(0), [$spec])));
     expect(fn () => step($compact, agentic(0), 'sys', [$spec]))
-        ->toThrow(LogicException::class, 'counts 324 tokens (counter ratio 2), over half the budget of 400');
+        ->toThrow(LogicException::class, 'counts 324 tokens (counter ratio 2, offset 0), over half the budget of 400');
 });
 
-it('calibrates its count by the input tokens the provider reports, and logs the ratio', function () {
+it('calibrates its count by the input tokens the provider reports, and logs the calibration', function () {
     $log       = lines();
     $summaries = new Summaries();
     $compact   = new Compact($summaries, 2000, bytesOf(...), log: $log);
-    $messages  = agentic(3);                        // about 1.3 KB: within the budget by the counter
-    $first     = step($compact, $messages, reported: 2 * bytesOf(TestPrompt::make('sys', $messages)));
-    expect($first->messages)->toBe($messages)
-        ->and($compact->last())->toBeNull();
+    $first     = [user('the task')];
+    step($compact, $first, reported: 2 * bytesOf(TestPrompt::make('sys', $first)));
+    expect($compact->last())->toBeNull();
 
-    // Twice the count is over the budget: the next step compacts, though the counter alone says it fits.
+    // A second report, of a larger prompt, also twice its count: the ratio is 2. Twice the count of
+    // the next prompt is over the budget, so it compacts, though the counter alone says it fits.
+    $messages = agentic(3);
+    step($compact, $messages, reported: 2 * bytesOf(TestPrompt::make('sys', $messages)));
     $messages[] = assistant(new Text('short'));
     $messages[] = user('more');
     expect(bytesOf(TestPrompt::make('sys', $messages)))->toBeLessThan(2000);
     step($compact, $messages);
     expect($summaries->prompts)->toHaveCount(1)
         ->and($compact->last()->ratio)->toBe(2.0)
+        ->and($compact->last()->offset)->toBe(0.0)
         ->and($compact->last()->before)->toBe(2 * bytesOf(TestPrompt::make('sys', $messages)))
         ->and($compact->last()->after)->toBeLessThanOrEqual(2000)
-        ->and($log->lines[0][1])->toEndWith('(budget 2000 tokens, counter ratio 2)');
+        ->and($log->lines[0][1])->toEndWith('(budget 2000 tokens, counter ratio 2, offset 0)');
 
-    // A step without a report (the one above) leaves the ratio; a new report replaces it: the
-    // provider reports 1 token for the compacted prompt, so the whole conversation fits again.
+    // A step without a report (the one above) leaves the line, and so does a report of a prompt
+    // between the smallest and the largest reported.
     step($compact, $messages, reported: 1);
-    expect($compact->last()->ratio)->toBe(2.0);
     step($compact, $messages);
-    expect($compact->last())->toBeNull();
+    expect($compact->last()->ratio)->toBe(2.0)
+        ->and($compact->last()->offset)->toBe(0.0);
+});
+
+it('takes a slope only from prompts far enough apart: until then, the offset alone', function () {
+    // Two close prompts, the second reporting 50 tokens more than the first: a line through them
+    // would have a ratio of 3 and count the next, larger prompt three times over.
+    $compact = new Compact(new Summaries(), 2000, bytesOf(...));
+    $a       = agentic(1);
+    $b       = [...$a, assistant(new Text('ok')), user('go on')];
+    $ca      = bytesOf(TestPrompt::make('sys', $a));
+    $cb      = bytesOf(TestPrompt::make('sys', $b));
+    step($compact, $a, reported: $ca + 300);
+    step($compact, $b, reported: $cb + 300 + 2 * ($cb - $ca));
+    $messages = agentic(5);
+    step($compact, $messages);
+    expect($compact->last()->ratio)->toBe(1.0)
+        ->and($compact->last()->offset)->toBe((float) (300 + 2 * ($cb - $ca)))
+        ->and($compact->last()->before)->toBe(bytesOf(TestPrompt::make('sys', $messages)) + 300 + 2 * ($cb - $ca));
+});
+
+it('takes a fixed preamble in the reports as an offset, not a ratio', function () {
+    // The template adds 300 tokens to every prompt: a small first prompt reports several times its
+    // count, and a ratio from it would count the next, larger prompt far over the budget.
+    $summaries = new Summaries();
+    $compact   = new Compact($summaries, 2100, bytesOf(...));
+    $first     = [user('the task')];
+    step($compact, $first, reported: bytesOf(TestPrompt::make('sys', $first)) + 300);
+    $messages = agentic(3);                         // about 1.7 KB: 2.0 K with the preamble
+    expect(bytesOf(TestPrompt::make('sys', $messages)) + 300)->toBeLessThan(2100);
+    expect(step($compact, $messages, reported: bytesOf(TestPrompt::make('sys', $messages)) + 300)->messages)->toBe($messages)
+        ->and($summaries->prompts)->toBe([]);
+
+    // Two reports: the line through them has ratio 1 and offset 300, and the next step uses it.
+    $messages = agentic(4);
+    step($compact, $messages);
+    expect($compact->last()->ratio)->toBe(1.0)
+        ->and($compact->last()->offset)->toBe(300.0)
+        ->and($compact->last()->before)->toBe(bytesOf(TestPrompt::make('sys', $messages)) + 300);
 });
 
 it('serves several conversations from one instance, each its own summary, without recomputing', function () {

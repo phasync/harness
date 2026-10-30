@@ -32,10 +32,19 @@ message in the accumulator.
   first `keepFirst` messages), counted at first use, must count at most half the budget, compared
   with the calibrated count; otherwise the step throws a `\LogicException` naming both and the
   budget to set. Beta3 ran a budget the fixed part nearly filled by summarizing every step.
-- **`Compact` calibrates its count**: each count is multiplied by the ratio of the provider's
-  reported input tokens to Compact's own count of the prompt it handed on (the last ratio wins; a
-  report of zero is ignored). `Compaction::$before`/`$after` and the budget are in calibrated
-  tokens. Bytes / 4 undercounted a Qwen template by half; after one step it no longer does.
+- **`Compact` calibrates its count** from the input tokens the provider reports for the prompts it
+  handed on (a report of zero is ignored): `ratio * count + offset`, the line through the smallest
+  and the largest prompt reported, once the largest counts at least twice the smallest; until then
+  ratio 1 and the largest one's difference as the offset. `Compaction::$before`/`$after` and the
+  budget are in calibrated tokens. Bytes / 4 undercounted a Qwen template by half. SPEC r4 asked
+  for a ratio alone (the last one wins); live on qwen3.8-flash-next, a first prompt of 86 counted
+  tokens reported 354 (the template's tool preamble), so the ratio of 4.1 counted the next prompt
+  as 3,063 tokens when it was 1,058, and compacted at half the budget. The line predicts the
+  compacted prompt of `examples/compact.php` at 1,284 tokens, reported 1,285. A line through two
+  close prompts (one `list_dir` step apart) had a ratio of 1.76 and overcounted the next file read
+  by a quarter, hence the span it waits for. The budget floor compares calibrated once there is a
+  line: one report's difference, from a long restored conversation, says little about the fixed
+  part.
 - **`Compact` gives the summarizer the kept first messages as context** ("the start of the
   conversation, which the agent keeps in full"), before the part to summarize. Live, the summary
   of a part that began after the user's question reported the task as unknown and the remaining
@@ -47,8 +56,9 @@ message in the accumulator.
 
 ### Added
 
-- `Compaction::$previousSummaryBytes` (the summary this one replaced, null for the first) and
-  `Compaction::$ratio` (the counter's calibration); the info log line gives the ratio.
+- `Compaction::$previousSummaryBytes` (the summary this one replaced, null for the first),
+  `Compaction::$ratio` and `Compaction::$offset` (the counter's calibration); the info log line
+  gives both.
 - `Compact` keeps the last 8 summaries, each under the messages it summarized, so one instance
   shared by forked sub-agents serves each conversation its own summary, concurrent ones included,
   without recomputing them in turns (beta3 remembered one, so two children replaced each other's).
@@ -70,7 +80,17 @@ message in the accumulator.
   array it sits in, Policy with `AgentTool`, the hints derivation, `Compact` per child.
   docs/mcp.md: the JSON of a declined final round.
 - `examples/policy.php` and `examples/compact.php` check `$event->parent` in their renderers;
-  `compact.php` turns the summarizer's thinking off with `summarizerOptions`.
+  `compact.php` turns the summarizer's thinking off with `summarizerOptions`, and its default
+  budget is 1500 (calibrated, the session's prompts stay under 2000 and never compacted); it
+  prints the calibration's offset beside the ratio.
+- README: `turn` counts the turns of one `Run` object; a run restored from saved messages starts
+  again at 1.
+
+### Tests
+
+- require-dev allows `pestphp/pest` ^5 (PHPUnit 13).
+- The live file-tools test reads a ticket number, not a password: qwen3.8-flash-next declined to
+  repeat a password it had read.
 
 ## 0.0.1-beta3
 

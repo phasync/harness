@@ -141,8 +141,9 @@ final class Unlockable implements ToolSource
 
 Each item goes `started → delta* → ended`; every event has the `turn` number and the `parent` tool
 call id when its run is nested (null at the top). Every constructor takes these two first
-(`new StepEnded(turn, parent, n)`); the list leaves them out. `turn` counts the run's turns, and a
-resume (a turn of `Answer`s) is a turn too. `toArray()` and `json_encode()` give `type` plus the
+(`new StepEnded(turn, parent, n)`); the list leaves them out. `turn` counts the turns of this `Run`
+object, and a resume (a turn of `Answer`s) is a turn too; a run restored from saved messages starts
+again at 1. `toArray()` and `json_encode()` give `type` plus the
 fields, so an SSE route writes one line per event; `Events::fromArray()` rebuilds the typed event.
 
 ```
