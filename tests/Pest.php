@@ -83,6 +83,7 @@ function callFor(string $id = 'call_1', array &$events = []): Harness\Call
         $id,
         new Run(new Harness\Testing\FakeModel(), new Harness\Tools()),
         null,
+        null,
         new Harness\Part\ToolCall($id, 'test', []),
         1,
         null,

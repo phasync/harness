@@ -9,7 +9,8 @@ use Harness\Part\ToolCall;
 
 /**
  * The context of one tool call, always the tool's second parameter: the call `id`, the `run` it
- * belongs to and the host's `context` object (from `Run`). A tool reports progress, checks for
+ * belongs to, the host's `context` object (from `Run`) and the `spec` of the tool called (null when
+ * the model named no such tool), whose hints policy middleware reads. A tool reports progress, checks for
  * cancellation, and may end the turn awaiting the host with `needsInput()`. On resume the same call
  * is made again with `decision()` (after an Approval) or `answers()` and `state()` (after questions).
  */
@@ -27,6 +28,7 @@ final class Call
         public readonly string $id,
         public readonly Run $run,
         public readonly mixed $context,
+        public readonly ?ToolSpec $spec,
         private readonly ToolCall $toolCall,
         private readonly int $turn,
         private readonly ?string $parent,

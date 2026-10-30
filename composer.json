@@ -32,5 +32,16 @@
         "sort-packages": true
     },
     "minimum-stability": "dev",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "scripts": {
+        "test": [
+            "HARNESS_ADAPTER=phasync pest --exclude-group live",
+            "HARNESS_ADAPTER=revolt pest --exclude-group live"
+        ],
+        "test:live": "pest --group live",
+        "cs": "php-cs-fixer fix"
+    },
+    "suggest": {
+        "fiber-interop/phasync": "a fiber-interop adapter (or fiber-interop/revolt, /amp, /react)"
+    }
 }

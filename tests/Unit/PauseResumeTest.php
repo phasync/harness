@@ -28,7 +28,7 @@ function approvals(): ToolMiddleware
     return new class implements ToolMiddleware {
         public function call(ToolCall $call, Call $context, Closure $next): Result
         {
-            if (null === $context->decision() && !\in_array($call->name, ['read'], true)) {
+            if (null === $context->decision() && !$context->spec->hints->readOnly) {
                 return $context->needsInput(new Approval("{$call->name} changes files"));
             }
 

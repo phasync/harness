@@ -565,6 +565,7 @@ final class Run
             $call->id,
             $this,
             $this->context,
+            ($this->stepTools[$call->name] ?? null)?->spec(),
             $call,
             $turn,
             $parent,
