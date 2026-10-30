@@ -34,7 +34,7 @@ use Psr\Log\AbstractLogger;
 fiber\setup(new FiberInterop\Phasync\Adapter());
 
 $url    = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_OPENAI_URL (and HARNESS_MODEL)\n");
-$budget = (int) ($argv[1] ?? 700);
+$budget = (int) ($argv[1] ?? 2000);
 $model  = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default');
 
 // A catalogue with long entries, so a few lookups fill the budget.
@@ -58,7 +58,12 @@ $log = new class extends AbstractLogger {
         echo "\n\e[35m[$level] $text\e[0m\n";
     }
 };
-$compact = new Compact($model, $budget, log: $log);
+// The side call gets its own options: llama.cpp and vLLM turn a thinking model's reasoning off with
+// chat_template_kwargs, so its output tokens go to the summary (drop it for a backend without it).
+$compact = new Compact($model, $budget, log: $log, summarizerOptions: new Options(
+    maxOutputTokens: 1024,
+    provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]],
+));
 $run     = new Run(
     $model,
     new Tools($lookup),
@@ -76,17 +81,18 @@ fiber\run(function () use ($run, $compact, $questions) {
     foreach ($questions as $q) {
         echo "\n\e[1m> $q\e[0m\n";
         foreach ($run->turn(new Message(Role::User, [new Text($q)])) as $e) {
+            // A sub-agent's events carry its call id in `parent`: only the host's own turn ends the line.
             match (true) {
-                $e instanceof Event\TextDelta     => print ($e->text),
-                $e instanceof Event\ToolCallReady => print ("\e[36m→ {$e->name} " . \json_encode($e->input) . "\e[0m\n"),
-                $e instanceof Event\TurnEnded     => print ("\n\e[2m[{$e->reason->value}, {$e->usage->input} in, {$e->usage->output} out]\e[0m\n"),
-                default                           => null,
+                $e instanceof Event\TextDelta                        => print ($e->text),
+                $e instanceof Event\ToolCallReady                    => print ("\e[36m→ {$e->name} " . \json_encode($e->input) . "\e[0m\n"),
+                $e instanceof Event\TurnEnded && null === $e->parent => print ("\n\e[2m[{$e->reason->value}, {$e->usage->input} in, {$e->usage->output} out]\e[0m\n"),
+                default                                              => null,
             };
         }
         $last = $compact->last();
         echo "\e[2m" . (null === $last
             ? 'last step: no compaction'
-            : "last step: {$last->removed} messages summarized" . ($last->reused ? ' (summary reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens")
+            : "last step: {$last->removed} messages summarized" . ($last->reused ? ' (summary reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2))
             . ', ' . \count($run->messages()) . " messages in the run\e[0m\n";
     }
 });

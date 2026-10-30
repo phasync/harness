@@ -85,14 +85,15 @@ $run = new Run(
 
 fiber\run(function () use ($run, $task) {
     foreach ($run->turn(new Message(Role::User, [new Text($task)])) as $e) {
+        // A sub-agent's events carry its call id in `parent`: only the host's own turn ends the line.
         match (true) {
             $e instanceof Event\TextDelta     => print ($e->text),
             $e instanceof Event\ToolCallReady => print ("\n\e[36m→ {$e->name} " . \json_encode($e->input, \JSON_UNESCAPED_SLASHES) . "\e[0m\n"),
             $e instanceof Event\ToolEnded     => print ($e->outcome instanceof Result
                 ? "\e[2m← " . ($e->outcome->error ? 'error: ' : '') . \strtok($e->outcome->content[0]->text ?? '(media)', "\n") . "\e[0m\n"
                 : "\e[31m← {$e->outcome->getMessage()}\e[0m\n"),
-            $e instanceof Event\TurnEnded     => print ("\n\e[2m[{$e->reason->value}, {$e->usage->input} in, {$e->usage->output} out]\e[0m\n"),
-            default                           => null,
+            $e instanceof Event\TurnEnded && null === $e->parent => print ("\n\e[2m[{$e->reason->value}, {$e->usage->input} in, {$e->usage->output} out]\e[0m\n"),
+            default                                              => null,
         };
     }
 });
