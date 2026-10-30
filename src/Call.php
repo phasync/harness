@@ -12,7 +12,9 @@ use Harness\Part\ToolCall;
  * belongs to, the host's `context` object (from `Run`) and the `spec` of the tool called (null when
  * the model named no such tool), whose hints policy middleware reads. A tool reports progress, checks for
  * cancellation, and may end the turn awaiting the host with `needsInput()`. On resume the same call
- * is made again with `decision()` (after an Approval) or `answers()` and `state()` (after questions).
+ * is made again with `decision()` (after an Approval) or `answers()` (after questions), and `state()`.
+ * A denied approval is made again only when it was asked with a state (the tool handles the
+ * denial); without one the model gets "Denied: <reason>" and the tool is not called.
  */
 final class Call
 {
@@ -93,6 +95,7 @@ final class Call
                 throw new \InvalidArgumentException("Tool call {$this->id} asked questions; answer them with an array keyed by question id");
             }
             $this->decision = $answer;
+            $this->state    = $pending->state;
 
             return;
         }
@@ -116,7 +119,7 @@ final class Call
         return $this->answers;
     }
 
-    /** The state the tool passed to `needsInput()`, when made again after questions. */
+    /** The state the tool passed to `needsInput()`, when made again after an answer. */
     public function state(): mixed
     {
         return $this->state;

@@ -9,7 +9,7 @@ namespace Harness;
  * the `turn` number of its run and the `parent` tool call id when the run is nested in another
  * (null at the top). `toArray()` gives `type` (the class name in snake_case) and the fields, with
  * enums as their values, value objects as their arrays and a Throwable as `{class, message}`; it is
- * also what `json_encode()` writes.
+ * also what `json_encode()` writes. `Events::fromArray()` rebuilds the event from that array.
  */
 abstract readonly class Event implements \JsonSerializable
 {
@@ -39,6 +39,7 @@ abstract readonly class Event implements \JsonSerializable
     {
         return match (true) {
             $value instanceof \BackedEnum                           => $value->value,
+            $value instanceof ReplayedError                         => ['class' => $value->class, 'message' => $value->getMessage()],
             $value instanceof \Throwable                            => ['class' => $value::class, 'message' => $value->getMessage()],
             \is_object($value) && \method_exists($value, 'toArray') => self::export($value->toArray()),
             \is_array($value)                                       => \array_map(self::export(...), $value),

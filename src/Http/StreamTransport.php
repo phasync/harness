@@ -6,6 +6,8 @@ namespace Harness\Http;
 
 use function fiber\readable;
 use function fiber\writable;
+use Harness\Cancel;
+use Harness\Cancelled;
 
 /**
  * HTTP/1.1 over `stream_socket_client()`, for `http://` and `https://` URLs. Non-blocking sockets;
@@ -13,10 +15,15 @@ use function fiber\writable;
  * fiber-interop adapter and must be used inside `fiber\run()`. One connection per request
  * (`Connection: close`), chunked and content-length bodies; no redirects, proxies or compression.
  * `connectTimeout` bounds connecting and the TLS handshake, `idleTimeout` each wait for more of the
- * response. `ssl` is merged into the TLS stream context (e.g. `['cafile' => ...]`).
+ * response. Every wait is cut into slices of at most 250 ms; between them it checks the `Cancel`
+ * signal and throws `Harness\Cancelled` once it is set, so a cancelled turn ends within that time
+ * even while the server is silent. `ssl` is merged into the TLS stream context (e.g. `['cafile' => ...]`).
  */
 final class StreamTransport implements Transport
 {
+    /** The longest wait between two checks of the Cancel signal, in seconds. */
+    private const POLL = 0.25;
+
     /** @param array<string, mixed> $ssl */
     public function __construct(
         private readonly float $connectTimeout = 10.0,
@@ -25,7 +32,7 @@ final class StreamTransport implements Transport
     ) {
     }
 
-    public function post(string $url, array $headers, string $body): Response
+    public function post(string $url, array $headers, string $body, Cancel $cancel): Response
     {
         $parts = \parse_url($url);
         if (false === $parts || !isset($parts['scheme'], $parts['host']) || !\in_array($parts['scheme'], ['http', 'https'], true)) {
@@ -36,7 +43,7 @@ final class StreamTransport implements Transport
         $port = $parts['port'] ?? ($tls ? 443 : 80);
         $path = ($parts['path'] ?? '/') . (isset($parts['query']) ? '?' . $parts['query'] : '');
 
-        $socket = $this->connect($host, $port, $tls);
+        $socket = $this->connect($host, $port, $tls, $cancel);
         try {
             $request = "POST $path HTTP/1.1\r\n";
             $lower   = \array_change_key_case($headers);
@@ -50,12 +57,12 @@ final class StreamTransport implements Transport
                 $request .= "$name: $value\r\n";
             }
             $request .= 'Content-Length: ' . \strlen($body) . "\r\nConnection: close\r\n\r\n" . $body;
-            $this->write($socket, $request);
+            $this->write($socket, $request, $cancel);
 
             $buffer = '';
             do {
                 while (($end = \strpos($buffer, "\r\n\r\n")) === false) {
-                    $chunk = $this->read($socket);
+                    $chunk = $this->read($socket, $cancel);
                     if (null === $chunk) {
                         throw new TransportException("Connection to $host:$port closed before the response headers");
                     }
@@ -85,11 +92,11 @@ final class StreamTransport implements Transport
             throw $e;
         }
 
-        return new Response($status, $responseHeaders, $this->body($socket, $buffer, $status, $responseHeaders));
+        return new Response($status, $responseHeaders, $this->body($socket, $buffer, $status, $responseHeaders, $cancel));
     }
 
     /** @return resource */
-    private function connect(string $host, int $port, bool $tls): mixed
+    private function connect(string $host, int $port, bool $tls, Cancel $cancel): mixed
     {
         $context = \stream_context_create(['ssl' => $this->ssl + ['peer_name' => $host, 'SNI_enabled' => true, 'verify_peer' => true, 'verify_peer_name' => true]]);
         $socket  = $this->guard("connect to $host:$port", static fn () => \stream_socket_client(
@@ -105,7 +112,7 @@ final class StreamTransport implements Transport
         }
         \stream_set_blocking($socket, false);
         try {
-            $this->wait(writable(...), $socket, $this->connectTimeout, "connecting to $host:$port");
+            $this->wait(writable(...), $socket, $this->connectTimeout, "connecting to $host:$port", $cancel);
             if (false === \stream_socket_get_name($socket, true)) {
                 throw new TransportException("Could not connect to $host:$port (refused or unreachable)");
             }
@@ -119,7 +126,7 @@ final class StreamTransport implements Transport
                     if (false === $done) {
                         throw new TransportException("TLS handshake with $host failed");
                     }
-                    $this->wait(readable(...), $socket, \max(0.0, $deadline - \microtime(true)), "the TLS handshake with $host");
+                    $this->wait(readable(...), $socket, \max(0.0, $deadline - \microtime(true)), "the TLS handshake with $host", $cancel);
                 }
             }
         } catch (\Throwable $e) {
@@ -131,10 +138,10 @@ final class StreamTransport implements Transport
     }
 
     /** @param resource $socket */
-    private function write(mixed $socket, string $data): void
+    private function write(mixed $socket, string $data, Cancel $cancel): void
     {
         while ('' !== $data) {
-            $this->wait(writable(...), $socket, $this->idleTimeout, 'sending the request');
+            $this->wait(writable(...), $socket, $this->idleTimeout, 'sending the request', $cancel);
             $n = $this->guard('send the request', static fn () => \fwrite($socket, $data));
             if (false === $n) {
                 throw new TransportException('Could not send the request');
@@ -148,10 +155,10 @@ final class StreamTransport implements Transport
      *
      * @param resource $socket
      */
-    private function read(mixed $socket): ?string
+    private function read(mixed $socket, Cancel $cancel): ?string
     {
         while (true) {
-            $this->wait(readable(...), $socket, $this->idleTimeout, 'reading the response');
+            $this->wait(readable(...), $socket, $this->idleTimeout, 'reading the response', $cancel);
             $data = $this->guard('read the response', static fn () => \fread($socket, 65536));
             if (false === $data) {
                 throw new TransportException('Could not read the response');
@@ -171,7 +178,7 @@ final class StreamTransport implements Transport
      *
      * @return \Generator<int, string>
      */
-    private function body(mixed $socket, string $buffer, int $status, array $headers): \Generator
+    private function body(mixed $socket, string $buffer, int $status, array $headers, Cancel $cancel): \Generator
     {
         try {
             if (204 === $status || 304 === $status) {
@@ -180,7 +187,7 @@ final class StreamTransport implements Transport
             if (\str_contains(\strtolower($headers['transfer-encoding'] ?? ''), 'chunked')) {
                 while (true) {
                     while (($eol = \strpos($buffer, "\r\n")) === false) {
-                        $buffer .= $this->more($socket);
+                        $buffer .= $this->more($socket, $cancel);
                     }
                     $hex = \trim(\explode(';', \substr($buffer, 0, $eol))[0]);
                     if (1 !== \preg_match('/^[0-9a-fA-F]{1,15}$/', $hex)) {
@@ -193,7 +200,7 @@ final class StreamTransport implements Transport
                     }
                     while ($size > 0) {
                         if ('' === $buffer) {
-                            $buffer = $this->more($socket);
+                            $buffer = $this->more($socket, $cancel);
                         }
                         $piece  = \substr($buffer, 0, $size);
                         $buffer = \substr($buffer, \strlen($piece));
@@ -201,7 +208,7 @@ final class StreamTransport implements Transport
                         yield $piece;
                     }
                     while (\strlen($buffer) < 2) {
-                        $buffer .= $this->more($socket);
+                        $buffer .= $this->more($socket, $cancel);
                     }
                     $buffer = \substr($buffer, 2);
                 }
@@ -210,7 +217,7 @@ final class StreamTransport implements Transport
                 $remaining = (int) $headers['content-length'];
                 while ($remaining > 0) {
                     if ('' === $buffer) {
-                        $buffer = $this->more($socket);
+                        $buffer = $this->more($socket, $cancel);
                     }
                     $piece  = \substr($buffer, 0, $remaining);
                     $buffer = \substr($buffer, \strlen($piece));
@@ -223,7 +230,7 @@ final class StreamTransport implements Transport
             if ('' !== $buffer) {
                 yield $buffer;
             }
-            while (($chunk = $this->read($socket)) !== null) {
+            while (($chunk = $this->read($socket, $cancel)) !== null) {
                 yield $chunk;
             }
         } finally {
@@ -232,18 +239,34 @@ final class StreamTransport implements Transport
     }
 
     /** @param resource $socket */
-    private function more(mixed $socket): string
+    private function more(mixed $socket, Cancel $cancel): string
     {
-        return $this->read($socket) ?? throw new TransportException('Connection closed before the response body ended');
+        return $this->read($socket, $cancel) ?? throw new TransportException('Connection closed before the response body ended');
     }
 
-    /** @param resource $socket */
-    private function wait(\Closure $wait, mixed $socket, float $timeout, string $what): void
+    /**
+     * Waits until the socket is ready, in slices of at most POLL seconds with a check of the
+     * Cancel signal before each.
+     *
+     * @param resource $socket
+     */
+    private function wait(\Closure $wait, mixed $socket, float $timeout, string $what, Cancel $cancel): void
     {
-        try {
-            $wait($socket, $timeout);
-        } catch (\fiber\TimeoutException $e) {
-            throw new TransportException(\sprintf('Timed out after %.1f s %s', $timeout, $what), 0, $e);
+        $deadline = \microtime(true) + $timeout;
+        while (true) {
+            if ($cancel->isCancelled()) {
+                throw new Cancelled("Cancelled while $what");
+            }
+            $left = $deadline - \microtime(true);
+            try {
+                $wait($socket, \max(0.0, \min(self::POLL, $left)));
+
+                return;
+            } catch (\fiber\TimeoutException $e) {
+                if ($left <= self::POLL) {
+                    throw new TransportException(\sprintf('Timed out after %.1f s %s', $timeout, $what), 0, $e);
+                }
+            }
         }
     }
 

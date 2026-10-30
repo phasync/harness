@@ -58,7 +58,7 @@ final readonly class ChatCompletions implements Model
             $headers['Authorization'] = 'Bearer ' . $this->apiKey;
         }
         $body     = \json_encode($this->request($prompt), \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
-        $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/chat/completions', $headers, $body);
+        $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/chat/completions', $headers, $body, $prompt->cancel);
         if (200 !== $response->status) {
             throw self::error($response->status, \implode('', [...$response->body()]), $response->headers['retry-after'] ?? null);
         }

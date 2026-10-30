@@ -164,3 +164,29 @@ it('refuses to restore messages and pending lists that disagree', function () {
     $messages = [user('go'), new Message(Harness\Role::Assistant, [new ToolCall('c1', 'write', [])])];
     expect(fn () => new Run(new FakeModel(), new Tools(), messages: $messages))->toThrow(InvalidArgumentException::class, 'without results');
 });
+
+it('calls a tool again on a denial when it asked for approval with state, and short-circuits without', function () {
+    $seen = [];
+    $own  = tool('own', function (array $in, Call $call) use (&$seen) {
+        if (null === $call->decision()) {
+            return $call->needsInput(new Approval('ok?'), ['plan' => 'x']);
+        }
+        $seen[] = [$call->decision()->allowed, $call->state()];
+
+        return new Result([new Text('handled: ' . $call->decision()->reason)], error: true);
+    });
+    $bare = tool('bare', function (array $in, Call $call) use (&$seen) {
+        if (null === $call->decision()) {
+            return $call->needsInput(new Approval('ok?'));
+        }
+        $seen[] = 'bare ran';
+
+        return Result::text('ran');
+    });
+    $run = new Run(new FakeModel(calls(['a', 'own', []], ['b', 'bare', []]), says('fine')), new Tools($own, $bare));
+    turn($run, user('go'));
+    turn($run, [new Answer('a', Decision::deny('no')), new Answer('b', Decision::deny('nope'))]);
+    expect($seen)->toBe([[false, ['plan' => 'x']]])
+        ->and($run->messages()[2]->parts[0]->content[0]->text)->toBe('handled: no')
+        ->and($run->messages()[2]->parts[1]->content[0]->text)->toBe('Denied: nope');
+});

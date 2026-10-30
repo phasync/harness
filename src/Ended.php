@@ -6,8 +6,11 @@ namespace Harness;
 
 /**
  * How a turn ended: the reason, the messages it appended (persist these to keep your own
- * history), the calls awaiting input, the usage of its model calls and, for `Reason::Failed`, the
- * error and its kind.
+ * history), the calls awaiting input, the usage of its model calls, for `Reason::Failed` the error
+ * and its kind, and `finish`, the `FinishReason` of the turn's last assistant message (null when
+ * the turn completed none). `Reason::Done` only means "no tool calls": a reply cut by the token
+ * limit or refused is `Done` with `finish` `Length` or `Refusal`. A cancelled turn discards the
+ * partial assistant message of the step in progress; `appended` never holds it.
  */
 final readonly class Ended
 {
@@ -22,6 +25,7 @@ final readonly class Ended
         public Usage $usage,
         public ?\Throwable $error = null,
         public ?ErrorKind $errorKind = null,
+        public ?FinishReason $finish = null,
     ) {
     }
 
@@ -39,6 +43,7 @@ final readonly class Ended
             'usage'     => $this->usage->toArray(),
             'error'     => null === $this->error ? null : ['class' => $this->error::class, 'message' => $this->error->getMessage()],
             'errorKind' => $this->errorKind?->value,
+            'finish'    => $this->finish?->value,
         ];
     }
 }

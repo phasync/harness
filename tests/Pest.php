@@ -98,3 +98,9 @@ function tool(string $name, Closure $fn, ?Harness\Hints $hints = null): Harness\
 {
     return new Harness\ClosureTool(new Harness\ToolSpec($name, "The $name tool", ['type' => 'object'], $hints ?? new Harness\Hints()), $fn);
 }
+
+/** A Cancel signal that is never set, for prompts and requests built by hand. */
+function live(): Harness\Cancel
+{
+    return new Harness\Cancel(static fn () => false);
+}

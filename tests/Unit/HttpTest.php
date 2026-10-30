@@ -66,7 +66,7 @@ it('streams a chunked response as it arrives', function () {
             "ld\r\n",
             "0\r\n\r\n",
         ]);
-        $response = (new StreamTransport())->post("http://127.0.0.1:$port/v1/x?y=1", ['Content-Type' => 'application/json'], '{"a":1}');
+        $response = (new StreamTransport())->post("http://127.0.0.1:$port/v1/x?y=1", ['Content-Type' => 'application/json'], '{"a":1}', live());
         $chunks   = [...$response->body()];
 
         return [$response->status, $response->headers, $chunks, \fiber\await($task)];
@@ -84,7 +84,7 @@ it('streams a chunked response as it arrives', function () {
 it('reads content-length and close-delimited bodies, and non-2xx statuses', function (array $response, int $status, string $body) {
     $out = \fiber\run(function () use ($response) {
         [$port] = serve(fn () => $response);
-        $r      = (new StreamTransport())->post("http://127.0.0.1:$port/", [], '');
+        $r      = (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
 
         return [$r->status, \implode('', [...$r->body()])];
     });
@@ -98,7 +98,7 @@ it('reads content-length and close-delimited bodies, and non-2xx statuses', func
 it('fails with TransportException when the connection breaks or is refused', function () {
     expect(fn () => \fiber\run(function () {
         [$port] = serve(fn () => ["HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc"]);
-        $r      = (new StreamTransport())->post("http://127.0.0.1:$port/", [], '');
+        $r      = (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
         foreach ($r->body() as $_) {
         }
     }))->toThrow(TransportException::class, 'closed before the response body ended');
@@ -106,7 +106,7 @@ it('fails with TransportException when the connection breaks or is refused', fun
     $server = \stream_socket_server('tcp://127.0.0.1:0');
     $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
     \fclose($server);
-    expect(fn () => \fiber\run(fn () => (new StreamTransport())->post("http://127.0.0.1:$port/", [], '')))->toThrow(TransportException::class);
+    expect(fn () => \fiber\run(fn () => (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live())))->toThrow(TransportException::class);
 });
 
 it('times out an idle response', function () {
@@ -116,10 +116,10 @@ it('times out an idle response', function () {
 
             return [];
         });
-        (new StreamTransport(idleTimeout: 0.05))->post("http://127.0.0.1:$port/", [], '');
+        (new StreamTransport(idleTimeout: 0.05))->post("http://127.0.0.1:$port/", [], '', live());
     }))->toThrow(TransportException::class, 'Timed out');
 });
 
 it('rejects URLs it cannot serve', function () {
-    expect(fn () => (new StreamTransport())->post('ftp://example.com/', [], ''))->toThrow(InvalidArgumentException::class);
+    expect(fn () => (new StreamTransport())->post('ftp://example.com/', [], '', live()))->toThrow(InvalidArgumentException::class);
 });

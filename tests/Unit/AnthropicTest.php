@@ -62,7 +62,7 @@ function thinkingThenTool(): Response
 
 it('maps the stream, keeping thinking blocks verbatim', function () {
     $model  = new Messages(new FakeTransport(thinkingThenTool()), 'key', 'claude-x');
-    $deltas = [...$model->stream(new Prompt(null, [user('hi')], [], new Options()))];
+    $deltas = [...$model->stream(new Prompt(null, [user('hi')], [], new Options(), live()))];
     $blocks = [['type' => 'thinking', 'thinking' => 'Let me', 'signature' => 'SIG']];
     expect($deltas)->toEqual([
         new Usage(105, 1, 90, 5),
@@ -103,7 +103,7 @@ it('replays reasoning to the same model, merges user turns and puts tool results
         new Message(Role::User, [new Text('also')]),
         new Message(Role::User, [new ToolResult('t', [new Text('r')], true)]),
     ];
-    [...(new Messages($other, 'k', 'claude-y'))->stream(new Prompt(null, $msgs, [new ToolSpec('n', 'N', ['type' => 'object'])], new Options()))];
+    [...(new Messages($other, 'k', 'claude-y'))->stream(new Prompt(null, $msgs, [new ToolSpec('n', 'N', ['type' => 'object'])], new Options(), live()))];
     $body = \json_decode($other->requests[0]['body'], true);
     expect($body['messages'][1]['content'])->toBe([['type' => 'tool_use', 'id' => 't', 'name' => 'n', 'input' => []]])
         ->and($body['messages'])->toHaveCount(3)
@@ -114,7 +114,7 @@ it('replays reasoning to the same model, merges user turns and puts tool results
 it('maps errors, in the status and in the stream', function (Response $response, ErrorKind $kind) {
     $model = new Messages(new FakeTransport($response), 'k', 'm');
     try {
-        [...$model->stream(new Prompt(null, [user('x')], [], new Options()))];
+        [...$model->stream(new Prompt(null, [user('x')], [], new Options(), live()))];
         $this->fail('no exception');
     } catch (ModelException $e) {
         expect($e->kind)->toBe($kind);

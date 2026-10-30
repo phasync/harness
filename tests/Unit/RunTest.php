@@ -57,7 +57,7 @@ it('serializes every event to JSON with a type', function () {
         $data = \json_decode(\json_encode($e, \JSON_THROW_ON_ERROR), true);
         expect($data['type'])->toBeString()->and($data['turn'])->toBe(1);
     }
-    expect(\json_decode(\json_encode(\end($events)), true))->toBe(['type' => 'turn_ended', 'turn' => 1, 'parent' => null, 'reason' => 'done', 'usage' => ['input' => 20, 'output' => 10, 'cacheRead' => 0, 'cacheWrite' => 0], 'error' => null]);
+    expect(\json_decode(\json_encode(\end($events)), true))->toBe(['type' => 'turn_ended', 'turn' => 1, 'parent' => null, 'reason' => 'done', 'usage' => ['input' => 20, 'output' => 10, 'cacheRead' => 0, 'cacheWrite' => 0], 'error' => null, 'finish' => 'stop']);
 });
 
 it('gives the model the system text, the history and the current tools each step', function () {
@@ -121,7 +121,7 @@ it('lets middleware rewrite the prompt and the result', function () {
     $mw    = new class implements ModelMiddleware, ToolMiddleware {
         public function stream(Prompt $prompt, Closure $next): iterable
         {
-            return $next(new Prompt('rewritten', $prompt->messages, $prompt->tools, $prompt->options));
+            return $next(new Prompt('rewritten', $prompt->messages, $prompt->tools, $prompt->options, $prompt->cancel));
         }
 
         public function call(ToolCall $call, Call $context, Closure $next): Result

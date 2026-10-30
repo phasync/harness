@@ -54,7 +54,7 @@ it('maps the stream: reasoning, text, tool calls by index, usage after finish_re
         ['choices' => [], 'usage' => ['prompt_tokens' => 300, 'completion_tokens' => 20, 'prompt_tokens_details' => ['cached_tokens' => 100]]],
     ));
     $model  = new ChatCompletions($t, 'http://h/v1/', 'qwen');
-    $deltas = [...$model->stream(new Prompt(null, [user('hi')], [], new Options()))];
+    $deltas = [...$model->stream(new Prompt(null, [user('hi')], [], new Options(), live()))];
     expect($deltas)->toEqual([
         new ReasoningDelta('hmm', ['model' => 'qwen']),
         new TextDelta('Hi'),
@@ -80,7 +80,7 @@ it('builds the request: system, tool messages, replayed reasoning, tools and opt
     ];
     $tools   = [new ToolSpec('read', 'Read', ['type' => 'object', 'properties' => ['path' => ['type' => 'string']]])];
     $options = new Options(maxOutputTokens: 100, temperature: 0.2, toolChoice: ToolChoice::Tool, tool: 'read', provider: ['openai' => ['top_p' => 0.9], 'anthropic' => ['ignored' => true]]);
-    [...(new ChatCompletions($t, 'http://h/v1', 'qwen', 'sk-1', ['X-Extra' => 'y']))->stream(new Prompt('Be brief', $messages, $tools, $options))];
+    [...(new ChatCompletions($t, 'http://h/v1', 'qwen', 'sk-1', ['X-Extra' => 'y']))->stream(new Prompt('Be brief', $messages, $tools, $options, live()))];
     $body = \json_decode($t->requests[0]['body'], true);
     expect($t->requests[0]['headers'])->toMatchArray(['Authorization' => 'Bearer sk-1', 'X-Extra' => 'y', 'Content-Type' => 'application/json'])
         ->and($body['messages'])->toBe([
@@ -104,7 +104,7 @@ it('builds the request: system, tool messages, replayed reasoning, tools and opt
 it('maps HTTP errors to error kinds', function (int $status, string $body, ErrorKind $kind) {
     $model = new ChatCompletions(new FakeTransport(new Response($status, ['retry-after' => '3'], [$body])), 'http://h/v1', 'm');
     try {
-        [...$model->stream(new Prompt(null, [user('x')], [], new Options()))];
+        [...$model->stream(new Prompt(null, [user('x')], [], new Options(), live()))];
         $this->fail('no exception');
     } catch (ModelException $e) {
         expect($e->kind)->toBe($kind)->and($e->getMessage())->toContain((string) $status);
@@ -120,13 +120,13 @@ it('maps HTTP errors to error kinds', function (int $status, string $body, Error
 
 it('fails on an error inside the stream and on a missing finish_reason', function () {
     $model = new ChatCompletions(new FakeTransport(sse(['error' => ['message' => 'oom']]), sse(delta(['content' => 'x']))), 'http://h/v1', 'm');
-    $p     = new Prompt(null, [user('x')], [], new Options());
+    $p     = new Prompt(null, [user('x')], [], new Options(), live());
     expect(fn () => [...$model->stream($p)])->toThrow(ModelException::class, 'oom')
         ->and(fn () => [...$model->stream($p)])->toThrow(ModelException::class, 'without a finish_reason');
 });
 
 it('refuses what it cannot send', function () {
     $model = new ChatCompletions(new FakeTransport(sse(delta([], 'stop'))), 'http://h/v1', 'm');
-    expect(fn () => [...$model->stream(new Prompt(null, [user('x')], [], new Options(toolChoice: ToolChoice::Required)))])->toThrow(Harness\UnsupportedOptionException::class)
-        ->and(fn () => [...$model->stream(new Prompt(null, [new Message(Role::User, [new Media('video/mp4', 'x')])], [], new Options()))])->toThrow(Harness\UnsupportedContentException::class);
+    expect(fn () => [...$model->stream(new Prompt(null, [user('x')], [], new Options(toolChoice: ToolChoice::Required), live()))])->toThrow(Harness\UnsupportedOptionException::class)
+        ->and(fn () => [...$model->stream(new Prompt(null, [new Message(Role::User, [new Media('video/mp4', 'x')])], [], new Options(), live()))])->toThrow(Harness\UnsupportedContentException::class);
 });

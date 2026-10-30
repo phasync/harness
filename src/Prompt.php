@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace Harness;
 
-/** Everything a model call needs: the system text, the conversation, the tools of this step and the options. */
+/**
+ * Everything a model call needs: the system text, the conversation, the tools of this step, the
+ * options and the turn's `Cancel` signal, which the model passes on to its transport. A middleware
+ * that rewrites the prompt passes `$prompt->cancel` on unchanged.
+ */
 final readonly class Prompt
 {
     /**
@@ -16,6 +20,7 @@ final readonly class Prompt
         public array $messages,
         public array $tools,
         public Options $options,
+        public Cancel $cancel,
     ) {
         foreach ($messages as $m) {
             if (!$m instanceof Message) {

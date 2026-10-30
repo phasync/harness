@@ -38,6 +38,12 @@ final readonly class Result
         return new self([new Text($text)]);
     }
 
+    /** @param array{content: list<array<string, mixed>>, value: mixed, meta: array<string, mixed>, error: bool} $data */
+    public static function fromArray(array $data): self
+    {
+        return new self(\array_map(Parts::fromArray(...), $data['content']), $data['value'], $data['meta'], $data['error']);
+    }
+
     /** @return array{content: list<array<string, mixed>>, value: mixed, meta: array<string, mixed>, error: bool} */
     public function toArray(): array
     {

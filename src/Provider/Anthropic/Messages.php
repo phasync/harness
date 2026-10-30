@@ -61,7 +61,7 @@ final readonly class Messages implements Model
             'anthropic-version' => '2023-06-01',
         ] + $this->headers;
         $body     = \json_encode($this->request($prompt), \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
-        $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/messages', $headers, $body);
+        $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/messages', $headers, $body, $prompt->cancel);
         if (200 !== $response->status) {
             $raw   = \implode('', [...$response->body()]);
             $error = \json_decode($raw, true)['error'] ?? ['type' => 'http_' . $response->status, 'message' => \substr($raw, 0, 2000)];

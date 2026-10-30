@@ -4,48 +4,51 @@ declare(strict_types=1);
 
 namespace Harness\Internal;
 
+use function fiber\await;
 use Harness\Event;
 
 /**
- * @internal The queue between a turn's coroutine and its consumer. `wait()` returns a then-able,
- * which every fiber-interop adapter can await.
+ * @internal The hand-over between a turn's fibers and its one consumer. Delivery is synchronous:
+ * `push()` returns once the consumer has handled the event, that is when it asks for the next one
+ * (or stops iterating), so whatever a producer does after an event happens after the host handled
+ * it. Producers that push at the same time wait their turn in order of arrival.
  */
 final class EventQueue
 {
-    /** @var \SplQueue<Event> */
+    /** @var \SplQueue<array{0: Event, 1: Signal}> */
     private \SplQueue $events;
-    private bool $closed = false;
-    /** @var array{0: callable, 1: callable}|null */
-    private ?array $waiter = null;
+    /** Fulfilled when an event arrives or the queue closes, while the consumer waits. */
+    private ?Signal $arrival = null;
+    /** Fulfilled when the consumer is done with the event it holds. */
+    private ?Signal $held   = null;
+    private bool $closed    = false;
+    private bool $detached  = false;
 
     public function __construct()
     {
         $this->events = new \SplQueue();
     }
 
+    /** Hands `$event` to the consumer and returns once the consumer handled it; at once when it stopped. */
     public function push(Event $event): void
     {
         if ($this->closed) {
             throw new \LogicException('Event ' . $event::class . ' pushed after the turn ended');
         }
-        if (null !== $this->waiter) {
-            [$ok]         = $this->waiter;
-            $this->waiter = null;
-            $ok($event);
-
+        if ($this->detached) {
             return;
         }
-        $this->events->enqueue($event);
+        $handled = new Signal();
+        $this->events->enqueue([$event, $handled]);
+        $this->wake();
+        await($handled);
     }
 
+    /** No more events; the consumer's `next()` returns null once the queue is drained. */
     public function close(): void
     {
         $this->closed = true;
-        if (null !== $this->waiter) {
-            [$ok]         = $this->waiter;
-            $this->waiter = null;
-            $ok(null);
-        }
+        $this->wake();
     }
 
     public function isClosed(): bool
@@ -53,44 +56,46 @@ final class EventQueue
         return $this->closed;
     }
 
-    /** The next event if one is buffered, else null. */
-    public function shift(): ?Event
+    /**
+     * For the consumer: releases the producer of the event it held, then waits for the next event.
+     * Null once the queue is closed and drained.
+     */
+    public function next(): ?Event
     {
-        return $this->events->isEmpty() ? null : $this->events->dequeue();
+        $this->release();
+        while ($this->events->isEmpty()) {
+            if ($this->closed) {
+                return null;
+            }
+            $this->arrival = new Signal();
+            await($this->arrival);
+        }
+        [$event, $this->held] = $this->events->dequeue();
+
+        return $event;
     }
 
-    /** A then-able that fulfils with the next event, or with null once the queue is closed and drained. */
-    public function wait(): object
+    /** The consumer stopped: every waiting producer is released and later events are dropped. */
+    public function detach(): void
     {
-        $queue = $this;
-
-        return new class($queue) {
-            public function __construct(private EventQueue $queue)
-            {
-            }
-
-            public function then(callable $ok, callable $err): void
-            {
-                $this->queue->listen($ok, $err);
-            }
-        };
+        $this->detached = true;
+        $this->release();
+        while (!$this->events->isEmpty()) {
+            $this->events->dequeue()[1]->fulfil();
+        }
     }
 
-    public function listen(callable $ok, callable $err): void
+    private function release(): void
     {
-        if (null !== $this->waiter) {
-            throw new \LogicException('A turn has one consumer');
-        }
-        if (!$this->events->isEmpty()) {
-            $ok($this->events->dequeue());
+        $held       = $this->held;
+        $this->held = null;
+        $held?->fulfil();
+    }
 
-            return;
-        }
-        if ($this->closed) {
-            $ok(null);
-
-            return;
-        }
-        $this->waiter = [$ok, $err];
+    private function wake(): void
+    {
+        $arrival       = $this->arrival;
+        $this->arrival = null;
+        $arrival?->fulfil();
     }
 }

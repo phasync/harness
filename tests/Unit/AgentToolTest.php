@@ -59,3 +59,24 @@ it('cancels the child when the parent is cancelled', function () {
     expect($parent->ended()->reason)->toBe(Reason::Cancelled)
         ->and($parent->messages()[2]->parts[0]->content[0]->text)->toBe("The agent 'sub' was cancelled");
 });
+
+it('continues the same child when not fresh', function () {
+    $child = new Run(new FakeModel(says('first'), says('second')), new Tools());
+    $agent = new AgentTool($child, 'mem', 'Remembers', fresh: false);
+    $model = new FakeModel(calls(['p1', 'mem', ['prompt' => 'one']]), calls(['p2', 'mem', ['prompt' => 'two']]), says('done'));
+    turn(new Run($model, new Tools($agent)), user('go'));
+    expect(\count($child->messages()))->toBe(4)
+        ->and($child->messages()[3]->parts[0]->text)->toBe('second');
+});
+
+it('says so when the child\'s reply was cut off or refused', function (Harness\FinishReason $finish, string $note) {
+    $child  = new Run(new FakeModel([new Harness\Delta\TextDelta('partial'), new Harness\Delta\Finish($finish)]), new Tools());
+    $parent = new Run(new FakeModel(calls(['p', 'sub', ['prompt' => 'x']]), says('ok')), new Tools(new AgentTool($child, 'sub', 'Sub')));
+    $events = turn($parent, user('go'));
+    $ended  = \array_values(\array_filter($events, fn ($e) => $e instanceof Harness\Event\ToolEnded && null === $e->parent))[0];
+    expect($ended->outcome->content[0]->text)->toBe("partial\n\n$note")
+        ->and($ended->outcome->meta['finish'])->toBe($finish->value);
+})->with([
+    'length'  => [Harness\FinishReason::Length, "[The agent's reply was cut off at its output token limit.]"],
+    'refusal' => [Harness\FinishReason::Refusal, '[The agent refused to answer.]'],
+]);

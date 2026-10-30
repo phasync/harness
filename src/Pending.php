@@ -10,6 +10,8 @@ use Harness\Part\ToolCall;
  * A tool call that waits for the host: what it needs (an `Approval` or a list of `Question`s)
  * and the tool's own `state`, which is JSON-safe so it survives a process boundary. Persist it
  * with `toArray()` next to the messages and pass it back to `Run`'s constructor to resume elsewhere.
+ * In the array, `needs` is `{"type": "approval", "reason": ...}` or
+ * `{"type": "questions", "questions": [{"id", "text", "choices"}, ...]}`.
  */
 final readonly class Pending
 {
@@ -29,22 +31,26 @@ final readonly class Pending
         self::assertJsonSafe($state, 'state');
     }
 
-    /** @return array{call: array<string, mixed>, needs: array<mixed>, state: mixed} */
+    /** @return array{call: array<string, mixed>, needs: array<string, mixed>, state: mixed} */
     public function toArray(): array
     {
         return [
             'call'  => $this->call->toArray(),
-            'needs' => $this->needs instanceof Approval ? $this->needs->toArray() : \array_map(static fn (Question $q) => $q->toArray(), $this->needs),
+            'needs' => $this->needs instanceof Approval
+                ? $this->needs->toArray()
+                : ['type' => 'questions', 'questions' => \array_map(static fn (Question $q) => $q->toArray(), $this->needs)],
             'state' => $this->state,
         ];
     }
 
-    /** @param array{call: array<string, mixed>, needs: array<mixed>, state: mixed} $data */
+    /** @param array{call: array<string, mixed>, needs: array<string, mixed>, state: mixed} $data */
     public static function fromArray(array $data): self
     {
-        $needs = ($data['needs']['type'] ?? null) === 'approval'
-            ? Approval::fromArray($data['needs'])
-            : \array_map(Question::fromArray(...), $data['needs']);
+        $needs = match ($data['needs']['type'] ?? null) {
+            'approval'  => Approval::fromArray($data['needs']),
+            'questions' => \array_map(Question::fromArray(...), $data['needs']['questions']),
+            default     => throw new \InvalidArgumentException('Pending needs.type must be "approval" or "questions", got ' . \var_export($data['needs']['type'] ?? null, true)),
+        };
 
         return new self(ToolCall::fromArray($data['call']), $needs, $data['state']);
     }
