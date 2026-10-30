@@ -75,3 +75,25 @@ function calls(array ...$calls): array
 
     return $deltas;
 }
+
+/** A Call for testing a tool directly, outside a run; progress events are collected in `$events`. */
+function callFor(string $id = 'call_1', array &$events = []): Harness\Call
+{
+    return new Harness\Call(
+        $id,
+        new Run(new Harness\Testing\FakeModel(), new Harness\Tools()),
+        null,
+        new Harness\Part\ToolCall($id, 'test', []),
+        1,
+        null,
+        static function (Event $e) use (&$events): void {
+            $events[] = $e;
+        },
+    );
+}
+
+/** A tool from a name, hints and a closure. */
+function tool(string $name, Closure $fn, ?Harness\Hints $hints = null): Harness\ClosureTool
+{
+    return new Harness\ClosureTool(new Harness\ToolSpec($name, "The $name tool", ['type' => 'object'], $hints ?? new Harness\Hints()), $fn);
+}
