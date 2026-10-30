@@ -1,0 +1,52 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Harness\Tools\Files;
+
+use Harness\Call;
+use Harness\Hints;
+use Harness\Result;
+use Harness\Tool;
+use Harness\Tools\Input;
+use Harness\ToolSpec;
+
+/** `write_file`: creates or replaces a file with `content`, creating missing parent directories. */
+final readonly class WriteFile implements Tool
+{
+    public function __construct(private Root $root)
+    {
+    }
+
+    public function spec(): ToolSpec
+    {
+        return new ToolSpec('write_file', 'Create a file, or replace its whole content. Parent directories are created.', [
+            'type'       => 'object',
+            'properties' => [
+                'path'    => ['type' => 'string', 'description' => 'Path relative to the root'],
+                'content' => ['type' => 'string', 'description' => 'The complete new content'],
+            ],
+            'required' => ['path', 'content'],
+        ], new Hints(destructive: true, idempotent: true));
+    }
+
+    public function call(array $input, Call $call): Result
+    {
+        $path    = Input::string($input, 'path');
+        $content = Input::string($input, 'content');
+        $abs     = $this->root->resolve($path);
+        if (\is_dir($abs)) {
+            throw new \RuntimeException("'$path' is a directory");
+        }
+        $existed = \file_exists($abs);
+        $dir     = \dirname($abs);
+        if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
+            throw new \RuntimeException("Could not create the directory for '$path'");
+        }
+        if (false === \file_put_contents($abs, $content)) {
+            throw new \RuntimeException("Could not write '$path'");
+        }
+
+        return Result::text(($existed ? 'Replaced' : 'Created') . " '$path' (" . \strlen($content) . ' bytes)');
+    }
+}
