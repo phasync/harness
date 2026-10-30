@@ -33,8 +33,46 @@ names and hints cannot say (the host's `context`, a time of day), not for argume
 - `Deny`: the model gets the error result `Denied by the policy rule: <rule>`.
 - `Ask`: the call ends with `needsInput([new Approval(reason: <rule>)])`, without state. A web host
   gets `AwaitingInput` and answers with an `Answer` in a later request; a denial reaches the model
-  as `Denied: <reason>`. A CLI answers at once in a middleware placed before (outside) the policy,
-  the README's inline idiom ([`examples/policy.php`](../examples/policy.php)).
+  as `Denied: <reason>`. A CLI answers at once (below).
+
+## Answering on the terminal
+
+The answering middleware is the README's inline idiom. It wraps the policy: listed before `Policy`
+in the array (outermost first), its `$next` runs the policy, so the `needsInput()` the policy
+returns is what it sees in `$context->pending()`; it answers and calls `$next` again, and the policy
+lets the answered call through ([`examples/policy.php`](../examples/policy.php)).
+
+```php
+$run = new Run($model, $tools, system: "...\n\n" . $policy->describe(), middleware: [$terminal, $policy]);
+```
+
+Listed after the policy, it would never run for a call the policy asks about: `Ask` returns without
+calling `$next`.
+
+## Policy with sub-agents
+
+An `Agents\AgentTool` has hints derived from its child's tools: read-only only when every child
+tool is. A sub-agent that can write is therefore not read-only, and a parent `Policy` whose default
+is `Ask` gates the delegation itself, before the child ran and before any nested pause could happen.
+Allow the delegation by name and let the child's own policy gate its writes:
+
+```php
+$childPolicy = new Policy([
+    Rule::hints(Verdict::Allow, readOnly: true),
+    Rule::tool('write_file', Verdict::Ask),
+], default: Verdict::Deny);
+$writer = new Run($model, new Tools(new ReadFile($root), new WriteFile($root)), middleware: [$childPolicy]);
+
+$policy = new Policy([
+    Rule::tool('writer', Verdict::Allow),          // the delegation; the child's policy asks per write
+    Rule::hints(Verdict::Allow, readOnly: true),
+]);                                                // anything else: Ask
+$run = new Run($model, new Tools(new AgentTool($writer, 'writer', 'Writes files')), middleware: [$terminal, $policy]);
+```
+
+The child's `Ask` pauses the child, and through it the parent's `writer` call, with the need
+`w1/approval` ([agents.md](agents.md)); the parent's `$terminal` answers it inline, and its `$next`
+resumes the child. The child needs no answering middleware of its own.
 
 A call the host answered already (`answers()` set) goes on unchecked, as does a call to a tool the
 run does not have (the run tells the model). `describe()` returns the rules, one line each, for a

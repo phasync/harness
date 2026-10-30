@@ -25,6 +25,8 @@ use Harness\Http\StreamTransport;
 use Harness\Part\Text;
 use Harness\Provider\OpenAI\ChatCompletions;
 
+fiber\setup(new FiberInterop\Phasync\Adapter());   // once per process: the adapter you installed
+
 $model = new ChatCompletions(new StreamTransport(), 'http://127.0.0.1:8012/v1', 'qwen3.8-27b-exl3-sivert');
 
 $clock = new ClosureTool(
@@ -60,12 +62,24 @@ their results as one user message. It ends when:
 
 `Done` only means "no tool calls". `Ended::$finish` (and `TurnEnded::$finish`) is the `FinishReason`
 of the turn's last assistant message: a reply cut by the token limit is `Done` with finish `Length`,
-a refused one `Done` with finish `Refusal`. A host that shows a reply as complete checks it.
+a refused one `Done` with finish `Refusal`. A host that shows a reply as complete checks it. A reply
+with finish `Length` and no tool call may hold the backend's tool-call template as plain text
+(`<tool_call>{"name": "write_file", ...`): a local server cut its encoding mid-way at the token
+limit and passed it on as text. That is the backend's doing; raise `maxOutputTokens`.
 
-Iterate a turn inside `fiber\run()`. The turn runs in its own coroutine, a new `\Scope` and its own
-`fiber\run()`, so it ends with everything it started finished. A `\LogicException` (misuse, such as
+Iterate a turn inside `fiber\run()`. `fiber\setup()` is called once per process (again with the
+same adapter class is a no-op); `fiber\run()` composes, so it may be called anywhere, also from a
+fiber the adapter did not create (a Swerve worker, a queue worker's job), and returns once
+everything started inside it has finished. The turn runs in its own coroutine, a new `\Scope`
+and its own `fiber\run()`, so it ends with everything it started finished. A `\LogicException` (misuse, such as
 an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`; runtime
 failures end the turn `Failed` and are in `ended()`.
+
+A failed turn discards the step in progress, as a cancelled one does: its partial assistant
+message, and the results of its calls that finished. `Ended::$appended` and `messages()` hold only
+complete steps, every `ToolCall` with its `ToolResult`, so a host may build a new `Run` on
+`messages()` to retry. A failed resume leaves the calls it answered in `Ended::$pending`, still
+awaiting the answers.
 
 `Run` keeps the conversation in memory: `messages()` returns it, `Ended::$appended` is what a turn
 added (`Harness\Transcript` keeps it in a file). To continue elsewhere, pass `messages:` (and
@@ -87,7 +101,10 @@ tools as soon as they check `Call::isCancelled()`.
 
 ### Tools
 
-`Tool::call(array $input, Call $call): Result`. A `ToolSpec`'s schema must have `"type": "object"`;
+A tool implements `Tool`: `spec(): ToolSpec` (name, description, JSON schema of the input, `Hints`)
+and `call(array $input, Call $call): Result`; `ClosureTool` makes one from a spec and a closure. The
+run reads its tools from a `ToolSource`, whose `tools()` yields them; `Tools` is the fixed list.
+A `ToolSpec`'s schema must have `"type": "object"`;
 schema nodes PHP holds as empty arrays (`'properties' => []`) are sent as `{}`. `Result` keeps apart what the model sees
 (`content`), what the application gets (`value`, in the `ToolEnded` event) and what is only logged
 (`meta`); `error: true` marks a failure. `Call` carries the call `id`, the `run`, the host's
@@ -123,7 +140,9 @@ final class Unlockable implements ToolSource
 ## Events
 
 Each item goes `started → delta* → ended`; every event has the `turn` number and the `parent` tool
-call id when its run is nested (null at the top). `toArray()` and `json_encode()` give `type` plus the
+call id when its run is nested (null at the top). Every constructor takes these two first
+(`new StepEnded(turn, parent, n)`); the list leaves them out. `turn` counts the run's turns, and a
+resume (a turn of `Answer`s) is a turn too. `toArray()` and `json_encode()` give `type` plus the
 fields, so an SSE route writes one line per event; `Events::fromArray()` rebuilds the typed event.
 
 ```
@@ -131,9 +150,12 @@ TurnStarted(turn)                       TurnEnded(turn, reason, usage, ?error, ?
 StepStarted(turn, n)                    StepEnded(turn, n)                    n = 0: resumed calls
 MessageStarted(id)                      TextDelta(id, text)        ReasoningDelta(id, text)
 ToolCallStarted(id, name)               ToolInputDelta(id, json)   ToolCallReady(id, name, input)
-ToolDecided(id, decision)               ToolProgress(id, value)    ToolEnded(id, Result|Throwable)
+ToolDecided(id, needId, decision)       ToolProgress(id, value)    ToolEnded(id, Result|Throwable)
 MessageEnded(id, message, usage, finish)                           InputRequested(pending)
 ```
+
+`ToolDecided` is emitted on a resume once per decision answered on a call, before the call runs
+again: every `Approval`, whatever its id, and every `Question` declined with `Decision::deny()`.
 
 | class | `type` | class | `type` |
 | --- | --- | --- | --- |
@@ -239,6 +261,15 @@ asked *with* a state is always made again, a denial included, and handles it its
 is not made again when one of its approvals is denied: the model gets the error result
 `Denied: <reason>`. A declined question reaches the tool, unless an approval of the same call
 was denied too.
+
+A step may end with several `Pending` calls: parallel tool calls that each asked. Each is answered
+by its own call id, one `Answer` each, in one resume. `Answer::toArray()` keeps decisions and values
+apart; a parent's call that forwards a sub-agent's needs is answered under the prefixed ids:
+
+```json
+[{"callId": "w1", "decisions": {"approval": {"allowed": true, "reason": null}}, "values": {}},
+ {"callId": "p1", "decisions": {"w1/approval": {"allowed": false, "reason": "not now"}}, "values": {"q1/colour": "green"}}]
+```
 
 `Pending::toArray()`, one approval, then two questions with state:
 

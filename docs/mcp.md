@@ -104,9 +104,21 @@ encode, and sign or encrypt it if the client must not alter it):
 ```
 
 The second round is an `Approval` with id `confirm` on the host's side. A host that answers it with
-`Decision::deny('not now')` (or a question of the form with a denial) sends
-`{"confirm": {"action": "decline"}}`; the server then answers as it sees fit, usually a `complete`
-result saying nothing was done. `tests/Support/mcp-server.php` is a whole server in plain PHP.
+`Decision::deny('not now')` (or denies a question of the form) declines the request instead; the
+server gets the same `requestState`, without `content`, and answers as it sees fit, usually a
+`complete` result saying nothing was done:
+
+```json
+{"name": "create_user", "arguments": {},
+ "inputResponses": {"confirm": {"action": "decline"}},
+ "requestState": "eyJyb3VuZCI6MiwibmFtZSI6IkFkYSJ9"}
+
+{"resultType": "complete", "content": [{"type": "text", "text": "Ada was not created"}]}
+```
+
+The denial's reason stays on the host's side: MCP's `decline` carries none. A form with fields is
+declined the same way, `{"action": "decline"}` without `content`. `tests/Support/mcp-server.php` is
+a whole server in plain PHP.
 
 ## Connections
 

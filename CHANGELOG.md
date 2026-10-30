@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.0.1-beta4
+
+Implements SPEC.md revision 4: the round-3 users' problems were in `Compact`, plus one unbounded
+message in the accumulator.
+
+### Changed (breaking)
+
+- **`ToolDecided(turn, parent, id, needId, decision)`**, emitted once per decision answered on a
+  resumed call: every `Approval`, whatever its id, and every `Question` declined with
+  `Decision::deny()`, in the order of the call's needs (before: only the answer to the need
+  `approval`, without saying which need). A call asking approvals under custom ids (`McpTool`, a
+  tool with several approvals) emitted nothing. `toArray()` adds `needId`, which
+  `Events::fromArray()` requires. A sub-agent's approval now emits twice, which beta3 avoided: on
+  the parent's call under the forwarded id (`w1/approval`, `parent` null) and on the child's call
+  under its own (`approval`, `parent` set), each at its own level, as `ToolEnded` is.
+- **A failed turn keeps only complete steps.** The partial assistant message of the step in
+  progress, and the results of that step's calls that had finished, are discarded, as on
+  `Cancelled`: before, a middleware that threw while a step's tools ran left the assistant's
+  `ToolCall`s in `messages()` without results, and a new `Run` on them threw. A failed resume
+  leaves the calls it answered in `Ended::$pending` (before: `pending` was emptied and the calls
+  had no results); the same run takes the answers again.
+- **`Compact`'s side call uses `summarizerOptions`** (new last constructor parameter, default
+  `new Options(maxOutputTokens: 1024)`), never the step's `maxOutputTokens` and provider options: a
+  thinking model spent the step's small output budget on reasoning and returned no summary.
+- **`Compact` fails the step on a collapsed summary.** A summary that is empty, or shorter than a
+  quarter of the earlier summary it replaces, is asked for once more; a second one throws a
+  `RuntimeException` naming both sizes. Beta3 accepted a 25-byte summary after a 1,093-byte one, and
+  the agent then invented file names. An empty summary used to fail at once.
+- **`Compact` enforces a budget floor.** The fixed part of the prompt (system text, tool specs, the
+  first `keepFirst` messages), counted at first use, must count at most half the budget, compared
+  with the calibrated count; otherwise the step throws a `\LogicException` naming both and the
+  budget to set. Beta3 ran a budget the fixed part nearly filled by summarizing every step.
+- **`Compact` calibrates its count**: each count is multiplied by the ratio of the provider's
+  reported input tokens to Compact's own count of the prompt it handed on (the last ratio wins; a
+  report of zero is ignored). `Compaction::$before`/`$after` and the budget are in calibrated
+  tokens. Bytes / 4 undercounted a Qwen template by half; after one step it no longer does.
+- **`Compact` gives the summarizer the kept first messages as context** ("the start of the
+  conversation, which the agent keeps in full"), before the part to summarize. Live, the summary
+  of a part that began after the user's question reported the task as unknown and the remaining
+  work as "wait for the user's instruction".
+- **require: `fiber-interop/api ^0.3.1`** (before `dev-main`); require-dev
+  `fiber-interop/phasync ^0.4.1`. `fiber-interop/revolt` stays at `dev-main`: its only tag, v0.3.0,
+  allows `fiber-interop/scope` up to ^0.3. The internal `Signal` is gone; `fiber\Deferred` does its
+  work.
+
+### Added
+
+- `Compaction::$previousSummaryBytes` (the summary this one replaced, null for the first) and
+  `Compaction::$ratio` (the counter's calibration); the info log line gives the ratio.
+- `Compact` keeps the last 8 summaries, each under the messages it summarized, so one instance
+  shared by forked sub-agents serves each conversation its own summary, concurrent ones included,
+  without recomputing them in turns (beta3 remembered one, so two children replaced each other's).
+
+### Fixed
+
+- The error result for tool input that is not valid JSON (or not an object) quotes at most 500
+  bytes of it, cut at a character, with its length (`... (12,345 bytes total)`): a long
+  `write_file` argument cut by the token limit was echoed back whole on every retry.
+
+### Docs
+
+- README: `fiber\setup()` once per process and `fiber\run()` from a foreign fiber; the Failed
+  guarantee; several `Pending` calls in one step and the `Answer` JSON for nested ids; the `turn`
+  counter on a resume; `StepEnded(turn, parent, n)`; `Tool::spec()` and `Tools::tools()`; a
+  `Length` reply holding a backend's tool-call template as text; `ToolDecided`.
+- docs/compact.md: the side call's options, collapses, calibration, the budget floor, sharing an
+  instance and its cost. docs/policy.md and docs/agents.md: the answering middleware and the
+  array it sits in, Policy with `AgentTool`, the hints derivation, `Compact` per child.
+  docs/mcp.md: the JSON of a declined final round.
+- `examples/policy.php` and `examples/compact.php` check `$event->parent` in their renderers;
+  `compact.php` turns the summarizer's thinking off with `summarizerOptions`.
+
 ## 0.0.1-beta3
 
 Implements SPEC.md revision 3, from what the round-2 users needed.

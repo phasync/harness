@@ -18,8 +18,9 @@ $parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Read
   trailing line saying so; `meta['finish']` is the child's `FinishReason`, `meta['usage']` and
   `meta['reason']` the rest, and `Result::$value` the child's `Ended`. A failed child is an error
   result.
-- Hints follow the child's tools: read-only when all are (so several sub-agents run concurrently),
-  destructive or open-world when any is.
+- `AgentTool::spec()` derives the hints from the child's tools each time it is called: `readOnly`
+  when every child tool is read-only (so several sub-agents run concurrently), `destructive` and
+  `openWorld` when any child tool is; `idempotent` is false.
 
 ## Nested pauses
 
@@ -42,6 +43,41 @@ asked again (`[] === $context->answers()`; see the README's policy, and `Harness
 
 A CLI can answer nested needs at once, without ending the turn: the README's inline idiom loops
 while `$context->pending()` is set, and each `$next()` resumes the child with the answers.
+
+## Sub-agents and Policy
+
+A parent `Policy` sees the agent tool's derived hints, so a sub-agent with any writing tool is not
+read-only, and a parent default of `Ask` gates the delegation itself, before the child runs. Allow
+the delegation by name and let the child's own `Policy` gate its writes; the parent's answering
+middleware, listed before the parent's policy, answers the child's asks inline:
+
+```php
+$writer = new Run($model, new Tools(new ReadFile($root), new WriteFile($root)), middleware: [new Policy([
+    Rule::hints(Verdict::Allow, readOnly: true),
+    Rule::tool('write_file', Verdict::Ask),
+], default: Verdict::Deny)]);
+$policy = new Policy([Rule::tool('writer', Verdict::Allow), Rule::hints(Verdict::Allow, readOnly: true)]);
+$run    = new Run($model, new Tools(new AgentTool($writer, 'writer', 'Writes files')), middleware: [$terminal, $policy]);
+```
+
+[policy.md](policy.md) has the rest.
+
+## Compact per child
+
+A child's context grows with what it reads; give the template a `Compact`, and every fork runs it
+(a fork shares the template's middleware objects):
+
+```php
+$compact  = new Compact($summarizer, 8000, log: $log);
+$explorer = new Run($model, new Tools(new ReadFile($root), new Grep($root)), middleware: [$compact]);
+$parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Reads the project')));
+```
+
+One instance may serve every child, concurrent ones included: it keeps the last 8 summaries, each
+under the messages it summarized, so each child gets and reuses its own. The cost: beyond 8 children
+compacting at once a summary is evicted and recomputed when its child needs it again, and `last()`,
+the counter's calibration and the budget floor are the instance's, shared by all children. Give each
+template its own `Compact` for `last()` per child ([compact.md](compact.md)).
 
 ## Rendering concurrent sub-agents
 
