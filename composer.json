@@ -1,0 +1,36 @@
+{
+    "name": "phasync/harness",
+    "description": "A minimal, modular harness for running AI agents in PHP, on fiber-interop/api",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "fiber-interop/api": "^0.3",
+        "psr/log": "^1 || ^2 || ^3"
+    },
+    "require-dev": {
+        "fiber-interop/phasync": "^0.4",
+        "fiber-interop/revolt": "^0.3",
+        "revolt/event-loop": "^1.0",
+        "pestphp/pest": "^3 || ^4",
+        "friendsofphp/php-cs-fixer": "^3"
+    },
+    "autoload": {
+        "psr-4": {
+            "Harness\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Harness\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        },
+        "sort-packages": true
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}
