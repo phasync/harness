@@ -55,13 +55,13 @@ it('calls a tool and uses its result', function () {
 it('reads a file with the file tools', function () {
     $dir = \sys_get_temp_dir() . '/harness-live-' . \bin2hex(\random_bytes(4));
     \mkdir($dir);
-    \file_put_contents($dir . '/secret.txt', "The password is TANGERINE-42.\n");
+    \file_put_contents($dir . '/ticket.txt', "The ticket number is TANGERINE-42.\n");
     try {
         $run = new Run(liveModel(), new Tools(new ReadFile(new Root($dir))), options: new Options(maxOutputTokens: 1500));
-        turn($run, user('Read secret.txt and tell me the password, nothing else.'));
+        turn($run, user('Read ticket.txt and tell me the ticket number, nothing else.'));
         expect($run->ended()->reason)->toBe(Reason::Done)->and(liveFinalText($run))->toContain('TANGERINE-42');
     } finally {
-        \unlink($dir . '/secret.txt');
+        \unlink($dir . '/ticket.txt');
         \rmdir($dir);
     }
 })->group('live')->skip($skip, 'HARNESS_OPENAI_URL is not set');
