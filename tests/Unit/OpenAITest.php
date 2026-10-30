@@ -130,3 +130,14 @@ it('refuses what it cannot send', function () {
     expect(fn () => [...$model->stream(new Prompt(null, [user('x')], [], new Options(toolChoice: ToolChoice::Required), live()))])->toThrow(Harness\UnsupportedOptionException::class)
         ->and(fn () => [...$model->stream(new Prompt(null, [new Message(Role::User, [new Media('video/mp4', 'x')])], [], new Options(), live()))])->toThrow(Harness\UnsupportedContentException::class);
 });
+
+it('continues an assistant message by sending it last, its reasoning with it for the same model', function () {
+    $t    = new FakeTransport(sse(delta(['content' => ' Three.']), delta([], 'stop')));
+    $edit = new Message(Role::Assistant, [new Reasoning('count', ['model' => 'qwen']), new Text('One. Two.')]);
+    [...(new ChatCompletions($t, 'http://h/v1', 'qwen'))->stream(Harness\Testing\TestPrompt::make(null, [user('count'), $edit], continue: true))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body['messages'])->toBe([
+        ['role' => 'user', 'content' => 'count'],
+        ['role' => 'assistant', 'content' => 'One. Two.', 'reasoning_content' => 'count'],
+    ]);
+});

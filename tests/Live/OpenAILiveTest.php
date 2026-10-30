@@ -65,3 +65,37 @@ it('reads a file with the file tools', function () {
         \rmdir($dir);
     }
 })->group('live')->skip($skip, 'HARNESS_OPENAI_URL is not set');
+
+it('continues an interrupted reply from the host\'s edit', function () {
+    $run  = new Run(liveModel(), new Tools(), options: new Options(maxOutputTokens: 1500));
+    $text = '';
+    \fiber\run(function () use ($run, &$text) {
+        foreach ($run->turn(user('Write the sentences "Number one." through "Number eight." in order, separated by single spaces, and nothing else.')) as $e) {
+            if ($e instanceof TextDelta) {
+                $text .= $e->text;
+                if (\str_contains($text, '.')) {
+                    $run->interrupt();
+                }
+            }
+        }
+    });
+    $ended = $run->ended();
+    expect($ended->reason)->toBe(Reason::Interrupted)->and($ended->partial)->not->toBeNull();
+
+    // The first sentence is replaced by four; the model goes on from there.
+    $replacement = 'Number one. Number two. Number three. Number four.';
+    $parts       = \array_values(\array_filter($ended->partial->parts, fn ($p) => !$p instanceof Harness\Part\Text));
+    $edited      = new Harness\Message(Harness\Role::Assistant, [...$parts, new Harness\Part\Text($replacement)]);
+    $continued   = '';
+    \fiber\run(function () use ($run, $edited, &$continued) {
+        foreach ($run->turn(new Harness\Resume($edited)) as $e) {
+            if ($e instanceof TextDelta) {
+                $continued .= $e->text;
+            }
+        }
+    });
+    expect($run->ended()->reason)->toBe(Reason::Done)
+        ->and(\ltrim($continued))->toStartWith('Number five.')
+        ->and($continued)->not->toContain('Number one.')
+        ->and(liveFinalText($run))->toStartWith($replacement);
+})->group('live')->skip($skip, 'HARNESS_OPENAI_URL is not set');

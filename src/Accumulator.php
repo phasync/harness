@@ -20,11 +20,14 @@ use Harness\Part\ToolCall;
  * A tool call whose input is not a JSON object is kept with an empty input and listed by
  * `invalidInput()`, so the run can tell the model rather than guess; the reason quotes at most
  * 500 bytes of the input and gives its length. A delta after `Finish`, or one naming an unknown or
- * already-ended tool call, is a provider bug and throws `\LogicException`.
+ * already-ended tool call, is a provider bug and throws `\LogicException`. Seeded with a message
+ * (the edit a `Resume` continues), it starts from that message's parts: text deltas extend its
+ * last text, and `message()` returns the whole message. `partial()` is the message as delivered so
+ * far, without the tool calls still streaming.
  */
 final class Accumulator
 {
-    /** @var list<array{0: string, 1: mixed}> kind ('text'|'reasoning'|'call') and payload */
+    /** @var list<array{0: string, 1: mixed}> kind ('text'|'reasoning'|'call'|'part') and payload */
     private array $parts = [];
 
     /** @var array<string, array{name: string, json: string, ended: bool}> */
@@ -36,9 +39,25 @@ final class Accumulator
     private Usage $usage;
     private ?FinishReason $finish = null;
 
-    public function __construct()
+    /** @param Message|null $seed an assistant message the deltas continue */
+    public function __construct(?Message $seed = null)
     {
         $this->usage = new Usage();
+        if (null !== $seed && Role::Assistant !== $seed->role) {
+            throw new \InvalidArgumentException('An accumulator is seeded with an assistant message');
+        }
+        foreach ($seed->parts ?? [] as $part) {
+            if ($part instanceof Text) {
+                $this->parts[] = ['text', $part->text];
+            } elseif ($part instanceof Reasoning) {
+                $this->parts[] = ['reasoning', [$part->text, $part->raw]];
+            } elseif ($part instanceof ToolCall) {
+                $this->calls[$part->id] = ['name' => $part->name, 'json' => \json_encode((object) $part->input, \JSON_THROW_ON_ERROR), 'ended' => true];
+                $this->parts[]          = ['call', $part->id];
+            } else {
+                $this->parts[] = ['part', $part];
+            }
+        }
     }
 
     /** Folds one delta into the message. */
@@ -115,16 +134,16 @@ final class Accumulator
     /** The assistant message so far. Tool calls that never got `ToolCallEnd` are closed here. */
     public function message(): Message
     {
-        $parts = [];
-        foreach ($this->parts as [$kind, $payload]) {
-            $parts[] = match ($kind) {
-                'text'      => new Text($payload),
-                'reasoning' => new Reasoning($payload[0], $payload[1]),
-                'call'      => $this->toolCall($payload),
-            };
-        }
+        return $this->build(false);
+    }
 
-        return new Message(Role::Assistant, $parts);
+    /**
+     * The assistant message as delivered so far, for an interrupted reply: its text and reasoning,
+     * and the tool calls that got `ToolCallEnd` (a call cut mid-way has no input to continue).
+     */
+    public function partial(): Message
+    {
+        return $this->build(true);
     }
 
     /** Why the named call's input was rejected, or null when it was a JSON object. */
@@ -143,6 +162,24 @@ final class Accumulator
     public function finish(): ?FinishReason
     {
         return $this->finish;
+    }
+
+    private function build(bool $completeCallsOnly): Message
+    {
+        $parts = [];
+        foreach ($this->parts as [$kind, $payload]) {
+            if ('call' === $kind && $completeCallsOnly && !$this->calls[$payload]['ended']) {
+                continue;
+            }
+            $parts[] = match ($kind) {
+                'text'      => new Text($payload),
+                'reasoning' => new Reasoning($payload[0], $payload[1]),
+                'call'      => $this->toolCall($payload),
+                'part'      => $payload,
+            };
+        }
+
+        return new Message(Role::Assistant, $parts);
     }
 
     private function openCall(string $id): void

@@ -13,4 +13,6 @@ enum ErrorKind: string
     case TransportError      = 'transport_error';
     case ToolRetriesExceeded = 'tool_retries_exceeded';
     case MiddlewareError     = 'middleware_error';
+    /** A tool threw a `\LogicException` (misuse, which an error result would hide from the host). */
+    case ToolError = 'tool_error';
 }

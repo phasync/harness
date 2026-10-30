@@ -14,12 +14,18 @@ namespace Harness;
  * calls): `appended` and `Run::messages()` hold only complete steps, every `ToolCall` with its
  * `ToolResult` or among `pending`, so a host may build a new `Run` on them to retry. A failed
  * resume leaves the calls it answered in `pending`, still awaiting input.
+ *
+ * `partial` is set only for `Reason::Interrupted` while the model streamed: the assistant message
+ * as delivered so far (its text as streamed, its reasoning, the tool calls that were complete),
+ * which is nowhere else; `finish` is null then. `queued` holds the messages given to
+ * `Run::interject()` that did not land because the turn ended before another model call.
  */
 final readonly class Ended
 {
     /**
      * @param list<Message> $appended
      * @param list<Pending> $pending
+     * @param list<Message> $queued
      */
     public function __construct(
         public Reason $reason,
@@ -29,6 +35,8 @@ final readonly class Ended
         public ?\Throwable $error = null,
         public ?ErrorKind $errorKind = null,
         public ?FinishReason $finish = null,
+        public ?Message $partial = null,
+        public array $queued = [],
     ) {
     }
 
@@ -47,6 +55,8 @@ final readonly class Ended
             'error'     => null === $this->error ? null : ['class' => $this->error::class, 'message' => $this->error->getMessage()],
             'errorKind' => $this->errorKind?->value,
             'finish'    => $this->finish?->value,
+            'partial'   => $this->partial?->toArray(),
+            'queued'    => \array_map(static fn (Message $m) => $m->toArray(), $this->queued),
         ];
     }
 }

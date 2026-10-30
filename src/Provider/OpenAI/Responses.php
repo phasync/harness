@@ -43,7 +43,8 @@ use Harness\Usage;
  * optional properties removed, so the tool sees the input its own schema describes. A schema that
  * cannot be made strict (a free-form object, `oneOf`, `allOf`, `not`, `if`, pattern properties)
  * is sent with `strict: false` and streams as usual. `Options::$provider['openai']` is merged into
- * the request body last.
+ * the request body last. A `Prompt::$continue` throws `UnsupportedOptionException`: the API has no
+ * continuation of an assistant message.
  */
 final readonly class Responses implements Model
 {
@@ -169,6 +170,9 @@ final readonly class Responses implements Model
      */
     private function request(Prompt $prompt): array
     {
+        if ($prompt->continue) {
+            throw new UnsupportedOptionException('The Responses API cannot continue an assistant message (Prompt::$continue, from a Resume). The fallback is the host\'s to choose: append the edit as a finished assistant message (a new Run with messages: [...$run->messages(), $edited]) and ask for the next one with a user message');
+        }
         $o       = $prompt->options;
         $request = ['model' => $this->model, 'input' => $this->input($prompt), 'stream' => true, 'store' => $this->store];
         if (null !== $prompt->system) {

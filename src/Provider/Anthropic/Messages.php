@@ -29,6 +29,7 @@ use Harness\Role;
 use Harness\ToolChoice;
 use Harness\ToolSpec;
 use Harness\UnsupportedContentException;
+use Harness\UnsupportedOptionException;
 use Harness\Usage;
 
 /**
@@ -38,6 +39,11 @@ use Harness\Usage;
  * API requires. `maxTokens` is used when `Options::$maxOutputTokens` is null (the API requires one).
  * `Options::$provider['anthropic']` is merged into the request body last: `thinking`,
  * `cache_control`, `output_config` and the rest go there.
+ *
+ * A `Prompt::$continue` is sent as a prefill: the assistant message goes last, without its
+ * reasoning and with the trailing whitespace of its text cut (the API refuses both), and the
+ * model's reply continues it. With thinking on the API takes no prefill, and with a tool call
+ * last there is nothing to continue: both throw.
  */
 final readonly class Messages implements Model
 {
@@ -201,13 +207,50 @@ final readonly class Messages implements Model
                 ToolChoice::Tool     => ['type' => 'tool', 'name' => $o->tool],
             };
         } elseif (ToolChoice::Required === $o->toolChoice || ToolChoice::Tool === $o->toolChoice) {
-            throw new \Harness\UnsupportedOptionException("toolChoice {$o->toolChoice->name} needs at least one tool in the prompt");
+            throw new UnsupportedOptionException("toolChoice {$o->toolChoice->name} needs at least one tool in the prompt");
         }
         if (null !== $o->temperature) {
             $request['temperature'] = $o->temperature;
         }
+        $request = \array_replace($request, $o->provider['anthropic'] ?? []);
+        if ($prompt->continue) {
+            $request['messages'] = $this->prefill($request, $prompt->messages[\count($prompt->messages) - 1]);
+        }
 
-        return \array_replace($request, $o->provider['anthropic'] ?? []);
+        return $request;
+    }
+
+    /**
+     * The request's messages with the last, the assistant message to continue, as a prefill.
+     *
+     * @param array<string, mixed> $request
+     *
+     * @return list<array{role: string, content: list<array<string, mixed>>}>
+     */
+    private function prefill(array $request, Message $last): array
+    {
+        if ('disabled' !== ($request['thinking']['type'] ?? 'disabled')) {
+            throw new UnsupportedOptionException('The Messages API takes no prefill with thinking on, so it cannot continue an assistant message (Prompt::$continue, from a Resume). Turn thinking off for the resumed turn, or append the edit as a finished assistant message (a new Run with messages: [...$run->messages(), $edited]) and ask for the next one with a user message');
+        }
+        $content = $this->assistant(new Message(Role::Assistant, \array_values(\array_filter($last->parts, static fn (\Harness\Part $p) => !$p instanceof Reasoning))));
+        $end     = \array_key_last($content);
+        if (null === $end || 'text' !== $content[$end]['type']) {
+            throw new UnsupportedContentException('The Messages API continues a prefill of text; the message to continue ' . (null === $end ? 'has no text' : "ends with a {$content[$end]['type']} block"));
+        }
+        $content[$end]['text'] = \rtrim($content[$end]['text']);
+        if ('' === $content[$end]['text']) {
+            \array_pop($content);
+            if ([] === $content) {
+                throw new UnsupportedContentException('The Messages API continues a prefill of text; the message to continue is only whitespace');
+            }
+        }
+        $messages = $request['messages'];
+        if ('assistant' === $messages[\count($messages) - 1]['role']) {
+            \array_pop($messages);     // the edit as messages() sent it; it follows a user message
+        }
+        $messages[] = ['role' => 'assistant', 'content' => $content];
+
+        return $messages;
     }
 
     /**

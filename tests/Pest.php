@@ -28,7 +28,7 @@ use Harness\Usage;
  *
  * @return list<Event>
  */
-function turn(Run $run, Message|array $input): array
+function turn(Run $run, Message|Harness\Resume|array $input): array
 {
     return \fiber\run(static function () use ($run, $input): array {
         $events = [];

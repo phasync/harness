@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace Harness;
 
 use Harness\Event\InputRequested;
+use Harness\Event\Interjected;
 use Harness\Event\MessageEnded;
+use Harness\Event\MessageResumed;
 use Harness\Event\MessageStarted;
 use Harness\Event\ReasoningDelta;
 use Harness\Event\StepEnded;
@@ -39,6 +41,8 @@ final class Events
             'step_started'      => new StepStarted($t, $p, $data['n']),
             'step_ended'        => new StepEnded($t, $p, $data['n']),
             'message_started'   => new MessageStarted($t, $p, $data['id']),
+            'message_resumed'   => new MessageResumed($t, $p, $data['id']),
+            'interjected'       => new Interjected($t, $p, Message::fromArray($data['message'])),
             'text_delta'        => new TextDelta($t, $p, $data['id'], $data['text']),
             'reasoning_delta'   => new ReasoningDelta($t, $p, $data['id'], $data['text']),
             'tool_call_started' => new ToolCallStarted($t, $p, $data['id'], $data['name']),

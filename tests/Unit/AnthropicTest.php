@@ -125,3 +125,24 @@ it('maps errors, in the status and in the stream', function (Response $response,
     'overloaded' => [anthropicStream(['type' => 'error', 'error' => ['type' => 'overloaded_error', 'message' => 'busy']]), ErrorKind::RateLimited],
     'cut off'    => [anthropicStream(['type' => 'message_start', 'message' => ['usage' => []]]), ErrorKind::TransportError],
 ]);
+
+it('continues an assistant message as a prefill, without reasoning or trailing whitespace', function () {
+    $t    = new FakeTransport(anthropicStream(['type' => 'message_delta', 'delta' => ['stop_reason' => 'end_turn']], ['type' => 'message_stop']));
+    $edit = new Message(Role::Assistant, [new Reasoning('x', ['model' => 'claude-x', 'blocks' => [['type' => 'thinking', 'thinking' => 'x', 'signature' => 'S']]]), new Text("One. Two. \n")]);
+    [...(new Messages($t, 'k', 'claude-x'))->stream(Harness\Testing\TestPrompt::make(null, [user('count'), $edit], continue: true))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body['messages'])->toBe([
+        ['role' => 'user', 'content' => [['type' => 'text', 'text' => 'count']]],
+        ['role' => 'assistant', 'content' => [['type' => 'text', 'text' => 'One. Two.']]],
+    ]);
+});
+
+it('throws on a continuation with thinking on, or of a message that ends with a tool call', function () {
+    $model    = new Messages(new FakeTransport(), 'k', 'claude-x');
+    $thinking = new Options(provider: ['anthropic' => ['thinking' => ['type' => 'enabled', 'budget_tokens' => 2000]]]);
+    $edit     = new Message(Role::Assistant, [new Text('One.')]);
+    expect(fn () => [...$model->stream(Harness\Testing\TestPrompt::make(null, [user('x'), $edit], options: $thinking, continue: true))])
+        ->toThrow(Harness\UnsupportedOptionException::class, 'append the edit as a finished assistant message')
+        ->and(fn () => [...$model->stream(Harness\Testing\TestPrompt::make(null, [user('x'), new Message(Role::Assistant, [new Text('a'), new ToolCall('t', 'n', [])])], continue: true))])
+        ->toThrow(Harness\UnsupportedContentException::class, 'tool_use');
+});

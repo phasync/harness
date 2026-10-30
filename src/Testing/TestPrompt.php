@@ -20,8 +20,8 @@ final class TestPrompt
      * @param list<Message>  $messages
      * @param list<ToolSpec> $tools
      */
-    public static function make(?string $system = null, array $messages = [], array $tools = [], Options $options = new Options()): Prompt
+    public static function make(?string $system = null, array $messages = [], array $tools = [], Options $options = new Options(), bool $continue = false): Prompt
     {
-        return new Prompt($system, $messages, $tools, $options, new Cancel(static fn (): bool => false));
+        return new Prompt($system, $messages, $tools, $options, new Cancel(static fn (): bool => false), $continue);
     }
 }

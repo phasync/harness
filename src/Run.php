@@ -9,7 +9,9 @@ use function fiber\await_all;
 use function fiber\go;
 use function fiber\run;
 use Harness\Event\InputRequested;
+use Harness\Event\Interjected;
 use Harness\Event\MessageEnded;
+use Harness\Event\MessageResumed;
 use Harness\Event\MessageStarted;
 use Harness\Event\ReasoningDelta as ReasoningEvent;
 use Harness\Event\StepEnded;
@@ -32,7 +34,8 @@ use Psr\Log\NullLogger;
 
 /**
  * A conversation with a model and its tools. `turn()` takes a user message (or the answers to a
- * turn that ended awaiting input) and yields the turn's events; `ended()` then says how it ended.
+ * turn that ended awaiting input, or a `Resume` of an interrupted reply) and yields the turn's
+ * events; `ended()` then says how it ended.
  * The run keeps every message in memory; `messages` and `pending` restore one in another process.
  *
  * A turn runs in its own coroutine, inside a new `\Scope` and its own `fiber\run()`, so it ends with
@@ -53,6 +56,11 @@ final class Run
     private int $turns         = 0;
     private bool $running      = false;
     private bool $cancelled    = false;
+    private bool $interrupted  = false;
+    /** The interrupted reply, as delivered when the turn's model stream stopped. */
+    private ?Message $partial  = null;
+    /** @var list<Message> user messages given to interject(), not yet landed */
+    private array $interjections = [];
     /** The tool call this run's current turn is nested in, if any. */
     private ?Call $parentCall  = null;
     private ?Ended $ended      = null;
@@ -128,31 +136,36 @@ final class Run
     }
 
     /**
-     * Runs one turn and yields its events, the last being `TurnEnded`. `$input` is a user message,
-     * or, after a turn that ended `AwaitingInput`, one `Answer` per pending call. `$parentCall` is the
+     * Runs one turn and yields its events, the last being `TurnEnded`. `$input` is a user message;
+     * after a turn that ended `AwaitingInput`, one `Answer` per pending call; after one that ended
+     * `Interrupted`, a `Resume` with the edited reply, which the model continues (valid only when
+     * the run's last message is a user message). `$parentCall` is the
      * tool call this run is nested in (`Agents\AgentTool` passes it): events then carry its id as
      * `parent`, and cancelling the outer run cancels this turn too. Must be iterated
      * inside `fiber\run()`. Delivery is synchronous: the turn goes on after an event only once the
      * consumer asks for the next one. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`.
      *
-     * @param Message|list<Answer> $input
+     * @param Message|Resume|list<Answer> $input
      *
      * @return \Generator<int, Event>
      */
-    public function turn(Message|array $input, ?Call $parentCall = null): \Generator
+    public function turn(Message|Resume|array $input, ?Call $parentCall = null): \Generator
     {
         if ($this->running) {
             throw new \LogicException('A turn is already running on this Run; finish iterating it first');
         }
-        $answers          = $this->checkInput($input);
-        $this->running    = true;
-        $this->cancelled  = false;
-        $this->parentCall = $parentCall;
-        $this->ended      = null;
-        $parent           = $parentCall?->id;
-        $turn             = ++$this->turns;
-        $queue            = new EventQueue();
+        $answers             = $this->checkInput($input);
+        $this->running       = true;
+        $this->cancelled     = false;
+        $this->interrupted   = false;
+        $this->partial       = null;
+        $this->interjections = [];
+        $this->parentCall    = $parentCall;
+        $this->ended         = null;
+        $parent              = $parentCall?->id;
+        $turn                = ++$this->turns;
+        $queue               = new EventQueue();
 
         $globals = [$_GET, $_POST, $_COOKIE, $_FILES, $_SERVER, $_REQUEST];
         try {
@@ -208,15 +221,54 @@ final class Run
     }
 
     /**
+     * Stops the running turn as `cancel()` does, but it ends `Reason::Interrupted`, and when the
+     * model was streaming, `Ended::$partial` holds its reply as delivered so far (text as
+     * streamed, reasoning, the complete tool calls). The partial is not in `messages()`: the host
+     * edits it and continues it with `turn(new Resume($edited))`. Has no effect when no turn is
+     * running.
+     */
+    public function interrupt(): void
+    {
+        if ($this->running) {
+            $this->interrupted = true;
+            $this->cancelled   = true;
+        }
+    }
+
+    /**
+     * Queues a user message for the running turn: it is appended at the next step boundary, after
+     * the step's tool results and before the next model call, with an `Interjected` event, so the
+     * host redirects a long turn without losing the step in flight. Several land in order. A reply
+     * without tool calls does not end the turn while interjections wait: the model answers them.
+     * Those that cannot land before the turn ends (it stopped, paused, failed or was cancelled)
+     * are in `Ended::$queued`. Throws when no turn is running: start one with `turn()`.
+     */
+    public function interject(Message $user): void
+    {
+        if (Role::User !== $user->role) {
+            throw new \InvalidArgumentException('An interjection is a user message');
+        }
+        foreach ($user->parts as $part) {
+            if ($part instanceof ToolResult) {
+                throw new \InvalidArgumentException('An interjection holds no ToolResult: tool results are the run\'s to append');
+            }
+        }
+        if (!$this->running) {
+            throw new \LogicException('No turn is running to interject in; start one with turn()');
+        }
+        $this->interjections[] = $user;
+    }
+
+    /**
      * True from `turn()` until the turn's last event, `TurnEnded`, was handled: while it is,
-     * `cancel()` has an effect and `ended()` throws.
+     * `cancel()`, `interrupt()` and `interject()` have an effect and `ended()` throws.
      */
     public function isRunning(): bool
     {
         return $this->running;
     }
 
-    /** True while a running turn has been cancelled, directly or through the run it is nested in. */
+    /** True while a running turn has been cancelled or interrupted, directly or through the run it is nested in. */
     public function isCancelled(): bool
     {
         return $this->running && ($this->cancelled || ($this->parentCall?->isCancelled() ?? false));
@@ -229,13 +281,24 @@ final class Run
     }
 
     /**
-     * @param Message|list<Answer> $input
+     * @param Message|Resume|list<Answer> $input
      *
      * @return array<string, Answer>
      */
-    private function checkInput(Message|array $input): array
+    private function checkInput(Message|Resume|array $input): array
     {
         $ids = \array_map(static fn (Pending $p) => $p->call->id, $this->pending);
+        if ($input instanceof Resume) {
+            if ([] !== $this->pending) {
+                throw new \LogicException('The run awaits input for tool calls [' . \implode(', ', $ids) . ']; pass one Answer per call to turn(), not a Resume');
+            }
+            $last = [] === $this->messages ? null : $this->messages[\count($this->messages) - 1];
+            if (Role::User !== $last?->role) {
+                throw new \LogicException('A Resume continues the reply to the last message, which must be a user message; this run\'s last message is ' . (null === $last ? 'missing' : 'an assistant message') . '. An interrupted reply is in Ended::$partial, never in messages()');
+            }
+
+            return [];
+        }
         if ($input instanceof Message) {
             if (Role::User !== $input->role) {
                 throw new \InvalidArgumentException('A turn starts from a user message');
@@ -291,7 +354,7 @@ final class Run
     }
 
     /** @param array<string, Answer> $answers */
-    private function loop(Message|array $input, array $answers, int $turn, ?string $parent, EventQueue $queue): void
+    private function loop(Message|Resume|array $input, array $answers, int $turn, ?string $parent, EventQueue $queue): void
     {
         $emit    = $queue->push(...);
         $cancel  = new Cancel($this->isCancelled(...));
@@ -305,13 +368,15 @@ final class Run
         $kind    = null;
         // The messages up to $complete are whole steps; a failure discards the rest (see Ended).
         $complete = $start;
-        $resuming = !$input instanceof Message;
+        $resuming = \is_array($input);
+        // The edited reply the first step continues; it joins messages() once that step completed.
+        $seed = $input instanceof Resume ? $input->message : null;
         $emit(new TurnStarted($turn, $parent));
         try {
             if ($input instanceof Message) {
                 $this->messages[] = $input;
                 $complete         = \count($this->messages);
-            } else {
+            } elseif (\is_array($input)) {
                 $emit(new StepStarted($turn, $parent, 0));
                 $this->stepTools     = $this->readTools();
                 [$results, $pending] = $this->runCalls(\array_map(static fn (Pending $p) => $p->call, $this->pending), $answers, [], $turn, $parent, $emit, $retries);
@@ -332,10 +397,22 @@ final class Run
                     $reason = Reason::Cancelled;
                     break;
                 }
+                if (null === $seed) {
+                    // The step boundary: interjections land after the last step's results.
+                    while ([] !== $this->interjections) {
+                        $this->messages[] = $user = \array_shift($this->interjections);
+                        $complete         = \count($this->messages);
+                        $emit(new Interjected($turn, $parent, $user));
+                    }
+                }
                 $emit(new StepStarted($turn, $parent, $n));
                 $this->stepTools = $this->readTools();
                 $specs           = \array_values(\array_map(static fn (Tool $t) => $t->spec(), $this->stepTools));
-                $reply           = $this->modelStep(new Prompt($this->system, $this->messages, $specs, $this->options, $cancel), $turn, $parent, $emit);
+                $prompt          = null === $seed
+                    ? new Prompt($this->system, $this->messages, $specs, $this->options, $cancel)
+                    : new Prompt($this->system, [...$this->messages, $seed], $specs, $this->options, $cancel, continue: true);
+                $reply = $this->modelStep($prompt, $turn, $parent, $emit, $seed);
+                $seed  = null;
                 if (null === $reply) {
                     $emit(new StepEnded($turn, $parent, $n));
                     $reason = Reason::Cancelled;
@@ -345,22 +422,26 @@ final class Run
                 $usage                                    = $usage->plus($stepUsage);
                 $this->messages[]                         = $message;
                 $calls                                    = \array_values(\array_filter($message->parts, static fn (Part $p) => $p instanceof ToolCall));
+                $results                                  = [];
                 if ([] === $calls) {
                     $complete = \count($this->messages);
                     $emit(new StepEnded($turn, $parent, $n));
-                    $reason = Reason::Done;
-                    break;
-                }
-                [$results, $pending] = $this->runCalls($calls, [], $invalid, $turn, $parent, $emit, $retries);
-                if ([] !== $results) {
-                    $this->messages[] = new Message(Role::User, $results);
-                }
-                $complete = \count($this->messages);
-                $emit(new StepEnded($turn, $parent, $n));
-                $this->checkRetries($retries);
-                if ([] !== $pending) {
-                    $reason = Reason::AwaitingInput;
-                    break;
+                    if ([] === $this->interjections) {
+                        $reason = Reason::Done;
+                        break;
+                    }
+                } else {
+                    [$results, $pending] = $this->runCalls($calls, [], $invalid, $turn, $parent, $emit, $retries);
+                    if ([] !== $results) {
+                        $this->messages[] = new Message(Role::User, $results);
+                    }
+                    $complete = \count($this->messages);
+                    $emit(new StepEnded($turn, $parent, $n));
+                    $this->checkRetries($retries);
+                    if ([] !== $pending) {
+                        $reason = Reason::AwaitingInput;
+                        break;
+                    }
                 }
                 if ($this->isCancelled()) {
                     $reason = Reason::Cancelled;
@@ -382,6 +463,7 @@ final class Run
                 $e instanceof TransportException             => ErrorKind::TransportError,
                 $e instanceof ToolRetriesExceeded            => ErrorKind::ToolRetriesExceeded,
                 ($this->origin[$e] ?? null) === 'middleware' => ErrorKind::MiddlewareError,
+                ($this->origin[$e] ?? null) === 'tool'       => ErrorKind::ToolError,
                 default                                      => ErrorKind::ModelError,
             };
             $this->log->error('Turn {turn} failed: {message}', ['turn' => $turn, 'message' => $e->getMessage(), 'exception' => $e, 'kind' => $kind->value]);
@@ -391,8 +473,15 @@ final class Run
                 $pending = $this->pending;  // the answered calls did not finish: they still await input
             }
         }
-        $this->pending = $pending;
-        $this->ended   = new Ended($reason, \array_slice($this->messages, $start), $pending, $usage, $error, $kind, $finish);
+        $partial = null;
+        if (Reason::Cancelled === $reason && $this->interrupted) {
+            $reason  = Reason::Interrupted;
+            $partial = $this->partial;
+            $finish  = null;
+        }
+        $this->pending       = $pending;
+        $this->ended         = new Ended($reason, \array_slice($this->messages, $start), $pending, $usage, $error, $kind, $finish, $partial, $this->interjections);
+        $this->interjections = [];
         if ([] !== $pending) {
             $emit(new InputRequested($turn, $parent, $pending));
         }
@@ -404,17 +493,17 @@ final class Run
     }
 
     /**
-     * One model call. Returns the assistant message, its usage, the invalid tool inputs and the
-     * finish reason, or null when the turn was cancelled while it streamed (the partial message is
-     * discarded).
+     * One model call, continuing `$seed` when given. Returns the assistant message, its usage, the
+     * invalid tool inputs and the finish reason, or null when the turn was cancelled while it
+     * streamed (the partial message is discarded, or kept for `Ended::$partial` on an interrupt).
      *
      * @return array{0: Message, 1: Usage, 2: array<string, string>, 3: FinishReason}|null
      */
-    private function modelStep(Prompt $prompt, int $turn, ?string $parent, \Closure $emit): ?array
+    private function modelStep(Prompt $prompt, int $turn, ?string $parent, \Closure $emit, ?Message $seed): ?array
     {
         $id = 'msg_' . \bin2hex(\random_bytes(8));
-        $emit(new MessageStarted($turn, $parent, $id));
-        $acc = new Accumulator();
+        $emit(null === $seed ? new MessageStarted($turn, $parent, $id) : new MessageResumed($turn, $parent, $id));
+        $acc = new Accumulator($seed);
         try {
             foreach ($this->modelChain(0, $prompt) as $delta) {
                 if (!$delta instanceof Delta) {
@@ -434,11 +523,15 @@ final class Run
                     default                                => null,
                 };
                 if ($this->isCancelled()) {
+                    $this->partial = $acc->partial();
+
                     return null;
                 }
             }
         } catch (Cancelled $e) {
             if ($this->isCancelled()) {
+                $this->partial = $acc->partial();
+
                 return null;
             }
             throw $e;
@@ -629,6 +722,9 @@ final class Run
         } catch (\Throwable $e) {
             if (($this->origin[$e] ?? null) !== 'tool') {
                 throw $this->mark($e, 'middleware');
+            }
+            if ($e instanceof \LogicException) {
+                throw $e;   // misuse: an error result would have the model retry it forever
             }
             $this->log->error('Tool {name} ({id}) threw {class}: {message}', ['name' => $call->name, 'id' => $call->id, 'class' => $e::class, 'message' => $e->getMessage(), 'exception' => $e]);
             $emit(new ToolEnded($turn, $parent, $call->id, $e));

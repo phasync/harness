@@ -241,3 +241,8 @@ it('runs a tool loop over the Responses API', function () {
             ['type' => 'function_call_output', 'call_id' => 'call_1', 'output' => '12:00'],
         ]);
 });
+
+it('throws on a continuation, naming the fallback', function () {
+    $prompt = TestPrompt::make(null, [user('x'), new Message(Role::Assistant, [new Text('One.')])], continue: true);
+    expect(fn () => respond(new Response(200, [], []), $prompt))->toThrow(Harness\UnsupportedOptionException::class, 'append the edit as a finished assistant message');
+});
