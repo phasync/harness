@@ -44,7 +44,7 @@ final class Events
             'tool_call_started' => new ToolCallStarted($t, $p, $data['id'], $data['name']),
             'tool_input_delta'  => new ToolInputDelta($t, $p, $data['id'], $data['json']),
             'tool_call_ready'   => new ToolCallReady($t, $p, $data['id'], $data['name'], $data['input']),
-            'tool_decided'      => new ToolDecided($t, $p, $data['id'], Decision::fromArray($data['decision'])),
+            'tool_decided'      => new ToolDecided($t, $p, $data['id'], $data['needId'], Decision::fromArray($data['decision'])),
             'tool_progress'     => new ToolProgress($t, $p, $data['id'], $data['value']),
             'tool_ended'        => new ToolEnded($t, $p, $data['id'], isset($data['outcome']['class'])
                 ? new ReplayedError($data['outcome']['class'], $data['outcome']['message'])

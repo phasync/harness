@@ -18,8 +18,9 @@ use Harness\Part\ToolCall;
  * Folds the deltas of one reply into the assistant `Message`. Parts keep the order in which they
  * began; consecutive text (or reasoning) deltas extend the last part when it has the same kind.
  * A tool call whose input is not a JSON object is kept with an empty input and listed by
- * `invalidInput()`, so the run can tell the model rather than guess. A delta after `Finish`, or one
- * naming an unknown or already-ended tool call, is a provider bug and throws `\LogicException`.
+ * `invalidInput()`, so the run can tell the model rather than guess; the reason quotes at most
+ * 500 bytes of the input and gives its length. A delta after `Finish`, or one naming an unknown or
+ * already-ended tool call, is a provider bug and throws `\LogicException`.
  */
 final class Accumulator
 {
@@ -163,16 +164,33 @@ final class Accumulator
         try {
             $input = \json_decode($json, true, 512, \JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            $this->invalid[$id] = 'The input was not valid JSON (' . $e->getMessage() . '): ' . $json;
+            $this->invalid[$id] = 'The input was not valid JSON (' . $e->getMessage() . '): ' . self::excerpt($json);
 
             return [];
         }
         if (!\is_array($input) || (\array_is_list($input) && [] !== $input)) {
-            $this->invalid[$id] = 'The input must be a JSON object, got: ' . $json;
+            $this->invalid[$id] = 'The input must be a JSON object, got: ' . self::excerpt($json);
 
             return [];
         }
 
         return $input;
+    }
+
+    /**
+     * At most 500 bytes of the input, cut at a character boundary, and its total length when cut:
+     * a long argument cut off by the token limit is not echoed back whole on every retry.
+     */
+    private static function excerpt(string $json): string
+    {
+        if (\strlen($json) <= 500) {
+            return $json;
+        }
+        $end = 500;
+        while ($end > 0 && 0x80 === (\ord($json[$end]) & 0xC0)) {
+            --$end;     // a UTF-8 continuation byte: the character starts earlier
+        }
+
+        return \substr($json, 0, $end) . '... (' . \number_format(\strlen($json)) . ' bytes total)';
     }
 }

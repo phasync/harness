@@ -72,6 +72,19 @@ it('reports malformed tool input instead of guessing', function (string $json) {
         ->and($acc->invalidInput('c'))->toBeString();
 })->with(['{"a":', '[1,2]', '"str"', '42']);
 
+it('quotes at most 500 bytes of a long malformed input, cut at a character, with its length', function () {
+    // A write_file argument cut by the token limit: 12,345 bytes, a two-byte character across byte 500.
+    $json = '{"path":"a.txt","content":"' . \str_repeat('x', 472) . 'é' . \str_repeat('y', 12345 - 501);
+    expect(\strlen($json))->toBe(12345);
+    $acc = fold([new ToolCallStart('c', 'write_file'), new ToolInputDelta('c', $json), new ToolCallEnd('c')]);
+    $acc->message();
+    $why = $acc->invalidInput('c');
+    expect($why)->toStartWith('The input was not valid JSON (')
+        ->toEndWith(\substr($json, 0, 499) . '... (12,345 bytes total)')
+        ->and(\strlen($why))->toBeLessThan(650)
+        ->and(\mb_check_encoding($why, 'UTF-8'))->toBeTrue();
+});
+
 it('closes calls that never got ToolCallEnd when the message is taken', function () {
     $acc = fold([new ToolCallStart('c', 't'), new ToolInputDelta('c', '{"a":1}'), new Finish(FinishReason::Length)]);
     expect($acc->message()->parts[0])->toEqual(new ToolCall('c', 't', ['a' => 1]));

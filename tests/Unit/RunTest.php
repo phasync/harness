@@ -2,7 +2,10 @@
 
 declare(strict_types=1);
 
+use Harness\Answer;
+use Harness\Approval;
 use Harness\Call;
+use Harness\Decision;
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
 use Harness\ErrorKind;
@@ -229,6 +232,69 @@ it('ends Failed with MiddlewareError when a middleware throws', function () {
     expect($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError);
 });
 
+it('discards the step in progress when a turn fails, so a new Run on messages() can retry', function () {
+    // Step 1 completes; in step 2 one read-only call finishes and the other's middleware throws.
+    $mw = new class implements ToolMiddleware {
+        public function call(ToolCall $call, Call $context, Closure $next): Result
+        {
+            if ('c3' === $call->id) {
+                \fiber\sleep(0.01);     // after c2 finished
+
+                throw new RuntimeException('policy store down');
+            }
+
+            return $next($call, $context);
+        }
+    };
+    $read   = tool('read', fn () => Result::text('R'), new Hints(readOnly: true));
+    $model  = new FakeModel(calls(['c1', 'read', []]), calls(['c2', 'read', []], ['c3', 'read', []]));
+    $run    = new Run($model, new Tools($read), middleware: [$mw]);
+    $events = turn($run, user('go'));
+    $ended  = $run->ended();
+    expect($ended->reason)->toBe(Reason::Failed)
+        ->and($ended->errorKind)->toBe(ErrorKind::MiddlewareError)
+        ->and(\array_map(fn ($e) => $e->id, \array_values(\array_filter($events, fn ($e) => $e instanceof ToolEnded))))->toBe(['c1', 'c2'])
+        // user, c1's call, c1's result: step 2's message and c2's result are gone.
+        ->and($run->messages())->toHaveCount(3)
+        ->and($run->messages()[2]->parts[0]->callId)->toBe('c1')
+        ->and($ended->appended)->toBe($run->messages())
+        ->and($ended->pending)->toBe([]);
+    $retry = new Run(new FakeModel(says('done')), new Tools($read), messages: $run->messages());
+    turn($retry, user('try again'));
+    expect($retry->ended()->reason)->toBe(Reason::Done);
+});
+
+it('leaves the calls awaiting input when a resume fails, so it can be answered again', function () {
+    $mw = new class implements ToolMiddleware {
+        public bool $fail = true;
+
+        public function call(ToolCall $call, Call $context, Closure $next): Result
+        {
+            if ([] !== $context->answers() && $this->fail) {
+                throw new RuntimeException('audit log down');
+            }
+
+            return $next($call, $context);
+        }
+    };
+    $write = tool('write', fn (array $in, Call $call) => [] === $call->answers() ? $call->needsInput([new Approval()]) : Result::text('wrote'));
+    $run   = new Run(new FakeModel(calls(['w1', 'write', []]), says('done')), new Tools($write), middleware: [$mw]);
+    turn($run, user('go'));
+    $before = $run->messages();
+    $events = turn($run, [new Answer('w1', ['approval' => Decision::allow()])]);
+    expect($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->messages())->toBe($before)
+        ->and($run->ended()->appended)->toBe([])
+        ->and(\array_map(fn ($p) => $p->call->id, $run->ended()->pending))->toBe(['w1'])
+        ->and(types($events))->toContain('input_requested');
+    // The same run takes the answers again; a restored one does too.
+    new Run(new FakeModel(), new Tools($write), messages: $run->messages(), pending: $run->ended()->pending);
+    $mw->fail = false;
+    turn($run, [new Answer('w1', ['approval' => Decision::allow()])]);
+    expect($run->ended()->reason)->toBe(Reason::Done)
+        ->and($run->messages()[2]->parts[0]->content[0]->text)->toBe('wrote');
+});
+
 it('fails when the model stream has no Finish', function () {
     $run = new Run(new FakeModel([new TextDelta('cut')]), new Tools());
     turn($run, user('go'));
@@ -334,7 +400,7 @@ it('gives unstarted calls a cancelled result and lets a running one see isCancel
 it('fails hard on misuse', function () {
     $run = new Run(new FakeModel(says('a')), new Tools());
     expect(fn () => turn($run, new Message(Role::Assistant, [new Text('x')])))->toThrow(InvalidArgumentException::class, 'user message')
-        ->and(fn () => turn($run, [new Harness\Answer('c', ['approval' => Harness\Decision::allow()])]))->toThrow(LogicException::class, 'Nothing awaits input')
+        ->and(fn () => turn($run, [new Answer('c', ['approval' => Decision::allow()])]))->toThrow(LogicException::class, 'Nothing awaits input')
         ->and(fn () => $run->ended())->toThrow(LogicException::class, 'No turn has run')
         ->and(fn () => new Run(new FakeModel(), new Tools(), middleware: [new stdClass()]))->toThrow(InvalidArgumentException::class)
         ->and(fn () => turn(new Run(new FakeModel(says('x')), new Tools(tool('a', fn () => null), tool('a', fn () => null))), user('go')))->toThrow(LogicException::class, "Two tools are named 'a'");

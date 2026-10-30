@@ -303,10 +303,14 @@ final class Run
         $reason  = Reason::Done;
         $error   = null;
         $kind    = null;
+        // The messages up to $complete are whole steps; a failure discards the rest (see Ended).
+        $complete = $start;
+        $resuming = !$input instanceof Message;
         $emit(new TurnStarted($turn, $parent));
         try {
             if ($input instanceof Message) {
                 $this->messages[] = $input;
+                $complete         = \count($this->messages);
             } else {
                 $emit(new StepStarted($turn, $parent, 0));
                 $this->stepTools     = $this->readTools();
@@ -315,6 +319,8 @@ final class Run
                 if ([] !== $results) {
                     $this->messages[] = new Message(Role::User, $results);
                 }
+                $complete = \count($this->messages);
+                $resuming = false;
                 $emit(new StepEnded($turn, $parent, 0));
                 $this->checkRetries($retries);
                 if ([] !== $pending) {
@@ -340,6 +346,7 @@ final class Run
                 $this->messages[]                         = $message;
                 $calls                                    = \array_values(\array_filter($message->parts, static fn (Part $p) => $p instanceof ToolCall));
                 if ([] === $calls) {
+                    $complete = \count($this->messages);
                     $emit(new StepEnded($turn, $parent, $n));
                     $reason = Reason::Done;
                     break;
@@ -348,6 +355,7 @@ final class Run
                 if ([] !== $results) {
                     $this->messages[] = new Message(Role::User, $results);
                 }
+                $complete = \count($this->messages);
                 $emit(new StepEnded($turn, $parent, $n));
                 $this->checkRetries($retries);
                 if ([] !== $pending) {
@@ -377,6 +385,11 @@ final class Run
                 default                                      => ErrorKind::ModelError,
             };
             $this->log->error('Turn {turn} failed: {message}', ['turn' => $turn, 'message' => $e->getMessage(), 'exception' => $e, 'kind' => $kind->value]);
+            // The step in progress is discarded: its assistant message, the results of its calls.
+            $this->messages = \array_slice($this->messages, 0, $complete);
+            if ($resuming) {
+                $pending = $this->pending;  // the answered calls did not finish: they still await input
+            }
         }
         $this->pending = $pending;
         $this->ended   = new Ended($reason, \array_slice($this->messages, $start), $pending, $usage, $error, $kind, $finish);
@@ -575,14 +588,14 @@ final class Run
                     $state = $p->state;
                     foreach ($p->needs as $need) {
                         $a = $answer->answers[$need->id];
+                        if ($a instanceof Decision) {
+                            $emit(new ToolDecided($turn, $parent, $call->id, $need->id, $a));
+                        }
                         if ($need instanceof Approval && !$a->allowed) {
                             $denied[] = $a->reason;
                         }
                     }
                 }
-            }
-            if (isset($answer->answers['approval'])) {
-                $emit(new ToolDecided($turn, $parent, $call->id, $answer->answers['approval']));
             }
         }
         // State means "call me back with the answer, whatever it is": a tool that asked without

@@ -68,7 +68,7 @@ it('ends awaiting input, then runs approved calls and denies the others', functi
             new ToolResult('w1', [new Text('wrote a')]),
             new ToolResult('w2', [new Text('Denied: not b')], true),
         ])
-        ->and(\array_values(\array_map(fn ($e) => [$e->id, $e->decision->allowed], \array_filter($events, fn ($e) => $e instanceof ToolDecided))))->toBe([['w1', true], ['w2', false]])
+        ->and(\array_values(\array_map(fn ($e) => [$e->id, $e->needId, $e->decision->allowed], \array_filter($events, fn ($e) => $e instanceof ToolDecided))))->toBe([['w1', 'approval', true], ['w2', 'approval', false]])
         ->and(types($events)[1])->toBe('step_started')
         ->and($events[1]->n)->toBe(0);
 });
@@ -235,6 +235,11 @@ it('calls a tool again when its question is declined, even without state, and sh
     expect($seen)->toEqual([Decision::deny('private')])
         ->and($run->messages()[2]->parts[0]->content[0]->text)->toBe('declined: private')
         ->and($run->messages()[2]->parts[1]->content[0]->text)->toBe('Denied: no; nor this')
-        // ToolDecided carries the need `approval`, which neither call asked.
-        ->and(\array_filter($events, fn ($e) => $e instanceof ToolDecided))->toBe([]);
+        // One ToolDecided per decision: the declined question and both approvals under their own
+        // ids, in the order of the needs; the question answered with a value has none.
+        ->and(\array_values(\array_map(fn ($e) => [$e->id, $e->needId, $e->decision], \array_filter($events, fn ($e) => $e instanceof ToolDecided))))->toEqual([
+            ['a', 'name', Decision::deny('private')],
+            ['b', 'a1', Decision::deny('no')],
+            ['b', 'a2', Decision::deny('nor this')],
+        ]);
 });

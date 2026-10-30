@@ -92,8 +92,8 @@ it('passes a child\'s approval up, and a restored parent resumes the child with 
         ->and($written)->toBe([1])
         ->and($parent->messages()[2]->parts[0]->content[0]->text)->toBe('child done');
     $decided = \array_values(\array_filter($events, fn ($e) => $e instanceof ToolDecided));
-    // The decision is the child's call's: the parent's call p1 carries it under w1/approval.
-    expect(\array_map(fn ($e) => [$e->parent, $e->id], $decided))->toBe([['p1', 'w1']]);
+    // The parent's call p1 answered it under w1/approval, the child's call w1 under its own id.
+    expect(\array_map(fn ($e) => [$e->parent, $e->id, $e->needId], $decided))->toBe([[null, 'p1', 'w1/approval'], ['p1', 'w1', 'approval']]);
 });
 
 it('routes a denial to the child, whose model hears it', function () {

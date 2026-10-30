@@ -9,8 +9,11 @@ namespace Harness;
  * history), the calls awaiting input, the usage of its model calls, for `Reason::Failed` the error
  * and its kind, and `finish`, the `FinishReason` of the turn's last assistant message (null when
  * the turn completed none). `Reason::Done` only means "no tool calls": a reply cut by the token
- * limit or refused is `Done` with `finish` `Length` or `Refusal`. A cancelled turn discards the
- * partial assistant message of the step in progress; `appended` never holds it.
+ * limit or refused is `Done` with `finish` `Length` or `Refusal`. A cancelled or failed turn
+ * discards the step in progress (its partial assistant message, and on failure the results of its
+ * calls): `appended` and `Run::messages()` hold only complete steps, every `ToolCall` with its
+ * `ToolResult` or among `pending`, so a host may build a new `Run` on them to retry. A failed
+ * resume leaves the calls it answered in `pending`, still awaiting input.
  */
 final readonly class Ended
 {
