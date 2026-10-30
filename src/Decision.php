@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Harness;
 
-/** The answer to an `Approval`: allow, or deny with a reason the model is told. */
+/**
+ * The answer to an `Approval` (allow, or deny with a reason), or the host declining a `Question`
+ * (`deny($reason)`, MCP's `decline`). See `Approval` for who handles a denial.
+ */
 final readonly class Decision
 {
     private function __construct(public bool $allowed, public ?string $reason)
@@ -17,7 +20,7 @@ final readonly class Decision
         return new self(true, null);
     }
 
-    /** Do not run the call; the model gets an error result "Denied: <reason>". */
+    /** Do not run the call, or decline the question; the reason reaches the model or the asking tool. */
     public static function deny(string $reason): self
     {
         return new self(false, $reason);

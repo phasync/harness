@@ -36,10 +36,10 @@ it('round-trips messages, pending calls and answers', function () {
 
     $p = new Pending(new ToolCall('c', 'x', []), [new Question('q', 'Which?', ['a', 'b'])], ['step' => 2]);
     expect(Pending::fromArray(\json_decode(\json_encode($p->toArray()), true)))->toEqual($p);
-    $p = new Pending(new ToolCall('c', 'x', []), new Approval('writes'));
+    $p = new Pending(new ToolCall('c', 'x', []), [new Approval(reason: 'writes'), new Question('q', 'Free?')]);
     expect(Pending::fromArray(\json_decode(\json_encode($p->toArray()), true)))->toEqual($p);
 
-    foreach ([new Answer('c', Decision::deny('no')), new Answer('c', Decision::allow()), new Answer('c', ['q' => 'a'])] as $a) {
+    foreach ([new Answer('c', ['approval' => Decision::deny('no')]), new Answer('c', ['approval' => Decision::allow(), 'q' => 'a', 'n' => 3, 'r' => Decision::deny('later')])] as $a) {
         expect(Answer::fromArray(\json_decode(\json_encode($a->toArray()), true)))->toEqual($a);
     }
 });
@@ -54,8 +54,14 @@ it('rejects parts in the wrong place', function (Closure $make) {
     'media with bytes and uri'         => [fn () => new Media('image/png', 'x', 'y')],
     'media with neither'               => [fn () => new Media('image/png')],
     'unknown type'                     => [fn () => Parts::fromArray(['type' => 'video'])],
-    'pending state with an object'     => [fn () => new Pending(new ToolCall('c', 'x', []), new Approval(), ['o' => new stdClass()])],
-    'pending with no questions'        => [fn () => new Pending(new ToolCall('c', 'x', []), [])],
+    'pending state with an object'     => [fn () => new Pending(new ToolCall('c', 'x', []), [new Approval()], ['o' => new stdClass()])],
+    'pending with no needs'            => [fn () => new Pending(new ToolCall('c', 'x', []), [])],
+    'pending with a bare approval'     => [fn () => new Pending(new ToolCall('c', 'x', []), [new stdClass()])],
+    'two needs with one id'            => [fn () => new Pending(new ToolCall('c', 'x', []), [new Question('q', 'A?'), new Question('q', 'B?')])],
+    'a question with the approval id'  => [fn () => new Question('approval', 'Sure?')],
+    'a question with empty choices'    => [fn () => new Question('q', 'Pick', [])],
+    'a need with an empty id'          => [fn () => new Approval('')],
+    'an empty answer'                  => [fn () => new Answer('c', [])],
 ]);
 
 it('rebuilds every event of a turn from its array', function () {
@@ -69,12 +75,12 @@ it('rebuilds every event of a turn from its array', function () {
             return new Harness\Result([new Text('ok')], value: ['v' => 1], meta: ['m' => 2]);
         }),
         tool('boom', fn () => throw new RuntimeException('bang')),
-        tool('gated', fn (array $in, Harness\Call $call) => null === $call->decision() ? $call->needsInput(new Approval('sure?')) : Result::text('gated ran')),
+        tool('gated', fn (array $in, Harness\Call $call) => null === $call->decision() ? $call->needsInput([new Approval(reason: 'sure?')]) : Result::text('gated ran')),
     );
     $run     = new Harness\Run($model, $tools);
     $events  = turn($run, user('go'));
     $resumed = new Harness\Run(new Harness\Testing\FakeModel(says('fine')), $tools, messages: $run->messages(), pending: $run->ended()->pending);
-    $events  = [...$events, ...turn($resumed, [new Answer('c3', Decision::allow())])];
+    $events  = [...$events, ...turn($resumed, [new Answer('c3', ['approval' => Decision::allow()])])];
     $types   = [];
     foreach ($events as $event) {
         $json  = \json_decode(\json_encode($event, \JSON_THROW_ON_ERROR), true);
@@ -113,14 +119,15 @@ it('normalizes schema nodes PHP holds as empty arrays to JSON objects', function
         ->and(fn () => new Harness\ToolSpec('s', 'S', ['type' => 'string']))->toThrow(InvalidArgumentException::class, 'must have "type": "object"');
 });
 
-it('serializes the needs of a Pending with an explicit type', function () {
+it('serializes the needs of a Pending as a typed list, and the answers with decisions apart', function () {
     $call = new ToolCall('c1', 'write', ['path' => 'a']);
-    $a    = new Pending($call, new Approval('write a?'));
-    $q    = new Pending($call, [new Question('name', 'Name?'), new Question('size', 'Size?', ['s', 'm'])], ['step' => 2]);
-    expect(\json_encode($a->toArray()))->toBe('{"call":{"type":"tool_call","id":"c1","name":"write","input":{"path":"a"}},"needs":{"type":"approval","reason":"write a?"},"state":null}')
-        ->and(\json_encode($q->toArray()))->toBe('{"call":{"type":"tool_call","id":"c1","name":"write","input":{"path":"a"}},"needs":{"type":"questions","questions":[{"id":"name","text":"Name?","choices":[]},{"id":"size","text":"Size?","choices":["s","m"]}]},"state":{"step":2}}')
-        ->and(Pending::fromArray(\json_decode(\json_encode($q->toArray()), true)))->toEqual($q)
-        ->and(Pending::fromArray(\json_decode(\json_encode($a->toArray()), true)))->toEqual($a)
-        ->and(fn () => Pending::fromArray(['call' => $call->toArray(), 'needs' => [['id' => 'x', 'text' => 'X', 'choices' => []]], 'state' => null]))
-        ->toThrow(InvalidArgumentException::class, 'needs.type must be "approval" or "questions"');
+    $p    = new Pending($call, [new Approval(reason: 'write a?'), new Question('name', 'Name?'), new Question('size', 'Size?', ['s', 'm'])], ['step' => 2]);
+    expect(\json_encode($p->toArray()))->toBe('{"call":{"type":"tool_call","id":"c1","name":"write","input":{"path":"a"}},"needs":[{"type":"approval","id":"approval","reason":"write a?"},{"type":"question","id":"name","text":"Name?","choices":null},{"type":"question","id":"size","text":"Size?","choices":["s","m"]}],"state":{"step":2}}')
+        ->and(Pending::fromArray(\json_decode(\json_encode($p->toArray()), true)))->toEqual($p)
+        ->and(\json_encode((new Answer('c1', ['approval' => Decision::allow(), 'name' => 'Ada', 'size' => Decision::deny('ask later')]))->toArray()))
+        ->toBe('{"callId":"c1","decisions":{"approval":{"allowed":true,"reason":null},"size":{"allowed":false,"reason":"ask later"}},"values":{"name":"Ada"}}')
+        ->and(fn () => Pending::fromArray(['call' => $call->toArray(), 'needs' => ['type' => 'approval', 'reason' => 'x'], 'state' => null]))
+        ->toThrow(InvalidArgumentException::class, 'the 0.0.1-beta2 shape')
+        ->and(fn () => Pending::fromArray(['call' => $call->toArray(), 'needs' => [['type' => 'questions', 'id' => 'x']], 'state' => null]))
+        ->toThrow(InvalidArgumentException::class, 'type must be "approval" or "question"');
 });

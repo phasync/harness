@@ -28,8 +28,8 @@ function approvals(): ToolMiddleware
     return new class implements ToolMiddleware {
         public function call(ToolCall $call, Call $context, Closure $next): Result
         {
-            if (null === $context->decision() && !$context->spec->hints->readOnly) {
-                return $context->needsInput(new Approval("{$call->name} changes files"));
+            if ([] === $context->answers() && !$context->spec->hints->readOnly) {
+                return $context->needsInput([new Approval(reason: "{$call->name} changes files")]);
             }
 
             return $next($call, $context);
@@ -55,13 +55,13 @@ it('ends awaiting input, then runs approved calls and denies the others', functi
     $ended  = $run->ended();
     expect($ended->reason)->toBe(Reason::AwaitingInput)
         ->and(\array_map(fn (Pending $p) => $p->call->id, $ended->pending))->toBe(['w1', 'w2'])
-        ->and($ended->pending[0]->needs)->toEqual(new Approval('write changes files'))
+        ->and($ended->pending[0]->needs)->toEqual([new Approval('approval', 'write changes files')])
         ->and($events[\count($events) - 2])->toBeInstanceOf(InputRequested::class)
         ->and($written)->toBe([])
         // The read-only call's result is kept; the pending calls have none yet.
         ->and($run->messages()[2]->parts)->toEqual([new ToolResult('r1', [new Text('R')])]);
 
-    $events = turn($run, [new Answer('w1', Decision::allow()), new Answer('w2', Decision::deny('not b'))]);
+    $events = turn($run, [new Answer('w1', ['approval' => Decision::allow()]), new Answer('w2', ['approval' => Decision::deny('not b')])]);
     expect($written)->toBe(['a'])
         ->and($run->ended()->reason)->toBe(Reason::Done)
         ->and($run->messages()[3]->parts)->toEqual([
@@ -75,7 +75,7 @@ it('ends awaiting input, then runs approved calls and denies the others', functi
 
 it('calls a tool that asked questions again with the answers and its state', function () {
     $asks = tool('deploy', function (array $in, Call $call) {
-        if (null === $call->answers()) {
+        if ([] === $call->answers()) {
             return $call->needsInput([new Question('env', 'Where to?', ['staging', 'prod'])], ['build' => 42]);
         }
 
@@ -113,7 +113,7 @@ it('resumes across a serialize/unserialize boundary', function () {
         messages: \array_map(Message::fromArray(...), $data['messages']),
         pending: \array_map(Pending::fromArray(...), $data['pending']),
     );
-    turn($run, [Answer::fromArray(\json_decode(\json_encode((new Answer('w1', Decision::allow()))->toArray()), true))]);
+    turn($run, [Answer::fromArray(\json_decode(\json_encode((new Answer('w1', ['approval' => Decision::allow()]))->toArray()), true))]);
     expect($written)->toBe(['x'])
         ->and($run->ended()->reason)->toBe(Reason::Done)
         ->and($run->ended()->appended)->toHaveCount(2)
@@ -128,7 +128,7 @@ it('lets middleware answer at once, inside the tool fiber (the CLI idiom)', func
             $result = $next($call, $context);
             if (null !== $context->pending()) {
                 // A CLI reads the answer from the terminal here, with fiber\readable(STDIN).
-                $context->answer(Decision::allow());
+                $context->answer(['approval' => Decision::allow()]);
                 $result = $next($call, $context);
             }
 
@@ -148,8 +148,9 @@ it('fails hard on answers that do not match what is pending', function (Closure 
 })->with([
     'a message'       => [fn () => user('hello'), 'awaits input for tool calls [w1]'],
     'missing answer'  => [fn () => [], 'Answer every pending tool call'],
-    'wrong call id'   => [fn () => [new Answer('zz', Decision::allow())], 'Answer every pending tool call'],
-    'answers instead' => [fn () => [new Answer('w1', ['q' => 'x'])], 'answer with a Decision'],
+    'wrong call id'   => [fn () => [new Answer('zz', ['approval' => Decision::allow()])], 'Answer every pending tool call'],
+    'wrong need id'   => [fn () => [new Answer('w1', ['q' => 'x'])], 'needs [approval], answered [q]'],
+    'a value'         => [fn () => [new Answer('w1', ['approval' => 'yes'])], 'answer it with a Decision, got string'],
 ]);
 
 it('validates question answers against the choices', function () {
@@ -157,7 +158,8 @@ it('validates question answers against the choices', function () {
     $run  = new Run(new FakeModel(calls(['c', 'ask', []])), new Tools($asks));
     turn($run, user('go'));
     expect(fn () => turn($run, [new Answer('c', ['q' => 'z'])]))->toThrow(InvalidArgumentException::class, 'must be one of: a, b')
-        ->and(fn () => turn($run, [new Answer('c', ['other' => 'a'])]))->toThrow(InvalidArgumentException::class, 'asked questions [q]');
+        ->and(fn () => turn($run, [new Answer('c', ['other' => 'a'])]))->toThrow(InvalidArgumentException::class, 'needs [q], answered [other]')
+        ->and(fn () => turn($run, [new Answer('c', ['q' => Decision::allow()])]))->toThrow(InvalidArgumentException::class, 'decline it with Decision::deny()');
 });
 
 it('refuses to restore messages and pending lists that disagree', function () {
@@ -169,7 +171,7 @@ it('calls a tool again on a denial when it asked for approval with state, and sh
     $seen = [];
     $own  = tool('own', function (array $in, Call $call) use (&$seen) {
         if (null === $call->decision()) {
-            return $call->needsInput(new Approval('ok?'), ['plan' => 'x']);
+            return $call->needsInput([new Approval(reason: 'ok?')], ['plan' => 'x']);
         }
         $seen[] = [$call->decision()->allowed, $call->state()];
 
@@ -177,7 +179,7 @@ it('calls a tool again on a denial when it asked for approval with state, and sh
     });
     $bare = tool('bare', function (array $in, Call $call) use (&$seen) {
         if (null === $call->decision()) {
-            return $call->needsInput(new Approval('ok?'));
+            return $call->needsInput([new Approval(reason: 'ok?')]);
         }
         $seen[] = 'bare ran';
 
@@ -185,8 +187,54 @@ it('calls a tool again on a denial when it asked for approval with state, and sh
     });
     $run = new Run(new FakeModel(calls(['a', 'own', []], ['b', 'bare', []]), says('fine')), new Tools($own, $bare));
     turn($run, user('go'));
-    turn($run, [new Answer('a', Decision::deny('no')), new Answer('b', Decision::deny('nope'))]);
+    turn($run, [new Answer('a', ['approval' => Decision::deny('no')]), new Answer('b', ['approval' => Decision::deny('nope')])]);
     expect($seen)->toBe([[false, ['plan' => 'x']]])
         ->and($run->messages()[2]->parts[0]->content[0]->text)->toBe('handled: no')
         ->and($run->messages()[2]->parts[1]->content[0]->text)->toBe('Denied: nope');
+});
+
+it('asks for several needs at once and gets every answer by id', function () {
+    $seen = [];
+    $tool = tool('publish', function (array $in, Call $call) use (&$seen) {
+        if ([] === $call->answers()) {
+            return $call->needsInput([new Approval(reason: 'publishes'), new Question('channel', 'Where?', ['blog', 'feed']), new Question('title', 'Title?')]);
+        }
+        $seen[] = $call->answers();
+
+        return Result::text("published {$call->answers()['title']} to {$call->answers()['channel']}");
+    });
+    $run = new Run(new FakeModel(calls(['p', 'publish', []]), says('ok')), new Tools($tool));
+    turn($run, user('go'));
+    expect(\json_encode($run->ended()->pending[0]->toArray()['needs']))->toBe('[{"type":"approval","id":"approval","reason":"publishes"},{"type":"question","id":"channel","text":"Where?","choices":["blog","feed"]},{"type":"question","id":"title","text":"Title?","choices":null}]');
+    turn($run, [new Answer('p', ['approval' => Decision::allow(), 'channel' => 'blog', 'title' => 'Hi'])]);
+    expect($seen)->toEqual([['approval' => Decision::allow(), 'channel' => 'blog', 'title' => 'Hi']])
+        ->and($run->messages()[2]->parts[0]->content[0]->text)->toBe('published Hi to blog');
+});
+
+it('calls a tool again when its question is declined, even without state, and short-circuits a denied approval', function () {
+    $seen = [];
+    $ask  = tool('ask', function (array $in, Call $call) use (&$seen) {
+        if ([] === $call->answers()) {
+            return $call->needsInput([new Question('name', 'Name?')]);
+        }
+        $seen[] = $call->answers()['name'];
+
+        return Result::text('declined: ' . $call->answers()['name']->reason);
+    });
+    $both = tool('both', function (array $in, Call $call) use (&$seen) {
+        if ([] === $call->answers()) {
+            return $call->needsInput([new Approval('a1', 'first'), new Approval('a2', 'second'), new Question('q', 'Why?')]);
+        }
+        $seen[] = 'both ran';
+
+        return Result::text('ran');
+    });
+    $run = new Run(new FakeModel(calls(['a', 'ask', []], ['b', 'both', []]), says('fine')), new Tools($ask, $both));
+    turn($run, user('go'));
+    $events = turn($run, [new Answer('a', ['name' => Decision::deny('private')]), new Answer('b', ['a1' => Decision::deny('no'), 'a2' => Decision::deny('nor this'), 'q' => 'because'])]);
+    expect($seen)->toEqual([Decision::deny('private')])
+        ->and($run->messages()[2]->parts[0]->content[0]->text)->toBe('declined: private')
+        ->and($run->messages()[2]->parts[1]->content[0]->text)->toBe('Denied: no; nor this')
+        // ToolDecided carries the need `approval`, which neither call asked.
+        ->and(\array_filter($events, fn ($e) => $e instanceof ToolDecided))->toBe([]);
 });

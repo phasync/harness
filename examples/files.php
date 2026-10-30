@@ -40,15 +40,16 @@ $root = new Files\Root($dir);
 
 // A CLI that only ever answers on the terminal gates in one middleware (see examples/shell.php): it
 // asks, then calls $next() or returns an error Result. This example uses two on purpose, to show the
-// form for a policy shared with a web host. The policy asks with needsInput(), which a web host
-// answers in its next request; the terminal middleware outside it answers at once instead, in the
-// tool's fiber, so here the turn never ends awaiting input.
+// form for a policy shared with a web host (examples/policy.php does the same with Harness\Policy).
+// The policy asks with needsInput(), which a web host answers in its next request; the terminal
+// middleware outside it answers at once instead, in the tool's fiber, so the turn never ends
+// awaiting input. It answers any need, so a paused sub-agent would be answered the same way.
 $policy = new class implements ToolMiddleware {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {
-        // decision() or answers() set: the host answered this call already.
-        if (null === $context->decision() && null === $context->answers() && null !== $context->spec && !$context->spec->hints->readOnly) {
-            return $context->needsInput(new Approval("{$call->name} changes files"));
+        // answers() set: the host answered this call already.
+        if ([] === $context->answers() && null !== $context->spec && !$context->spec->hints->readOnly) {
+            return $context->needsInput([new Approval(reason: "{$call->name} changes files")]);
         }
 
         return $next($call, $context);
@@ -59,17 +60,30 @@ $terminal = new class implements ToolMiddleware {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {
         $result = $next($call, $context);
-        if (null === $context->pending()) {
-            return $result;
+        while (null !== ($pending = $context->pending())) {
+            $answers = [];
+            $denied  = false;
+            foreach ($pending->needs as $need) {
+                $input = $call->input;
+                $shown = isset($input['content']) ? \strlen((string) $input['content']) . ' bytes' : \json_encode(\array_diff_key($input, ['path' => 1]), \JSON_UNESCAPED_SLASHES);
+                echo "\n\e[33m" . ($need instanceof Approval ? "Allow {$call->name} on " . ($input['path'] ?? '?') . " ($shown)? {$need->reason} [y/N]" : $need->text) . "\e[0m ";
+                $line = \trim((string) \fgets(fiber\readable(\STDIN)));
+                if ($need instanceof Approval) {
+                    $answers[$need->id] = 'y' === \strtolower($line) ? Decision::allow() : Decision::deny('the user said no');
+                    $denied             = $denied || !$answers[$need->id]->allowed;
+                } else {
+                    $answers[$need->id] = $line;
+                }
+            }
+            $context->answer($answers);
+            // The rule the Run applies: without state, a denied approval is not called again.
+            if ($denied && null === $pending->state) {
+                return new Result([new Text('Denied: the user said no')], error: true);
+            }
+            $result = $next($call, $context);
         }
-        $input = $call->input;
-        $shown = isset($input['content']) ? \strlen((string) $input['content']) . ' bytes' : \json_encode(\array_diff_key($input, ['path' => 1]), \JSON_UNESCAPED_SLASHES);
-        echo "\n\e[33mAllow {$call->name} on " . ($input['path'] ?? '?') . " ($shown)? [y/N]\e[0m ";
-        $answer = \fgets(fiber\readable(\STDIN));
-        echo false === $answer ? "\n" : '';
-        $context->answer('y' === \strtolower(\trim((string) $answer)) ? Decision::allow() : Decision::deny('the user said no'));
 
-        return $context->decision()->allowed ? $next($call, $context) : new Result([new Text('Denied by the user')], error: true);
+        return $result;
     }
 };
 

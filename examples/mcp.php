@@ -5,8 +5,8 @@ declare(strict_types=1);
 /*
  * A chat with one MCP server's tools, over stdio. Without HARNESS_MCP_COMMAND it starts the small
  * PHP test server in tests/Support (echo, a form that asks for a colour, progress, ...). When a tool
- * asks for input (input_required), the turn ends awaiting input; the questions are asked on the
- * terminal and the next turn resumes the call with the answers.
+ * asks for input (input_required), the turn ends awaiting input; each need is asked on the terminal
+ * (an empty answer declines the form) and the next turn resumes the call with the answers.
  *
  *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/mcp.php ["task"]
  *   HARNESS_MCP_COMMAND='my-mcp-server --flag' ...   # any server speaking revision 2026-07-28
@@ -15,6 +15,8 @@ declare(strict_types=1);
 require __DIR__ . '/../vendor/autoload.php';
 
 use Harness\Answer;
+use Harness\Approval;
+use Harness\Decision;
 use Harness\Event;
 use Harness\Http\StreamTransport;
 use Harness\Mcp\McpServer;
@@ -75,19 +77,27 @@ fiber\run(function () use ($server, $url, $task) {
             foreach ($run->turn($input) as $event) {
                 render($event);
             }
-            // A tool asked the host: ask each question here and resume with the answers.
+            // A tool asked the host: ask for each need here and resume with the answers.
             $input = [];
             foreach ($run->ended()->pending as $p) {
                 $answers = [];
-                foreach ($p->needs as $q) {
-                    $choices = [] === $q->choices ? '' : ' [' . \implode('/', $q->choices) . ']';
-                    do {
-                        $a = ask("\e[33m{$q->text}{$choices}\e[0m ");
+                foreach ($p->needs as $need) {
+                    if ($need instanceof Approval) {
+                        $a = ask("\e[33m{$need->reason} [y/N]\e[0m ");
                         if (false === $a) {
                             return;
                         }
-                    } while ([] !== $q->choices && !\in_array($a, $q->choices, true));
-                    $answers[$q->id] = $a;
+                        $answers[$need->id] = 'y' === \strtolower($a) ? Decision::allow() : Decision::deny('the user declined');
+                        continue;
+                    }
+                    $choices = null === $need->choices ? '' : ' [' . \implode('/', $need->choices) . ']';
+                    do {
+                        $a = ask("\e[33m{$need->text}{$choices} (empty declines)\e[0m ");
+                        if (false === $a) {
+                            return;
+                        }
+                    } while ('' !== $a && null !== $need->choices && !\in_array($a, $need->choices, true));
+                    $answers[$need->id] = '' === $a ? Decision::deny('the user declined') : $a;
                 }
                 $input[] = new Answer($p->call->id, $answers);
             }

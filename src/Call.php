@@ -12,9 +12,9 @@ use Harness\Part\ToolCall;
  * belongs to, the host's `context` object (from `Run`) and the `spec` of the tool called (null when
  * the model named no such tool), whose hints policy middleware reads. A tool reports progress, checks for
  * cancellation, and may end the turn awaiting the host with `needsInput()`. On resume the same call
- * is made again with `decision()` (after an Approval) or `answers()` (after questions), and `state()`.
- * A denied approval is made again only when it was asked with a state (the tool handles the
- * denial); without one the model gets "Denied: <reason>" and the tool is not called.
+ * is made again with `answers()` (keyed by need id; `decision()` is the `approval` one) and
+ * `state()`. A call that asked without state is not made again when an approval was denied: the
+ * model gets "Denied: <reason>" (see `Approval`).
  */
 final class Call
 {
@@ -23,8 +23,8 @@ final class Call
     /**
      * @internal created by Run for every tool call
      *
-     * @param \Closure(Event): void     $emit
-     * @param array<string, mixed>|null $answers
+     * @param \Closure(Event): void $emit
+     * @param array<string, mixed>  $answers
      */
     public function __construct(
         public readonly string $id,
@@ -35,8 +35,7 @@ final class Call
         private readonly int $turn,
         private readonly ?string $parent,
         private readonly \Closure $emit,
-        private ?Decision $decision = null,
-        private ?array $answers = null,
+        private array $answers = [],
         private mixed $state = null,
     ) {
     }
@@ -56,11 +55,12 @@ final class Call
     /**
      * Ends this call awaiting the host: the turn finishes `Reason::AwaitingInput` once the step's
      * other calls are done, listing a `Pending` with `$needs` and `$state` (JSON-safe). Return the
-     * Result it gives; the model never sees it. On resume the call is made again with the answer.
+     * Result it gives; the model never sees it. On resume the call is made again with the answers
+     * (see `Approval` for a denial).
      *
-     * @param Approval|list<Question> $needs
+     * @param non-empty-list<Need> $needs each with an id unique within the call
      */
-    public function needsInput(Approval|array $needs, mixed $state = null): Result
+    public function needsInput(array $needs, mixed $state = null): Result
     {
         if (null !== $this->pending) {
             throw new \LogicException("Tool call {$this->id} already asked for input");
@@ -78,43 +78,37 @@ final class Call
 
     /**
      * Answers the pending request in place, for middleware that asks the user at once (a CLI): the
-     * pending request is cleared and `decision()` or `answers()`/`state()` set, so the middleware can
-     * call `$next` again, or return its own Result.
+     * pending request is cleared and `answers()` and `state()` set, so the middleware can call
+     * `$next` again, or return its own Result. Keyed by need id, validated as an `Answer` is.
      *
-     * @param Decision|array<string, mixed> $answer
+     * @param array<string, Decision|string|int|float|bool|array<mixed>> $answers
      */
-    public function answer(Decision|array $answer): void
+    public function answer(array $answers): void
     {
         if (null === $this->pending) {
             throw new \LogicException("Tool call {$this->id} has not asked for input");
         }
-        $pending       = $this->pending;
+        self::checkAnswers($this->id, $this->pending->needs, $answers);
+        $this->answers = $answers;
+        $this->state   = $this->pending->state;
         $this->pending = null;
-        if ($answer instanceof Decision) {
-            if (!$pending->needs instanceof Approval) {
-                throw new \InvalidArgumentException("Tool call {$this->id} asked questions; answer them with an array keyed by question id");
-            }
-            $this->decision = $answer;
-            $this->state    = $pending->state;
-
-            return;
-        }
-        if ($pending->needs instanceof Approval) {
-            throw new \InvalidArgumentException("Tool call {$this->id} asked for approval; answer with a Decision");
-        }
-        self::checkAnswers($this->id, $pending->needs, $answer);
-        $this->answers = $answer;
-        $this->state   = $pending->state;
     }
 
-    /** The host's decision when this call is made again after an Approval, else null. */
+    /** The answer to the need with id `approval`, when this call is made again after one, else null. */
     public function decision(): ?Decision
     {
-        return $this->decision;
+        $decision = $this->answers['approval'] ?? null;
+
+        return $decision instanceof Decision ? $decision : null;
     }
 
-    /** @return array<string, mixed>|null the answers keyed by question id when made again after questions, else null */
-    public function answers(): ?array
+    /**
+     * The host's answers keyed by need id when this call is made again after `needsInput()`, else
+     * empty: a `Decision` per approval, a value or a declining `Decision` per question.
+     *
+     * @return array<string, Decision|string|int|float|bool|array<mixed>>
+     */
+    public function answers(): array
     {
         return $this->answers;
     }
@@ -138,20 +132,35 @@ final class Call
     }
 
     /**
-     * @internal
+     * @internal the answers must name every need exactly once: a Decision for an approval, a value
+     * (one of the choices, when given) or a denying Decision for a question
      *
-     * @param list<Question>       $questions
+     * @param list<Need>           $needs
      * @param array<string, mixed> $answers
      */
-    public static function checkAnswers(string $callId, array $questions, array $answers): void
+    public static function checkAnswers(string $callId, array $needs, array $answers): void
     {
-        $ids = \array_map(static fn (Question $q) => $q->id, $questions);
-        if ([] !== \array_diff($ids, \array_keys($answers)) || [] !== \array_diff(\array_keys($answers), $ids)) {
-            throw new \InvalidArgumentException("Tool call $callId asked questions [" . \implode(', ', $ids) . '], answered [' . \implode(', ', \array_keys($answers)) . ']');
+        $ids   = \array_map(static fn (Need $n) => $n->id, $needs);
+        $given = \array_map(\strval(...), \array_keys($answers));
+        if ([] !== \array_diff($ids, $given) || [] !== \array_diff($given, $ids)) {
+            throw new \InvalidArgumentException("Tool call $callId needs [" . \implode(', ', $ids) . '], answered [' . \implode(', ', $given) . ']; answer each need by its id');
         }
-        foreach ($questions as $q) {
-            if ([] !== $q->choices && !\in_array($answers[$q->id], $q->choices, true)) {
-                throw new \InvalidArgumentException("The answer to question '{$q->id}' must be one of: " . \implode(', ', $q->choices));
+        foreach ($needs as $need) {
+            $a = $answers[$need->id];
+            if ($need instanceof Approval) {
+                if (!$a instanceof Decision) {
+                    throw new \InvalidArgumentException("Need '{$need->id}' of tool call $callId is an approval; answer it with a Decision, got " . \get_debug_type($a));
+                }
+                continue;
+            }
+            if ($a instanceof Decision) {
+                if ($a->allowed) {
+                    throw new \InvalidArgumentException("Need '{$need->id}' of tool call $callId is a question; answer it with a value, or decline it with Decision::deny()");
+                }
+                continue;
+            }
+            if ($need instanceof Question && null !== $need->choices && !\in_array($a, $need->choices, true)) {
+                throw new \InvalidArgumentException("The answer to question '{$need->id}' must be one of: " . \implode(', ', $need->choices));
             }
         }
     }

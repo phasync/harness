@@ -9,8 +9,8 @@ declare(strict_types=1);
  * ask the user a question.
  *
  *   php examples/web.php state.json say "Remember that my favourite colour is blue"
- *   php examples/web.php state.json answer '{"<call id>": "allow"}'          # or {"deny": "why"}
- *   php examples/web.php state.json answer '{"<call id>": {"answer": "blue"}}'   # answers to questions
+ *   php examples/web.php state.json answer '{"<call id>": {"approval": "allow"}}'   # or {"deny": "why"}
+ *   php examples/web.php state.json answer '{"<call id>": {"answer": "blue"}}'     # answers to questions, by need id
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -49,9 +49,11 @@ $state = \is_file($file) ? \json_decode(\file_get_contents($file), true, 512, \J
 
 $ask = new ClosureTool(
     new ToolSpec('ask_user', 'Ask the user a question and get the answer', ['type' => 'object', 'properties' => ['question' => ['type' => 'string']], 'required' => ['question']], new Hints(readOnly: true)),
-    fn (array $in, Call $call): Result => null === $call->answers()
-        ? $call->needsInput([new Question('answer', $in['question'])])
-        : Result::text($call->answers()['answer']),
+    fn (array $in, Call $call): Result => match (true) {
+        [] === $call->answers()                        => $call->needsInput([new Question('answer', $in['question'])]),
+        $call->answers()['answer'] instanceof Decision => Result::text("The user declined to answer: {$call->answers()['answer']->reason}"),
+        default                                        => Result::text((string) $call->answers()['answer']),
+    },
 );
 $remember = new ClosureTool(
     new ToolSpec('remember', 'Save a note for later conversations', ['type' => 'object', 'properties' => ['note' => ['type' => 'string']], 'required' => ['note']]),
@@ -65,8 +67,8 @@ $remember = new ClosureTool(
 $policy = new class implements ToolMiddleware {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {
-        if (null === $context->decision() && null === $context->answers() && null !== $context->spec && !$context->spec->hints->readOnly) {
-            return $context->needsInput(new Approval("Save a note: {$call->input['note']}"));
+        if ([] === $context->answers() && null !== $context->spec && !$context->spec->hints->readOnly) {
+            return $context->needsInput([new Approval(reason: "Save a note: {$call->input['note']}")]);
         }
 
         return $next($call, $context);
@@ -83,14 +85,16 @@ $run = new Run(
     pending: \array_map(Pending::fromArray(...), $state['pending']),
 );
 
+// The browser's answers, by call id and need id: "allow" for an approval, {"deny": "why"} for either
+// kind, a value for a question.
 $input = 'say' === $command
     ? new Message(Role::User, [new Text($arg)])
     : \array_map(
-        fn (string $id, mixed $a) => new Answer($id, match (true) {
+        fn (string $id, array $byNeed) => new Answer($id, \array_map(fn (mixed $a) => match (true) {
             'allow' === $a                     => Decision::allow(),
             \is_array($a) && isset($a['deny']) => Decision::deny($a['deny']),
             default                            => $a,
-        }),
+        }, $byNeed)),
         \array_keys($answers = \json_decode($arg, true, 512, \JSON_THROW_ON_ERROR)),
         $answers,
     );

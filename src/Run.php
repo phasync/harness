@@ -264,16 +264,7 @@ final class Run
             throw new \InvalidArgumentException('Answer every pending tool call exactly once: pending [' . \implode(', ', $ids) . '], answered [' . \implode(', ', $given) . ']');
         }
         foreach ($this->pending as $p) {
-            $answer = $answers[$p->call->id]->answer;
-            if ($p->needs instanceof Approval) {
-                if (!$answer instanceof Decision) {
-                    throw new \InvalidArgumentException("Tool call {$p->call->id} asked for approval; answer with a Decision");
-                }
-            } elseif (!\is_array($answer)) {
-                throw new \InvalidArgumentException("Tool call {$p->call->id} asked questions; answer with an array keyed by question id");
-            } else {
-                Call::checkAnswers($p->call->id, $p->needs, $answer);
-            }
+            Call::checkAnswers($p->call->id, $p->needs, $answers[$p->call->id]->answers);
         }
 
         return $answers;
@@ -576,25 +567,31 @@ final class Run
 
             return new ToolResult($call->id, $result->content, true);
         }
-        $state = null;
+        $state  = null;
+        $denied = [];
         if (null !== $answer) {
             foreach ($this->pending as $p) {
                 if ($p->call->id === $call->id) {
                     $state = $p->state;
+                    foreach ($p->needs as $need) {
+                        $a = $answer->answers[$need->id];
+                        if ($need instanceof Approval && !$a->allowed) {
+                            $denied[] = $a->reason;
+                        }
+                    }
                 }
             }
-        }
-        $decision = $answer?->answer instanceof Decision ? $answer->answer : null;
-        if (null !== $decision) {
-            $emit(new ToolDecided($turn, $parent, $call->id, $decision));
-            // An approval asked with state is the tool's own (Agents\AgentTool forwards a child's):
-            // the tool is called again and handles the denial itself.
-            if (!$decision->allowed && null === $state) {
-                $result = new Result([new Text('Denied: ' . $decision->reason)], error: true);
-                $emit(new ToolEnded($turn, $parent, $call->id, $result));
-
-                return new ToolResult($call->id, $result->content, true);
+            if (isset($answer->answers['approval'])) {
+                $emit(new ToolDecided($turn, $parent, $call->id, $answer->answers['approval']));
             }
+        }
+        // State means "call me back with the answer, whatever it is": a tool that asked without
+        // state is not called again when an approval was denied (see Approval).
+        if ([] !== $denied && null === $state) {
+            $result = new Result([new Text('Denied: ' . \implode('; ', $denied))], error: true);
+            $emit(new ToolEnded($turn, $parent, $call->id, $result));
+
+            return new ToolResult($call->id, $result->content, true);
         }
         $context = new Call(
             $call->id,
@@ -605,8 +602,7 @@ final class Run
             $turn,
             $parent,
             $emit,
-            $decision,
-            \is_array($answer?->answer) ? $answer->answer : null,
+            $answer->answers ?? [],
             $state,
         );
         try {

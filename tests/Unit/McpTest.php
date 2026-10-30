@@ -5,7 +5,9 @@ declare(strict_types=1);
 use function fiber\go;
 use function fiber\sleep;
 use Harness\Answer;
+use Harness\Approval;
 use Harness\Cancel;
+use Harness\Decision;
 use Harness\Hints;
 use Harness\Http\Response;
 use Harness\Mcp\HttpConnection;
@@ -97,18 +99,36 @@ it('turns input_required into questions, and resumes across a process boundary w
     expect($text)->toBe('colour blue, count 3, state prefs');
 });
 
-it('asks a field-less elicitation as accept or decline, and retries a state-only input_required at once', function () {
-    [$confirm, $poll] = \fiber\run(function () {
+it('asks a field-less elicitation as an approval, declines on a denial, and retries a state-only input_required at once', function () {
+    [$needs, $confirm, $poll] = \fiber\run(function () {
+        $t       = mcpTools(mcpServer());
+        $confirm = [];
+        foreach ([Decision::allow(), Decision::deny('not now')] as $decision) {
+            $call = TestCall::make();
+            $t['confirm']->call([], $call);
+            $needs = $call->pending()->needs;
+            $call->answer(['ok' => $decision]);
+            $confirm[] = $t['confirm']->call([], $call)->content[0]->text;
+        }
+
+        return [$needs, $confirm, $t['poll']->call([], TestCall::make())->content[0]->text];
+    });
+    expect($needs)->toEqual([new Approval('ok', 'Go ahead?')])
+        ->and($confirm)->toBe(['confirmed: accept', 'confirmed: decline'])
+        ->and($poll)->toBe('done after round 1');
+});
+
+it('declines a form when the host denies one of its questions', function () {
+    $text = \fiber\run(function () {
         $t    = mcpTools(mcpServer());
         $call = TestCall::make();
-        $t['confirm']->call([], $call);
-        $q = $call->pending()->needs;
-        $call->answer(['ok' => 'decline']);
+        $t['ask']->call([], $call);
+        $call->answer(['prefs/colour' => Decision::deny('rather not say'), 'prefs/count' => '2']);
 
-        return [[$q, $t['confirm']->call([], $call)->content[0]->text], $t['poll']->call([], TestCall::make())->content[0]->text];
+        return $t['ask']->call([], $call)->content[0]->text;
     });
-    expect($confirm)->toEqual([[new Question('ok', 'Go ahead?', ['accept', 'decline'])], 'confirmed: decline'])
-        ->and($poll)->toBe('done after round 1');
+    // The test server asks again when the form was not accepted.
+    expect($text)->toBe('Awaiting input from the host');
 });
 
 it('routes progress, out-of-order responses and cancellation over one stdio process', function () {

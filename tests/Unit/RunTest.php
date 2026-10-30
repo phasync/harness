@@ -334,7 +334,7 @@ it('gives unstarted calls a cancelled result and lets a running one see isCancel
 it('fails hard on misuse', function () {
     $run = new Run(new FakeModel(says('a')), new Tools());
     expect(fn () => turn($run, new Message(Role::Assistant, [new Text('x')])))->toThrow(InvalidArgumentException::class, 'user message')
-        ->and(fn () => turn($run, [new Harness\Answer('c', Harness\Decision::allow())]))->toThrow(LogicException::class, 'Nothing awaits input')
+        ->and(fn () => turn($run, [new Harness\Answer('c', ['approval' => Harness\Decision::allow()])]))->toThrow(LogicException::class, 'Nothing awaits input')
         ->and(fn () => $run->ended())->toThrow(LogicException::class, 'No turn has run')
         ->and(fn () => new Run(new FakeModel(), new Tools(), middleware: [new stdClass()]))->toThrow(InvalidArgumentException::class)
         ->and(fn () => turn(new Run(new FakeModel(says('x')), new Tools(tool('a', fn () => null), tool('a', fn () => null))), user('go')))->toThrow(LogicException::class, "Two tools are named 'a'");

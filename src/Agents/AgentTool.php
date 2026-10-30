@@ -5,15 +5,13 @@ declare(strict_types=1);
 namespace Harness\Agents;
 
 use Harness\Answer;
-use Harness\Approval;
 use Harness\Call;
-use Harness\Decision;
 use Harness\FinishReason;
 use Harness\Hints;
 use Harness\Message;
+use Harness\Need;
 use Harness\Part\Text;
 use Harness\Pending;
-use Harness\Question;
 use Harness\Reason;
 use Harness\Result;
 use Harness\Retry;
@@ -34,11 +32,11 @@ use Harness\ToolSpec;
  * `reason` and `finish`, and a reply cut by the token limit or refused says so in a trailing line.
  * A failed child is an error for the parent's model.
  *
- * When the child ends awaiting input, this call ends with `needsInput()`: one pending child call
- * passes its `Approval` or questions up unchanged; several become one list of questions (an approval
- * as a question `<call id>` with choices allow/deny, a question as `<call id>/<question id>`). The
- * state holds the child's messages and pending calls, so the host answers the parent like any other
- * pending call, in any process, and the restored child runs on with the answers.
+ * When the child ends awaiting input, this call ends with `needsInput()` listing every need of
+ * every pending child call, each keeping its type and reason, its id prefixed with the child's call
+ * id (`<child call id>/<need id>`). The state holds the child's messages and pending calls, so the
+ * host answers the parent like any other pending call, in any process, and the restored child runs
+ * on with the answers, a `Decision::deny($reason)` reaching it with its reason.
  */
 final class AgentTool implements Tool
 {
@@ -79,7 +77,7 @@ final class AgentTool implements Tool
         if (\is_array($state) && isset($state['child'])) {
             $pending = \array_map(Pending::fromArray(...), $state['child']['pending']);
             $run     = $this->child->fork(\array_map(Message::fromArray(...), $state['child']['messages']), $pending);
-            $turn    = self::route($pending, $call->decision(), $call->answers());
+            $turn    = self::route($pending, $call->answers());
             if (!$this->fresh) {
                 $this->current = $run;
             }
@@ -129,60 +127,39 @@ final class AgentTool implements Tool
     }
 
     /**
-     * What the parent's call asks for the child's pending calls.
+     * What the parent's call asks: every need of the child's pending calls, its id prefixed.
      *
      * @param list<Pending> $pending
      *
-     * @return Approval|list<Question>
+     * @return list<Need>
      */
-    private static function needs(array $pending): Approval|array
+    private static function needs(array $pending): array
     {
-        if (1 === \count($pending)) {
-            return $pending[0]->needs;
-        }
-        $questions = [];
+        $needs = [];
         foreach ($pending as $p) {
-            if ($p->needs instanceof Approval) {
-                $questions[] = new Question($p->call->id, "Allow {$p->call->name}? {$p->needs->reason}", ['allow', 'deny']);
-                continue;
-            }
-            foreach ($p->needs as $q) {
-                $questions[] = new Question("{$p->call->id}/{$q->id}", $q->text, $q->choices);
+            foreach ($p->needs as $need) {
+                $needs[] = Need::fromArray(['id' => "{$p->call->id}/{$need->id}"] + $need->toArray());
             }
         }
 
-        return $questions;
+        return $needs;
     }
 
     /**
-     * The child's answers, from the answer to the parent's call.
+     * The child's answers, from the answers to the parent's call.
      *
-     * @param list<Pending>             $pending
-     * @param array<string, mixed>|null $answers
+     * @param list<Pending>        $pending
+     * @param array<string, mixed> $answers
      *
      * @return list<Answer>
      */
-    private static function route(array $pending, ?Decision $decision, ?array $answers): array
+    private static function route(array $pending, array $answers): array
     {
-        if (1 === \count($pending)) {
-            $p = $pending[0];
-
-            return [new Answer($p->call->id, $p->needs instanceof Approval
-                ? ($decision ?? throw new \LogicException("The child's call {$p->call->id} asked for approval, but the parent's call got no Decision"))
-                : ($answers ?? throw new \LogicException("The child's call {$p->call->id} asked questions, but the parent's call got no answers")))];
-        }
-        if (null === $answers) {
-            throw new \LogicException('The child has several pending calls, asked as questions, but the parent\'s call got no answers');
-        }
         $routed = [];
         foreach ($pending as $p) {
-            if ($p->needs instanceof Approval) {
-                $routed[] = new Answer($p->call->id, 'allow' === $answers[$p->call->id] ? Decision::allow() : Decision::deny('The host denied it'));
-                continue;
-            }
             $own = [];
-            foreach ($p->needs as $q) {
-                $own[$q->id] = $answers["{$p->call->id}/{$q->id}"];
+            foreach ($p->needs as $need) {
+                $own[$need->id] = $answers["{$p->call->id}/{$need->id}"];
             }
             $routed[] = new Answer($p->call->id, $own);
         }

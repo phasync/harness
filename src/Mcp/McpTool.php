@@ -4,8 +4,11 @@ declare(strict_types=1);
 
 namespace Harness\Mcp;
 
+use Harness\Approval;
 use Harness\Call;
 use Harness\Cancel;
+use Harness\Decision;
+use Harness\Need;
 use Harness\Part\Media;
 use Harness\Part\Reference;
 use Harness\Part\Text;
@@ -21,11 +24,13 @@ use Harness\ToolSpec;
  * become `Call::progress()`.
  *
  * A result with `resultType: "input_required"` ends the call with `Call::needsInput()`: each form
- * elicitation becomes questions (`<key>/<field>` per field of its schema, enum values as choices,
- * or `<key>` with choices accept/decline for a schema without fields), and the state keeps the
- * input requests and the opaque `requestState`. On resume the call is retried with `inputResponses`
- * built from the answers and the same `requestState`. An `input_required` without input requests is
- * retried at once. A result without `resultType` is complete.
+ * elicitation becomes questions (`<key>/<field>` per field of its schema, enum values as choices),
+ * or an `Approval` with id `<key>` for a schema without fields, and the state keeps the input
+ * requests and the opaque `requestState`. On resume the call is retried with `inputResponses`
+ * built from the answers and the same `requestState`: a request is `accept`ed with the values, or
+ * `decline`d when the host denied its approval or any of its questions with `Decision::deny()`.
+ * An `input_required` without input requests is retried at once. A result without `resultType`
+ * is complete.
  */
 final readonly class McpTool implements Tool
 {
@@ -48,7 +53,7 @@ final readonly class McpTool implements Tool
         $state  = $call->state();
         if (\is_array($state) && isset($state['mcp'])) {
             if ([] !== $state['mcp']['inputRequests']) {
-                $params['inputResponses'] = self::responses($state['mcp']['inputRequests'], $call->answers() ?? throw new \LogicException("MCP tool {$this->name} asked questions; resume it with answers"));
+                $params['inputResponses'] = self::responses($state['mcp']['inputRequests'], $call->answers());
             }
             if (null !== $state['mcp']['requestState']) {
                 $params['requestState'] = $state['mcp']['requestState'];
@@ -69,7 +74,7 @@ final readonly class McpTool implements Tool
             $requests = $result['inputRequests'] ?? [];
             $request  = $result['requestState'] ?? null;
             if ([] !== $requests) {
-                return $call->needsInput(self::questions($requests), ['mcp' => ['inputRequests' => $requests, 'requestState' => $request]]);
+                return $call->needsInput(self::needs($requests), ['mcp' => ['inputRequests' => $requests, 'requestState' => $request]]);
             }
             unset($params['inputResponses']);
             $params['requestState'] = $request ?? throw new McpException("MCP tool {$this->name}: input_required with neither inputRequests nor requestState");
@@ -80,11 +85,11 @@ final readonly class McpTool implements Tool
     /**
      * @param array<string, array<string, mixed>> $requests
      *
-     * @return list<Question>
+     * @return list<Need>
      */
-    private static function questions(array $requests): array
+    private static function needs(array $requests): array
     {
-        $questions = [];
+        $needs = [];
         foreach ($requests as $key => $request) {
             $params = $request['params'] ?? [];
             if ('elicitation/create' !== ($request['method'] ?? null) || 'form' !== ($params['mode'] ?? 'form')) {
@@ -92,17 +97,17 @@ final readonly class McpTool implements Tool
             }
             $fields = $params['requestedSchema']['properties'] ?? [];
             if ([] === $fields) {
-                $questions[] = new Question((string) $key, (string) $params['message'], ['accept', 'decline']);
+                $needs[] = new Approval((string) $key, (string) $params['message']);
                 continue;
             }
             foreach ($fields as $field => $schema) {
                 $label       = $schema['title'] ?? $schema['description'] ?? $field;
-                $choices     = 'boolean' === ($schema['type'] ?? null) ? ['true', 'false'] : \array_map(\strval(...), $schema['enum'] ?? []);
-                $questions[] = new Question("$key/$field", "{$params['message']} ($label)", $choices);
+                $choices     = 'boolean' === ($schema['type'] ?? null) ? ['true', 'false'] : (isset($schema['enum']) ? \array_map(\strval(...), $schema['enum']) : null);
+                $needs[]     = new Question("$key/$field", "{$params['message']} ($label)", $choices);
             }
         }
 
-        return $questions;
+        return $needs;
     }
 
     /**
@@ -116,8 +121,15 @@ final readonly class McpTool implements Tool
         $responses = [];
         foreach ($requests as $key => $request) {
             $fields = $request['params']['requestedSchema']['properties'] ?? [];
+            $mine   = [] === $fields ? [$answers[$key]] : \array_map(static fn ($field) => $answers["$key/$field"], \array_keys($fields));
+            foreach ($mine as $answer) {
+                if ($answer instanceof Decision && !$answer->allowed) {
+                    $responses[$key] = ['action' => 'decline'];
+                    continue 2;
+                }
+            }
             if ([] === $fields) {
-                $responses[$key] = ['action' => 'accept' === $answers[$key] ? 'accept' : 'decline'];
+                $responses[$key] = ['action' => 'accept'];
                 continue;
             }
             $content = [];
