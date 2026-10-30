@@ -48,14 +48,16 @@ use Psr\Log\NullLogger;
  * The count is `$count($prompt)` times a ratio Compact calibrates itself: after each step it passes
  * on, the provider's reported input tokens divided by `$count` of that prompt (the last ratio wins;
  * a report of zero is ignored), so an approximation that undercounts a chat template is corrected
- * after one step. At first use, the fixed part of the prompt (system text, tool specs, the first
- * `$keepFirst` messages) must count at most half the budget, or Compact throws a `\LogicException`.
+ * after one step. The fixed part of the prompt (system text, tool specs, the first `$keepFirst`
+ * messages), counted at first use, must count at most half the budget, by the calibrated count, or
+ * the step throws a `\LogicException`: a budget that passes at first use fails on a later step
+ * when the provider's report shows the counter undercounted.
  */
 final class Compact implements ModelMiddleware
 {
     private const PROMPT = <<<'TXT'
         You compress the earlier part of a conversation between a user and an AI agent that uses tools, so the agent can continue without it. Write a summary under four headings:
-        1. Asked: what the user asked for, with every requirement and constraint.
+        1. Asked: what the user asked for, with every requirement and constraint (the start of the conversation states the task).
         2. Done: what the agent did, step by step, with the tools used and their important results (paths, names, numbers, errors).
         3. Known: facts, decisions and findings established so far.
         4. Remaining: what is still to do, and open questions.
@@ -77,7 +79,8 @@ final class Compact implements ModelMiddleware
      */
     private array $cache      = [];
     private float $ratio      = 1.0;
-    private bool $checked     = false;
+    /** The fixed part of the prompt, by `$count`, at first use. */
+    private ?int $fixed       = null;
     private ?Compaction $last = null;
 
     /** @param (\Closure(Prompt): int)|null $count null: `Compact::approximate(...)` */
@@ -142,15 +145,13 @@ final class Compact implements ModelMiddleware
     /** @return array{0: Prompt, 1: int} the prompt to hand on and `$count` of it */
     private function compact(Prompt $prompt): array
     {
-        if (!$this->checked) {
-            $fixed = ($this->count)(self::with($prompt, \array_slice($prompt->messages, 0, $this->keepFirst)));
-            if (2 * $fixed > $this->budgetTokens) {
-                throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens, over half the budget of ' . \number_format($this->budgetTokens) . ': the budget must leave room above it for a summary and the recent half. Raise budgetTokens to ' . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
-            }
-            $this->checked = true;
+        $ratio  = $this->ratio;   // another conversation's step may change it while this one waits
+        $tokens = fn (int $counted): int => (int) \ceil($counted * $ratio);
+        // Counted at first use, compared calibrated: a provider's report can show it too large later.
+        $this->fixed ??= ($this->count)(self::with($prompt, \array_slice($prompt->messages, 0, $this->keepFirst)));
+        if (2 * $tokens($this->fixed) > $this->budgetTokens) {
+            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($tokens($this->fixed)) . ' tokens' . (1.0 === $ratio ? '' : ' (counter ratio ' . \round($ratio, 3) . ')') . ', over half the budget of ' . \number_format($this->budgetTokens) . ': the budget must leave room above it for a summary and the recent half. Raise budgetTokens to ' . \number_format(4 * $tokens($this->fixed)) . ' or more, or shorten the system prompt and tool descriptions');
         }
-        $ratio   = $this->ratio;   // another conversation's step may change it while this one waits
-        $tokens  = fn (int $counted): int => (int) \ceil($counted * $ratio);
         $counted = ($this->count)($prompt);
         $before  = $tokens($counted);
         if ($before <= $this->budgetTokens) {
@@ -197,7 +198,7 @@ final class Compact implements ModelMiddleware
             }
             // A later round summarizes the earlier summary together with what follows it.
             $previous = null === $entry ? null : \strlen($entry['summary']);
-            $summary  = $this->summarize(\array_slice($view, $start, $cut - $start), $prompt->cancel, $previous);
+            $summary  = $this->summarize(\array_slice($view, 0, $start), \array_slice($view, $start, $cut - $start), $prompt->cancel, $previous);
             $replace  = [new Message(Role::User, [new Text("[A summary of the earlier conversation, which was compacted to save context]\n\n$summary")])];
             if (Role::User === $view[$cut]->role) {
                 $replace[] = new Message(Role::Assistant, [new Text('Understood. I continue from that summary.')]);
@@ -241,18 +242,27 @@ final class Compact implements ModelMiddleware
     }
 
     /**
-     * The summary of `$segment`. A collapsed one (empty, or under a quarter of the `$previous`
-     * summary's bytes) is asked for once more, and fails the step the second time.
+     * The summary of `$segment`, with the `$kept` messages before it for context (the task, which
+     * the summarizer would otherwise report as unknown). A collapsed one (empty, or under a quarter
+     * of the `$previous` summary's bytes) is asked for once more, and fails the step the second time.
      *
+     * @param list<Message> $kept
      * @param list<Message> $segment
      */
-    private function summarize(array $segment, Cancel $cancel, ?int $previous): string
+    private function summarize(array $kept, array $segment, Cancel $cancel, ?int $previous): string
     {
+        $context = '';
+        foreach ($kept as $message) {
+            $context .= self::render($message);
+        }
         $transcript = '';
         foreach ($segment as $message) {
             $transcript .= self::render($message);
         }
-        $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text("The conversation so far:\n\n{$transcript}Write the summary.")])], [], $this->summarizerOptions, $cancel);
+        $ask = '' === $context
+            ? "The conversation so far:\n\n{$transcript}Write the summary."
+            : "The start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\n{$context}The part to summarize, which follows it:\n\n{$transcript}Write the summary.";
+        $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text($ask)])], [], $this->summarizerOptions, $cancel);
         for ($attempt = 1;; ++$attempt) {
             $acc = new Accumulator();
             foreach ($this->summarizer->stream($prompt) as $delta) {

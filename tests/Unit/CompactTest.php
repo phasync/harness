@@ -87,7 +87,8 @@ it('replaces the oldest half with a summary, cut where tool pairs stay together,
     $text  = $asked->messages[0]->parts[0]->text;
     expect($asked->tools)->toBe([])
         ->and($asked->system)->toContain('Remaining')
-        ->and($text)->not->toContain('the task')->toContain('[calls read {"n":2}]')->toContain(\str_repeat('2', 300))
+        ->and($text)->toStartWith("The start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe part to summarize")
+        ->and($text)->toContain('[calls read {"n":2}]')->toContain(\str_repeat('2', 300))
         ->and($text)->not->toContain('[calls read {"n":3}]')
         ->and($text)->not->toContain('thinking');
 });
@@ -131,7 +132,8 @@ it('never touches the system prompt or the first keepFirst messages, and keeps a
         ->and(\array_slice($prompt->messages, 0, 3))->toBe(\array_slice($messages, 0, 3))
         ->and($prompt->messages[3]->parts[0]->text)->toContain('[A summary of the earlier conversation')
         ->and(bytesOf($prompt))->toBeLessThanOrEqual(1500)
-        ->and($summarizer->prompts[0]->messages[0]->parts[0]->text)->not->toContain(\str_repeat('1', 300));
+        // The kept call and its result are context for the summarizer, not part of what it summarizes.
+        ->and(\explode('The part to summarize', $summarizer->prompts[0]->messages[0]->parts[0]->text)[1])->not->toContain(\str_repeat('1', 300));
 });
 
 it('adds an assistant acknowledgement when the kept part starts with a user message', function () {
@@ -268,6 +270,11 @@ it('throws at first use when the fixed part of the prompt is over half the budge
     $tight = new Compact(new Summaries(), 300);
     expect(fn () => step($tight, agentic(5), 'sys', [$spec]))
         ->toThrow(LogicException::class, 'Compact: the fixed part of the prompt (system text, tool specs and the first 1 messages) counts 162 tokens, over half the budget of 300: the budget must leave room above it for a summary and the recent half. Raise budgetTokens to 648 or more');
+
+    // Compared calibrated: once the provider reported twice the count, 324 is over half of 400.
+    step($compact, agentic(0), 'sys', [$spec], reported: 2 * Compact::approximate(TestPrompt::make('sys', agentic(0), [$spec])));
+    expect(fn () => step($compact, agentic(0), 'sys', [$spec]))
+        ->toThrow(LogicException::class, 'counts 324 tokens (counter ratio 2), over half the budget of 400');
 });
 
 it('calibrates its count by the input tokens the provider reports, and logs the ratio', function () {
