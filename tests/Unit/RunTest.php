@@ -379,3 +379,10 @@ it('reads the tool source at every step', function () {
     turn(new Run($model, $source), user('go'));
     expect($model->prompts[0]->tools[0]->name)->toBe('t1')->and($model->prompts[1]->tools[0]->name)->toBe('t2');
 });
+
+it('says so when iterated outside fiber\\run(), and stays usable', function () {
+    $run = new Run(new FakeModel(says('a')), new Tools());
+    expect(fn () => \iterator_to_array($run->turn(user('go'))))->toThrow(fiber\NotInRunException::class);
+    turn($run, user('go'));
+    expect($run->ended()->reason)->toBe(Reason::Done);
+});

@@ -40,6 +40,7 @@ final class Accumulator
         $this->usage = new Usage();
     }
 
+    /** Folds one delta into the message. */
     public function add(Delta $delta): void
     {
         if (null !== $this->finish) {
@@ -131,6 +132,7 @@ final class Accumulator
         return $this->invalid[$id] ?? null;
     }
 
+    /** The reply's usage: the largest value seen per field. */
     public function usage(): Usage
     {
         return $this->usage;

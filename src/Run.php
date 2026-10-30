@@ -149,12 +149,18 @@ final class Run
         $queue            = new EventQueue();
 
         $globals = [$_GET, $_POST, $_COOKIE, $_FILES, $_SERVER, $_REQUEST];
-        $task    = go(fn () => (new \Scope())->run(function () use ($globals, $input, $answers, $turn, $parent, $queue) {
-            // A new scope may start with empty superglobals; the turn sees its creator's.
-            [$_GET, $_POST, $_COOKIE, $_FILES, $_SERVER, $_REQUEST] = $globals;
+        try {
+            $task = go(fn () => (new \Scope())->run(function () use ($globals, $input, $answers, $turn, $parent, $queue) {
+                // A new scope may start with empty superglobals; the turn sees its creator's.
+                [$_GET, $_POST, $_COOKIE, $_FILES, $_SERVER, $_REQUEST] = $globals;
 
-            return run(fn () => $this->loop($input, $answers, $turn, $parent, $queue));
-        }));
+                return run(fn () => $this->loop($input, $answers, $turn, $parent, $queue));
+            }));
+        } catch (\Throwable $e) {
+            // Typically fiber\NotInRunException: the turn never started.
+            $this->running = false;
+            throw $e;
+        }
         try {
             while (($event = $queue->shift() ?? await($queue->wait())) !== null) {
                 yield $event;

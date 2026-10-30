@@ -11,11 +11,13 @@ final readonly class Decision
     {
     }
 
+    /** Run the call. */
     public static function allow(): self
     {
         return new self(true, null);
     }
 
+    /** Do not run the call; the model gets an error result "Denied: <reason>". */
     public static function deny(string $reason): self
     {
         return new self(false, $reason);
