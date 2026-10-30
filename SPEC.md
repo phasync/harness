@@ -1,8 +1,11 @@
 # phasync/harness — specification
 
-Revision 1 (2026-10-30). The builder implements this document; the users of each round report
-what it lacks, and the next revision folds that in. Sections marked *module* are part of this
-package but live in their own namespace and are never imported by the core.
+Revision 2 (2026-10-30). Revision 1 was implemented as 0.0.1-beta1 and tried by five users; this
+revision confirms the API as built, adds what they required, and names round 2's modules. The
+builder implements this document; sections marked *module* are part of this package but live in
+their own namespace and are never imported by the core.
+
+Changes since revision 1 are marked **[r2]**.
 
 ## Purpose
 
@@ -19,26 +22,26 @@ behave the same on both.
 ## Core
 
 Namespace `Harness\`. PHP 8.2+. Dependencies: `fiber-interop/api ^0.3`, `psr/log`. Nothing else.
+**[r2]** `fiber-interop/api` now allows `fiber-interop/scope ^0.5` on its main branch; until
+that is tagged, require `fiber-interop/api` at `dev-main` so that `phasync/phasync` resolves to
+its latest 2.0.x in dev.
 
 ### Content parts and messages
 
 A closed union, identical on the way in and out. Every part is a final, readonly value object
-with `toArray(): array` and `static fromArray(array): static`; the transcript, the event stream
-and resume reuse that one serialization.
+with `toArray(): array` and `static fromArray(array): static`; `Parts::fromArray()` decodes by
+type. The transcript, the event stream and resume reuse that one serialization.
 
 ```
 Text(string text)
-Reasoning(string text, array raw)        opaque and model-bound: replayed verbatim to the same
-                                         model, dropped for another; never re-derived
+Reasoning(string text, array raw)        opaque and model-bound: raw['model'] decides replay
+                                         (verbatim to the same model, dropped for another)
 ToolCall(string id, string name, array input)
-ToolResult(string callId, Part[] content, bool error)
+ToolResult(string callId, Part[] content, bool error)    content: Text, Media, Reference
 Media(string mime, ?string bytes, ?string uri)
-Reference(string uri, ?string title)     a source, a resource link
-Message(Role $role, Part[] $parts)       Role::User | Role::Assistant
+Reference(string uri, ?string title)
+Message(Role $role, Part[] $parts)       Role::User | Role::Assistant; checks which parts a role may hold
 ```
-
-Tool results travel in a user message (Anthropic's shape); a provider that needs another shape
-maps it. A message may hold any mix of parts.
 
 ### Model
 
@@ -47,33 +50,41 @@ interface Model {
     /** @return iterable<Delta> */
     public function stream(Prompt $prompt): iterable;
 }
-Prompt(?string system, Message[] messages, ToolSpec[] tools, Options options)
-Delta: TextDelta(text) | ReasoningDelta(text) | ToolCallStart(id, name) | ToolInputDelta(id, json)
+Prompt(?string system, Message[] messages, ToolSpec[] tools, Options options, Cancel cancel)   [r2] cancel
+Delta: TextDelta(text) | ReasoningDelta(text, array raw = []) | ToolCallStart(id, name) | ToolInputDelta(id, json)
      | ToolCallEnd(id) | Usage(input, output, cacheRead, cacheWrite) | Finish(FinishReason)
 FinishReason: Stop | ToolCalls | Length | Refusal
 ```
 
-One method. The core folds deltas into the assistant `Message` with an `Accumulator`; a provider
-that cannot stream yields the whole reply as deltas. `Options` holds the portable knobs
-(`maxOutputTokens`, `temperature`, `toolChoice: Auto|None|Required|Tool(name)`) and
-`provider: array<string, array>` keyed by provider name for the rest. A provider throws
-`UnsupportedOptionException` for an option it cannot honour; nothing is dropped silently.
+One method. `Accumulator` folds deltas into the assistant message in the order parts began;
+malformed tool input is reported, not guessed; a provider bug is a `LogicException`. `Options`
+holds `maxOutputTokens`, `temperature`, `toolChoice: ToolChoice::Auto|None|Required|Tool` with
+`tool` for the forced name, `toolRetries` (default 3) and `provider: array<string, array>` keyed
+by provider name, merged into the request last. A provider throws `UnsupportedOptionException`
+for an option it cannot honour; nothing is dropped silently. **[r2]** Provider keys are the
+module's lowercase name (`openai`, `anthropic`); a third-party provider documents its own key.
+
+**[r2]** `Cancel` is a tiny readonly signal (`isCancelled(): bool`) created by the Run; the model
+and the transport observe it (see Cancellation).
 
 ### Transport (streaming HTTP)
 
-Providers do not depend on an HTTP client. They use:
+Namespace `Harness\Http`. Providers do not depend on an HTTP client:
 
 ```php
 interface Transport {
-    /** @return Response  status, headers, and body(): iterable<string> of chunks as they arrive */
-    public function post(string $url, array $headers, string $body): Response;
+    public function post(string $url, array $headers, string $body, Cancel $cancel): Response;   [r2] cancel
 }
+Response: status, headers, body(): iterable<string>    read once
 ```
 
-The core ships `StreamTransport`: HTTP/1.1 over `stream_socket_client()` (`tcp://`, `tls://`),
-chunked transfer decoding, waiting only with `fiber\readable()` / `fiber\writable()`. No
-redirects, no proxies, no compression: a model endpoint needs none. A PSR-18 transport is a
-module. `Sse` turns a chunk iterable into `(event, data)` pairs; providers share it.
+`StreamTransport`: HTTP/1.1 over `stream_socket_client()` (`tcp://`, `tls://`), chunked,
+content-length and close-delimited bodies, 1xx skipped, connect and idle timeouts, warnings
+turned into `TransportException` without `@`, no redirects, proxies or compression. It waits
+only with `fiber\readable()` / `fiber\writable()`. **[r2]** While waiting for the next chunk it
+uses a short readable timeout (250 ms) and checks `$cancel`, so a cancelled turn ends within that
+time instead of at the next delta. `Sse::parse()` turns a chunk iterable into `event => data`
+pairs and is SSE-specific: a backend streaming NDJSON parses `body()` itself (documented).
 
 ### Tool, ToolSource, Call, Result
 
@@ -82,88 +93,125 @@ interface Tool {
     public function spec(): ToolSpec;
     public function call(array $input, Call $call): Result;
 }
-ToolSpec(string name, string description, array schema, Hints hints)
+ToolSpec(string name, string description, array schema, Hints hints = new Hints())
 Hints(bool readOnly = false, bool destructive = false, bool idempotent = false, bool openWorld = false)
-Result(Part[] content, mixed value = null, array meta = [])     Result::text('...') for the common case
+Result(Part[] content, mixed value = null, array meta = [], bool error = false)   Result::text('...')
 interface ToolSource { /** @return iterable<Tool> */ public function tools(): iterable; }
 ```
+
+**[r2]** `ToolSpec` normalizes JSON-schema object nodes that PHP would encode as `[]`
+(`properties`, nested `properties`, `required: []` is fine) so every backend receives `{}`; a
+schema whose `type` is not `object` throws. **[r2]** `Result::fromArray()` exists, mirroring
+`toArray()`.
 
 `Hints` are MCP's tool annotations, read by policy middleware and by the scheduler. `Result`
 keeps apart what the model sees (`content`), what the application gets (`value`) and what is
 only logged (`meta`). The loop reads `ToolSource::tools()` at every step and keeps the order it
-gets: tool lists change, and providers cache the prompt prefix. `ClosureTool(spec, Closure)` and
-`Tools(Tool ...$tools)` (a static `ToolSource`) are in the core.
+gets. `ClosureTool(spec, Closure)` and `Tools(Tool ...$tools)` are in the core.
 
 `Call` is the explicit context, always the second parameter: `id`, `run`, `context` (the host's
-own object, passed to `Run`), `progress(string|array)`, `isCancelled()`, and
-`needsInput(Question[] questions, mixed state): Result`, which ends the turn awaiting the host
-(see Pause and resume).
+own object), `spec` (the called tool's `ToolSpec`, so middleware reads `Hints`), `progress(value)`,
+`isCancelled()`, `emit(Event)` (forwarding, for nested runs), and the pause protocol:
+`needsInput(Approval|Question[] needs, mixed state = null): Result`, `pending()`, `answer(Answer)`
+(the answer-at-once idiom), `decision()`, `answers()`, `state()`.
 
-Failure from a tool has two forms. `throw new Retry('why')` becomes an error `ToolResult` the
-model may correct, counted against `Options::$toolRetries` (default 3) after which the turn
-fails. Any other `Throwable` becomes an error `ToolResult` with the message, is emitted as
-`ToolEnded` with the throwable, and is logged; it never becomes a silent string.
+Failure from a tool: `throw new Retry('why')`, an unknown tool name and malformed input all become
+error results the model may correct, counted against `toolRetries`; past the budget the turn
+fails `ToolRetriesExceeded`. Any other `Throwable` becomes an error `ToolResult` with the message,
+a `ToolEnded` event carrying the throwable, and a log entry.
 
 ### Run and Turn
 
 ```php
 $run = new Run(Model $model, ToolSource $tools, ?string $system = null, mixed $context = null,
-               array $middleware = [], array $stop = [], ?LoggerInterface $log = null);
-foreach ($run->turn(Message|Answer[] $input) as $event) { ... }     // iterable<Event>
-$ended = $run->ended();   // Ended(Reason reason, Message[] appended, Pending[] pending, Usage usage, ?Throwable error)
+               array $middleware = [], array $stop = [], ?LoggerInterface $log = null,
+               Options $options = new Options(), array $messages = [], array $pending = []);
+foreach ($run->turn(Message|Answer[] $input, ?Call $parent = null) as $event) { ... }   // iterable<Event>
+$run->ended();      // Ended(Reason, Message[] appended, Pending[] pending, Usage usage,
+                    //       ?Throwable error, ?ErrorKind errorKind, ?FinishReason finish)   [r2] finish
+$run->messages();  $run->fork();  $run->cancel();  $run->isCancelled();  $run->isRunning();   [r2] isRunning
 ```
 
-A step: build the `Prompt` from the system text, the messages so far and the current tools;
-stream the model through the model middleware; append the assistant message; run its tool calls
-through the tool middleware; append their results as one user message. The turn ends when a step
-produced no tool calls (`Reason::Done`), when a stop predicate returns true (`Reason::Stopped`),
-when a tool asked for input (`Reason::AwaitingInput`), when `$run->cancel()` was called
-(`Reason::Cancelled`), or on failure (`Reason::Failed`, with `ErrorKind`:
-`ModelError | ContextTooLong | RateLimited | TransportError | ToolRetriesExceeded | MiddlewareError`).
+A step: build the `Prompt`; stream the model through the model middleware; append the assistant
+message; run its tool calls through the tool middleware; append their results as one user
+message. The turn ends `Done` when a step produced no tool calls, `Stopped` when a stop predicate
+returns true (checked after steps that called tools; `AwaitingInput` wins over `Stopped`),
+`AwaitingInput` when a tool asked for input, `Cancelled`, or `Failed` with `ErrorKind`
+(`ModelError | ContextTooLong | RateLimited | TransportError | ToolRetriesExceeded | MiddlewareError`).
+A `LogicException` from the model or a middleware ends the turn `Failed` and is rethrown from the
+iteration after `TurnEnded`.
 
-Stop predicates are closures `fn (Step $step): bool`, OR'd; the core provides `Stop::maxSteps(n)`,
-`Stop::toolCalled(name)`, `Stop::tokens(n)`. Default: `[Stop::maxSteps(20)]`.
+**[r2]** `Ended::$finish` is the `FinishReason` of the turn's last assistant message: `Done` only
+means "no tool calls"; a reply cut by the token limit or refused is `Done` with `finish` `Length`
+or `Refusal`, and the docs say so where `Reason` is explained. `Cancelled` discards the partial
+assistant message of the step in progress: `Ended::$appended` never holds it (documented).
+
+Stop predicates are closures `fn (Step $step): bool`, OR'd: `Stop::maxSteps(n)`,
+`Stop::toolCalled(name)`, `Stop::tokens(n)`. Default `[Stop::maxSteps(20)]`.
 
 Tool calls of one step run concurrently with `fiber\go()`: the read-only ones first, together;
-then the others one at a time, in the model's order. A turn runs inside `fiber\run()` and inside
-a new `\Scope` (from `fiber-interop/scope`, as the api treats it), so it ends with every
-coroutine it started finished.
+then the others one at a time, in the model's order; results go back in the model's order as one
+user message; calls that never started get a "cancelled before it ran" result. A turn runs inside
+`fiber\run()` and inside a new `\Scope` seeded with its creator's superglobals.
 
-`Run` keeps the messages of the conversation in memory for its lifetime; `Ended::$appended` is
-what the turn added, so a host that persists its own history needs nothing more. `Run::messages()`
-returns them all.
+### Cancellation
+
+Cooperative, since fiber-interop 1.0 has none: `Run::cancel()` sets the `Cancel` signal; the
+transport stops within its poll interval **[r2]**, the model stream is abandoned, running tools
+see `Call::isCancelled()`, `Shell` kills its process group, a nested run is cancelled with its
+parent. `cancel()` with no turn running is a no-op.
 
 ### Pause and resume
 
 A turn that ends `AwaitingInput` lists `Pending(ToolCall call, Approval|Question[] needs, mixed
-state)`. The next `turn()` takes `Answer(callId, Decision::Allow|Deny(reason) | array answers)`
-instead of a user message: approved calls run, denied ones go back to the model as error
-results, a tool that asked questions is called again with `$call->answers()` and its state. The
-pending state is plain parts, so it survives a process boundary: a web request ends the turn,
-the browser answers, another process resumes from the same messages plus the answers.
+state)`. The next `turn()` takes `Answer(callId, Decision::allow() | Decision::deny(reason) | array
+answers)` instead of a user message; it runs as step 0 and emits `ToolDecided`: approved calls
+run, denied ones go back to the model as error results, a tool that asked questions is called
+again with `$call->answers()` and `$call->state()`.
 
-A host that wants to answer at once (a CLI reading the terminal) does it in middleware inside the
-tool's fiber, with `fiber\readable(STDIN)`; the core does not know the difference.
+The host persists `Ended::$pending` (`Pending::toArray()`) next to the messages and restores with
+`new Run(..., messages: ..., pending: ...)` in any process; the pending list is validated against
+the unanswered tool calls in the messages. **[r2]** The JSON shapes of a `Pending` with an
+`Approval` and with `Question[]` are shown in the README, and the discrimination is explicit:
+`needs` is `{"type":"approval",...}` or `{"type":"questions","questions":[...]}`.
+
+A host that can answer at once (a CLI) gates in one `ToolMiddleware`: call `$next()` or return an
+error `Result`; it reaches for `needsInput` only when the turn must end (documented as the rule,
+with `files.php` showing the two-middleware form once and saying why).
+
+**[r2] Nested pauses.** When a child run (`AgentTool`) ends `AwaitingInput`, the parent's call ends
+with `needsInput()` carrying the child's pendings, and `state` holds the child's messages and
+pendings (serialized). On resume the parent's `AgentTool` restores the child, routes the answers
+to it, and continues; a web host sees one `Pending` list whose `needs` nest no deeper than the
+questions themselves. A child's approval therefore reaches the browser like any other.
 
 ### Events
 
-Codex's shape: `started → delta* → ended` per item, each with an `id`, a `turn` and a `parent`
-(the tool call id of an enclosing run, for nested agents). Every event is a final readonly
-object with `toArray()`, and `JsonSerializable`, so an SSE route is one `json_encode()` per event.
+Codex's shape: `started → delta* → ended` per item, each with an `id`, a `turn` and a `parent`.
+Every event is a final readonly class on an abstract readonly `Event`, with `toArray()` and
+`JsonSerializable`; `type` is the class name in snake case. **[r2]** `Events::fromArray()`
+rebuilds the typed event, mirroring `Parts::fromArray()`.
 
 ```
-TurnStarted(turn)                       TurnEnded(turn, Reason, Usage, ?ErrorKind)
+TurnStarted(turn)                       TurnEnded(turn, Reason, Usage, ?ErrorKind, ?FinishReason)  [r2] finish
 StepStarted(turn, n)                    StepEnded(turn, n)
 MessageStarted(id)                      TextDelta(id, text)        ReasoningDelta(id, text)
 ToolCallStarted(id, name)               ToolInputDelta(id, json)   ToolCallReady(id, name, input)
 ToolDecided(id, Decision)               ToolProgress(id, value)    ToolEnded(id, Result|Throwable)
-MessageEnded(id, Message, Usage)        InputRequested(Pending[])
+MessageEnded(id, Message, Usage, FinishReason)                     InputRequested(Pending[])
 ```
 
-The loop runs in a coroutine and pushes events to a queue; the consumer's `foreach` awaits the
-queue through a then-able (an object with `then(callable, callable)`, which every fiber-interop
-adapter can `await`). Concurrent tool calls emit from their own fibers in the order they happen.
-A consumer that stops iterating cancels the run.
+**[r2] Delivery is synchronous.** `emit()` returns only after the consumer's `foreach` has taken
+the event. So anything that happens after an event was emitted (a middleware printing a prompt
+in the tool's fiber) is seen by the host after it handled that event, and the stream is strictly
+ordered with respect to side effects. The cost is one fiber switch per event. The consumer sets
+the pace: a slow SSE write slows the model read, which is the intended backpressure. Concurrent
+tool calls emit from their own fibers, each waiting its turn. A consumer that stops iterating
+cancels the turn.
+
+**[r2]** The README's Events section shows the wire format: a table `class → type` and one JSON
+line per event family (`text_delta`, `tool_call_ready`, `tool_ended`, `input_requested`,
+`turn_ended`).
 
 ### Middleware
 
@@ -174,92 +222,107 @@ interface ModelMiddleware { /** @return iterable<Delta> */ public function strea
 interface ToolMiddleware  { public function call(ToolCall $call, Call $context, Closure $next): Result; }
 ```
 
-A class may implement both. Order: the array order, outermost first. The core ships none but
-documents the idioms: a policy returns `Result` with `error: true` (deny) or `$context->needsInput(Approval)`;
-truncation rewrites the `Result`; compaction rewrites the `Prompt`; retries wrap `$next`; tracing
-wraps both. Observing without altering is what events are for.
+Order: array order, outermost first; one class may implement both. The core ships none but
+documents the idioms: policy from `Hints` (deny with an error `Result`, or `needsInput(Approval)`),
+truncation of a `Result` with an instructive tail, compaction rewriting the `Prompt`, retries
+wrapping `$next`, tracing wrapping both. **[r2]** The retry idiom states its hazard: a model
+retry is only safe before the first delta was yielded onward (the accumulator has already folded
+it); past that, rethrow. The README shows the safe form.
 
 ## Modules
 
-Each module is a namespace `Harness\<Module>\` with its own README section and tests; the core
-never imports a module. A module may depend on another module and on third-party packages
-declared in `suggest` (loaded by the host) or, when small and stable, in `require`.
+Each module is a namespace `Harness\<Module>\` with a page in docs/ and tests; the core never
+imports a module.
 
-### Provider\OpenAI (module, required in round 1)
+### Provider\OpenAI (module) — as built in beta1
 
-OpenAI Chat Completions over `Transport`, the shape every local server speaks (llama.cpp,
-vLLM, exl3, Ollama). Streams with `stream: true` and `stream_options: {include_usage: true}`;
-maps `delta.content`, `delta.reasoning_content` (local servers) and `delta.reasoning`, tool-call
-deltas by index with ids, `finish_reason`. Tool results map to `role: tool` messages. Reasoning
-parts are replayed as `reasoning_content` when present. Config: base URL, model, optional API key
-and extra headers. A `Responses` API variant is a later round.
+`ChatCompletions` over `Transport`: `stream: true` with usage, `delta.content`,
+`delta.reasoning_content` and `delta.reasoning`, tool-call deltas by index, `role: tool` results,
+images and audio, `provider['openai']` merged last, HTTP and in-stream errors mapped to error
+kinds. Reasoning replayed only to the same model. Live tests skipped without
+`HARNESS_OPENAI_URL`. Endpoints for development: local `http://127.0.0.1:8012/v1`
+(`qwen3.8-27b-exl3-sivert`, thinking on, 4 parallel at most), black `http://black:8080/v1`
+(`qwen3.8-flash-next`, stronger, 3 slots). Shared servers: no load tests.
 
-Test endpoints available during development:
-- local: `http://127.0.0.1:8012/v1`, model `qwen3.8-27b-exl3-sivert` (thinking on by default,
-  emits `reasoning_content`, 4 parallel requests at most);
-- black: `http://black:8080/v1`, model `qwen3.8-flash-next` (llama.cpp, 3 parallel slots, large
-  context, the stronger one).
-Neither needs a key. Tests must not depend on them: unit tests use a `FakeModel` and a
-`FakeTransport`; the live tests are skipped without `HARNESS_OPENAI_URL`.
+### Provider\Anthropic (module) — as built in beta1
 
-### Provider\Anthropic (module, round 1 if time allows)
+`Messages` over `Transport`; all SSE events; `thinking`/`redacted_thinking` kept verbatim in
+`raw['blocks']` and replayed to the same model; consecutive user turns merged; `provider['anthropic']`
+(cache control); errors including 529 mapped. A forced `tool_choice` a model rejects surfaces as
+the API's error (`ModelError`); no capability table. Skipped live without `ANTHROPIC_API_KEY`.
 
-Messages API over `Transport`: SSE events `message_start`, `content_block_*`, `message_delta`,
-`message_stop`, `ping`, `error`; blocks `text`, `tool_use`, `tool_result`, `thinking`,
-`redacted_thinking`, `image`, `document`; `cache_control` via `Options::$provider['anthropic']`.
-Skipped live without `ANTHROPIC_API_KEY`.
+### Tools\Files, Tools\Shell (modules) — as built in beta1
 
-### Tools\Files (module, round 1)
+**[r2]** docs/files.md documents `Root`'s public API (`path`, containment rules); docs/shell.md
+says that `Shell`'s hints (`destructive`, `openWorld`, not `readOnly`) are what a policy middleware
+keys on, with the one-line policy shown.
 
-`ReadFile`, `WriteFile`, `EditFile` (exact string replace, unique match required), `ListDir`,
-`Glob`, `Grep`, rooted at a directory the host passes; a path outside it is an error result.
-Hints set correctly (`readOnly` for read, list, glob, grep). Output truncation with an
-instructive tail ("N more lines; pass offset=...") rather than a silent cut.
+### Agents\AgentTool (module)
 
-### Tools\Shell (module, round 1)
+`AgentTool(Run $child, string $name, string $description, bool $fresh = true)` **[r2]** `fresh`:
+each call runs `$child->fork()` when true, the same child with its growing context when false.
+The child's events are forwarded with `parent` set to the call id; the child is cancelled with
+the parent; hints derive from the child's tools. The child's final text is the result;
+**[r2]** when the child ended with `finish` `Length` or `Refusal` the result says so in a
+trailing line and in `meta['finish']`. **[r2]** Nested pauses propagate (see Pause and resume).
+**[r2]** docs/agents.md documents rendering concurrent siblings: buffer text per message id and
+flush per line or at `MessageEnded`; never interleave two open messages' characters; and
+`examples/subagent.php` renders that way.
 
-`Shell(command, timeout)` through `proc_open`, reading with `fiber\readable()`, with a working
-directory and an allow/deny policy left to middleware. `destructive: true`, `openWorld: true`.
+### Testing (module)
 
-### Mcp (module, round 2 unless trivial)
+`FakeModel`, `FakeTransport`, and **[r2]** `TestCall::make(?ToolSpec $spec = null, mixed $context
+= null, string $id = 'test'): Call` to unit-test tools and tool middleware without a live run.
+docs/testing.md documents it (no pointer into the harness's own tests/).
 
-An MCP server as a `ToolSource` under the 2026-07-28 spec: stateless requests with `_meta`
-protocol version and client capabilities, `server/discover`, `tools/list` cached by `ttlMs`,
-`tools/call`; `annotations` → `Hints`; content `text|image|audio|resource|resource_link` → parts;
-`isError` → error result; `resultType: "input_required"` → `$call->needsInput()` with
-`requestState` as the state, the retry carrying `inputResponses`. Transports: stdio (child
-process over `proc_open` + `fiber\readable()`), Streamable HTTP over `Transport`.
+### Transcript (module, **[r2] this round**)
 
-### Agents (module, round 1)
+```php
+interface Transcript { public function load(): array /* Message[] */; public function append(array $messages): void; public function clear(): void; }
+JsonlTranscript(string $path)
+JsonlEvents(string $path)     a sink: write(Event) appends one JSON line; replay(): iterable<Event> via Events::fromArray()
+```
 
-`AgentTool(Run $child, string $name, string $description)`: a `Tool` whose `call()` runs a nested
-turn with the input as the user message and returns the final text; the child's events are
-forwarded to the parent's stream with `parent` set. Fresh context each call unless the host
-passes messages.
+Writes handle partial `fwrite()` results (loop until the whole line is written; a non-blocking
+stream waits with `fiber\writable()`), and the sink is tested with two concurrently streaming
+`AgentTool` children over a `FakeModel` that yields with `fiber\sleep()` between deltas, several
+thousand events, every line parsing. **[r2]** Round 1's research user saw 4 of 6482 lines
+corrupted (two events concatenated, the first cut mid-string) with a sink written with plain
+`fwrite()`; the builder reproduces that first with that user's tool
+(`/home/frode/dev/phasync/harness-users/research`, `tmp/run1.jsonl`) and determines whether the
+cause is a partial write or something in the harness's event delivery, and reports which.
 
-### Transcript (module, round 2)
+### Mcp (module, **[r2] this round**)
 
-`interface Transcript { load(): Message[]; append(Message[]); clear(); }` with `JsonlTranscript`,
-and a `JsonlEvents` sink that writes every event of a turn as one line.
+An MCP server as a `ToolSource` under the 2026-07-28 spec: stateless requests carrying
+`_meta['io.modelcontextprotocol/protocolVersion']` and `clientCapabilities`, `server/discover`
+on first use, `tools/list` cached by its `ttlMs`, `tools/call`; `annotations` → `Hints`; content
+`text|image|audio|resource|resource_link` → parts; `isError` → error result;
+`resultType: "input_required"` → `$call->needsInput()` with `requestState` as the state, the retry
+carrying `inputResponses`; a result without `resultType` is `complete`. Transports: stdio (a child
+process over `proc_open`, newline-delimited JSON-RPC, read with `fiber\readable()`) and Streamable
+HTTP over `Transport` (POST per message with `MCP-Protocol-Version`, `Mcp-Method`, `Mcp-Name`
+headers; `application/json` or `text/event-stream` responses). `subscriptions/listen` is a later
+round. A tiny stdio MCP server in PHP lives in `tests/` for the module's tests; a live test
+against a public reference server is skipped without `HARNESS_MCP_COMMAND`.
 
 ## Examples and CLI
 
-`examples/` holds small, complete CLI programs, each one file, each runnable with the local
-endpoint via `HARNESS_OPENAI_URL` and `HARNESS_MODEL`: `chat.php` (streamed conversation, Ctrl-C
-clean), `files.php` (an agent with the file tools over a directory, approvals on the terminal
-for writes), `shell.php`, `subagent.php`. The round's users build their own tools on top of the
-same API; the examples are the reference, not a framework.
+`examples/`: `chat.php`, `files.php`, `shell.php`, `subagent.php` as in beta1, plus **[r2]**
+`mcp.php` (a chat with one MCP server's tools) and `web.php` (one turn per invocation, state in a
+JSON file, events as JSON lines: the request/response host idiom). Each reads
+`HARNESS_OPENAI_URL` and `HARNESS_MODEL`.
 
 ## Rules the code follows
 
 - Fail hard and loud: misuse throws an instructive exception at the point of misuse; no guards
   that paper over a broken invariant; no `@`.
-- Code as if type safe: declared types everywhere, `declare(strict_types=1)`, readonly value
-  objects, enums for closed sets, no arrays where a value object fits.
+- Code as if type safe: `declare(strict_types=1)`, readonly value objects, enums for closed sets,
+  no arrays where a value object fits.
 - No convenience layers: one way to do each thing; document the idiom instead of adding a helper.
-- Identical behaviour on every fiber-interop adapter; a difference is a bug in the harness or an
-  adapter, reported, not worked around.
-- Docs concise: README (install, the loop, events, middleware, modules), a page per module, a
-  CHANGELOG with a section per tag. Docblocks on every public symbol, one paragraph of fact.
-- Tests with Pest: unit tests over fakes for the loop, the accumulator, the scheduler, pause and
-  resume, events order, both adapters; live tests tagged and skipped without the endpoint.
+- Identical behaviour on every fiber-interop adapter; a difference is a bug, reported, not
+  worked around.
+- Docs concise: README (install, the loop, events with wire format, pause and resume with JSON
+  shapes, middleware idioms with their hazards, modules), a page per module, CHANGELOG with a
+  section per tag. Docblocks on every public symbol, one paragraph of fact.
+- Tests with Pest under both adapters; live tests tagged and skipped without the endpoint.
