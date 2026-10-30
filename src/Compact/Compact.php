@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Harness\Compact;
 
 use Harness\Accumulator;
+use Harness\Cancel;
 use Harness\Message;
 use Harness\Model;
 use Harness\ModelMiddleware;
@@ -18,12 +19,13 @@ use Harness\Part\ToolCall;
 use Harness\Part\ToolResult;
 use Harness\Prompt;
 use Harness\Role;
+use Harness\Usage;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
  * Keeps each step's prompt within `$budgetTokens` by replacing its oldest messages with a summary.
- * When `$count($prompt)` exceeds the budget, the oldest half of the messages after the first
+ * When the prompt counts over the budget, the oldest half of the messages after the first
  * `$keepFirst` is replaced by one user message holding a summary that `$summarizer` wrote in a side
  * call (what was asked, what was done, what is known, what remains), followed by an assistant
  * acknowledgement when the next kept message is a user message, so roles alternate from there on.
@@ -31,13 +33,23 @@ use Psr\Log\NullLogger;
  * cut moves back so a `ToolResult` stays with its `ToolCall`; `Reasoning` is left out of what is
  * summarized. Only the prompt handed on changes, never `Run::messages()`.
  *
- * The last cut and summary are remembered and reused while the conversation keeps the same
- * prefix and the result fits the budget, so the provider's cache sees a stable prefix; when the
- * budget is exceeded again, the earlier summary is summarized again together with the oldest half
- * of what follows it, round after round until the prompt fits or nothing is left to summarize (a
- * warning is logged then). Each new summary is logged at info level (messages removed, summary size);
- * `last()` says what the last step did. The side call has no tools, the step's `maxOutputTokens`
- * and provider options, and the turn's `Cancel`. A summarizer that returns no text fails the step.
+ * A summary is reused while the conversation keeps the same prefix and the result fits the budget,
+ * so the provider's cache sees a stable prefix; when the budget is exceeded again, the earlier
+ * summary is summarized again together with the oldest half of what follows it, round after round
+ * until the prompt fits or nothing is left to summarize (a warning is logged then). The last 8
+ * summaries are kept, each under the messages it summarized, so one instance may serve several
+ * conversations at once (the forks of a sub-agent's template share it). Each new summary is logged
+ * at info level; `last()` says what the last step, of any conversation, did.
+ *
+ * The side call has no tools, `$summarizerOptions` and the turn's `Cancel`. A summary that comes
+ * back empty, or shorter than a quarter of the summary it replaces, is asked for once more; a
+ * second such summary fails the step with a `\RuntimeException` naming both sizes.
+ *
+ * The count is `$count($prompt)` times a ratio Compact calibrates itself: after each step it passes
+ * on, the provider's reported input tokens divided by `$count` of that prompt (the last ratio wins;
+ * a report of zero is ignored), so an approximation that undercounts a chat template is corrected
+ * after one step. At first use, the fixed part of the prompt (system text, tool specs, the first
+ * `$keepFirst` messages) must count at most half the budget, or Compact throws a `\LogicException`.
  */
 final class Compact implements ModelMiddleware
 {
@@ -50,16 +62,23 @@ final class Compact implements ModelMiddleware
         Be complete about facts and terse in wording. Write only the summary.
         TXT;
 
+    /** How many summaries are kept, one per conversation the instance serves. */
+    private const CACHE = 8;
+
     /** @var \Closure(Prompt): int */
     private readonly \Closure $count;
     private readonly LoggerInterface $log;
-    /** @var list<Message> the conversation's messages up to the remembered cut */
-    private array $summarized = [];
-    /** @var list<Message> what replaces them: the kept first messages, the summary and its acknowledgement */
-    private array $replacement = [];
-    private string $summary    = '';
-    private int $removed       = 0;
-    private ?Compaction $last  = null;
+    /**
+     * Newest first: the conversation's messages up to the cut (`summarized`), what replaces them
+     * (the kept first messages, the summary and its acknowledgement), the summary, the number of
+     * messages it stands for, and the size of the summary it replaced.
+     *
+     * @var list<array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int}>
+     */
+    private array $cache      = [];
+    private float $ratio      = 1.0;
+    private bool $checked     = false;
+    private ?Compaction $last = null;
 
     /** @param (\Closure(Prompt): int)|null $count null: `Compact::approximate(...)` */
     public function __construct(
@@ -68,6 +87,7 @@ final class Compact implements ModelMiddleware
         ?\Closure $count = null,
         private readonly int $keepFirst = 1,
         ?LoggerInterface $log = null,
+        private readonly Options $summarizerOptions = new Options(maxOutputTokens: 1024),
     ) {
         if ($budgetTokens < 1) {
             throw new \InvalidArgumentException('Compact needs a budget of at least 1 token');
@@ -82,7 +102,7 @@ final class Compact implements ModelMiddleware
     /**
      * The default counter: the prompt's bytes / 4 (system text, text and reasoning, tool names and
      * input as JSON, tool result content, tool specs as JSON), 1000 tokens per media part, plus 4
-     * per message and 10 per tool spec. An approximation; pass the provider's tokenizer for precision.
+     * per message and 10 per tool spec. An approximation, which Compact calibrates (see the class).
      */
     public static function approximate(Prompt $prompt): int
     {
@@ -106,30 +126,57 @@ final class Compact implements ModelMiddleware
 
     public function stream(Prompt $prompt, \Closure $next): iterable
     {
-        yield from $next($this->compact($prompt));
+        [$compacted, $counted] = $this->compact($prompt);
+        $reported              = 0;
+        foreach ($next($compacted) as $delta) {
+            if ($delta instanceof Usage) {
+                $reported = \max($reported, $delta->input);
+            }
+            yield $delta;
+        }
+        if ($reported > 0 && $counted > 0) {
+            $this->ratio = $reported / $counted;
+        }
     }
 
-    private function compact(Prompt $prompt): Prompt
+    /** @return array{0: Prompt, 1: int} the prompt to hand on and `$count` of it */
+    private function compact(Prompt $prompt): array
     {
-        $before = ($this->count)($prompt);
+        if (!$this->checked) {
+            $fixed = ($this->count)(self::with($prompt, \array_slice($prompt->messages, 0, $this->keepFirst)));
+            if (2 * $fixed > $this->budgetTokens) {
+                throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens, over half the budget of ' . \number_format($this->budgetTokens) . ': the budget must leave room above it for a summary and the recent half. Raise budgetTokens to ' . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
+            }
+            $this->checked = true;
+        }
+        $ratio   = $this->ratio;   // another conversation's step may change it while this one waits
+        $tokens  = fn (int $counted): int => (int) \ceil($counted * $ratio);
+        $counted = ($this->count)($prompt);
+        $before  = $tokens($counted);
         if ($before <= $this->budgetTokens) {
             $this->last = null;
 
-            return $prompt;
+            return [$prompt, $counted];
         }
         $messages = $prompt->messages;
-        $known    = \count($this->summarized);
-        $view     = $messages;
-        $offset   = 0;      // $view[$i] is $messages[$i + $offset] from $floor on
-        $floor    = 0;      // the start of what $view keeps verbatim after a summary
-        // == is identity for the same objects, and a deep comparison for a restored copy.
-        if ($known > 0 && \count($messages) > $known && \array_slice($messages, 0, $known) === $this->summarized) {
-            $view   = [...$this->replacement, ...\array_slice($messages, $known)];
-            $offset = $known - \count($this->replacement);
-            $floor  = \count($this->replacement);
+        // === holds the same Message objects: a fork's copy of the messages shares them.
+        $entry = null;
+        foreach ($this->cache as $e) {
+            $known = \count($e['summarized']);
+            if (\count($messages) > $known && (null === $entry || $known > \count($entry['summarized'])) && \array_slice($messages, 0, $known) === $e['summarized']) {
+                $entry = $e;
+            }
+        }
+        $view   = $messages;
+        $offset = 0;      // $view[$i] is $messages[$i + $offset] from $floor on
+        $floor  = 0;      // the start of what $view keeps verbatim after a summary
+        if (null !== $entry) {
+            $view   = [...$entry['replacement'], ...\array_slice($messages, \count($entry['summarized']))];
+            $offset = \count($entry['summarized']) - \count($entry['replacement']);
+            $floor  = \count($entry['replacement']);
         }
         $rounds = 0;
-        while (($after = ($this->count)(self::with($prompt, $view))) > $this->budgetTokens) {
+        while (($after = $tokens($counted = ($this->count)(self::with($prompt, $view)))) > $this->budgetTokens) {
             $start = \min($this->keepFirst, \count($view));
             if ($start > 0 && $start < \count($view) && self::hasResults($view[$start])) {
                 ++$start;   // the results of the last kept message's tool calls stay with it
@@ -149,57 +196,87 @@ final class Compact implements ModelMiddleware
                 break;
             }
             // A later round summarizes the earlier summary together with what follows it.
-            $summary = $this->summarize(\array_slice($view, $start, $cut - $start), $prompt);
-            $replace = [new Message(Role::User, [new Text("[A summary of the earlier conversation, which was compacted to save context]\n\n$summary")])];
+            $previous = null === $entry ? null : \strlen($entry['summary']);
+            $summary  = $this->summarize(\array_slice($view, $start, $cut - $start), $prompt->cancel, $previous);
+            $replace  = [new Message(Role::User, [new Text("[A summary of the earlier conversation, which was compacted to save context]\n\n$summary")])];
             if (Role::User === $view[$cut]->role) {
                 $replace[] = new Message(Role::Assistant, [new Text('Understood. I continue from that summary.')]);
             }
-            $known             = $cut + $offset;
-            $this->summarized  = \array_slice($messages, 0, $known);
-            $this->replacement = [...\array_slice($view, 0, $start), ...$replace];
-            $this->summary     = $summary;
-            $this->removed     = $known - $start;
-            $view              = [...$this->replacement, ...\array_slice($messages, $known)];
-            $offset            = $known - \count($this->replacement);
-            $floor             = \count($this->replacement);
+            $known  = $cut + $offset;
+            $entry  = [
+                'summarized'  => \array_slice($messages, 0, $known),
+                'replacement' => [...\array_slice($view, 0, $start), ...$replace],
+                'summary'     => $summary,
+                'removed'     => $known - $start,
+                'previous'    => $previous,
+            ];
+            $view   = [...$entry['replacement'], ...\array_slice($messages, $known)];
+            $offset = $known - \count($entry['replacement']);
+            $floor  = \count($entry['replacement']);
             ++$rounds;
-            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens)', ['removed' => $this->removed, 'bytes' => \strlen($summary), 'budget' => $this->budgetTokens]);
+            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens, counter ratio {ratio})', ['removed' => $entry['removed'], 'bytes' => \strlen($summary), 'budget' => $this->budgetTokens, 'ratio' => \round($ratio, 3)]);
         }
-        if ($view === $messages) {
+        if (null === $entry || $view === $messages) {
             $this->last = null;
 
-            return $prompt;
+            return [$prompt, $counted];
         }
-        $this->last = new Compaction($this->removed, \count($messages) - \count($this->summarized), $this->summary, $before, $after, 0 === $rounds);
+        $this->remember($entry);
+        $this->last = new Compaction($entry['removed'], \count($messages) - \count($entry['summarized']), $entry['summary'], $before, $after, 0 === $rounds, $entry['previous'], $ratio);
 
-        return self::with($prompt, $view);
+        return [self::with($prompt, $view), $counted];
     }
 
-    /** @param list<Message> $segment */
-    private function summarize(array $segment, Prompt $step): string
+    /**
+     * Puts the entry first, in place of the entries it supersedes: its own, when reused, and the
+     * earlier summaries of the same conversation, whose messages are a prefix of its own.
+     *
+     * @param array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int} $entry
+     */
+    private function remember(array $entry): void
+    {
+        $known       = \count($entry['summarized']);
+        $this->cache = [$entry, ...\array_filter($this->cache, static fn (array $e): bool => \count($e['summarized']) > $known || \array_slice($entry['summarized'], 0, \count($e['summarized'])) !== $e['summarized'])];
+        $this->cache = \array_slice($this->cache, 0, self::CACHE);
+    }
+
+    /**
+     * The summary of `$segment`. A collapsed one (empty, or under a quarter of the `$previous`
+     * summary's bytes) is asked for once more, and fails the step the second time.
+     *
+     * @param list<Message> $segment
+     */
+    private function summarize(array $segment, Cancel $cancel, ?int $previous): string
     {
         $transcript = '';
         foreach ($segment as $message) {
             $transcript .= self::render($message);
         }
-        $options = new Options(maxOutputTokens: $step->options->maxOutputTokens, provider: $step->options->provider);
-        $prompt  = new Prompt(self::PROMPT, [new Message(Role::User, [new Text("The conversation so far:\n\n{$transcript}Write the summary.")])], [], $options, $step->cancel);
-        $acc     = new Accumulator();
-        foreach ($this->summarizer->stream($prompt) as $delta) {
-            $acc->add($delta);
-        }
-        $text = '';
-        foreach ($acc->message()->parts as $part) {
-            if ($part instanceof Text) {
-                $text .= $part->text;
+        $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text("The conversation so far:\n\n{$transcript}Write the summary.")])], [], $this->summarizerOptions, $cancel);
+        for ($attempt = 1;; ++$attempt) {
+            $acc = new Accumulator();
+            foreach ($this->summarizer->stream($prompt) as $delta) {
+                $acc->add($delta);
             }
+            $text = '';
+            foreach ($acc->message()->parts as $part) {
+                if ($part instanceof Text) {
+                    $text .= $part->text;
+                }
+            }
+            $text   = \trim($text);
+            $finish = $acc->finish()?->value ?? 'none';
+            if ('' !== $text && (null === $previous || 4 * \strlen($text) >= $previous)) {
+                return $text;
+            }
+            $what = null === $previous
+                ? "returned no text (finish: $finish)"
+                : 'collapsed the summary to ' . \number_format(\strlen($text)) . ' bytes from the ' . \number_format($previous) . "-byte summary it replaces, under a quarter (finish: $finish)";
+            if (2 === $attempt) {
+                throw new \RuntimeException("Compact: the summarizer $what, twice; a collapsed summary loses what the agent knew. Give it more output tokens or turn its thinking off in summarizerOptions, or use another summarizer");
+            }
+            $this->log->warning("Compact: the summarizer $what; asking once more", ['bytes' => \strlen($text), 'previous' => $previous]);
         }
-        $text = \trim($text);
-        if ('' === $text) {
-            throw new \RuntimeException('Compact: the summarizer returned no text (finish: ' . ($acc->finish()?->value ?? 'none') . '); give it more output tokens');
-        }
-
-        return $text;
     }
 
     /** A message as plain text for the summarizer, without reasoning. */
