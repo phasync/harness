@@ -38,12 +38,16 @@ $dir  = $argv[1] ?? exit("Usage: php examples/files.php <dir> [task]\n");
 $task = \implode(' ', \array_slice($argv, 2));
 $root = new Files\Root($dir);
 
-// The policy: anything not read-only needs approval. A web host uses the same middleware and answers
-// the pending call in the next request.
+// A CLI that only ever answers on the terminal gates in one middleware (see examples/shell.php): it
+// asks, then calls $next() or returns an error Result. This example uses two on purpose, to show the
+// form for a policy shared with a web host. The policy asks with needsInput(), which a web host
+// answers in its next request; the terminal middleware outside it answers at once instead, in the
+// tool's fiber, so here the turn never ends awaiting input.
 $policy = new class implements ToolMiddleware {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {
-        if (null === $context->decision() && null !== $context->spec && !$context->spec->hints->readOnly) {
+        // decision() or answers() set: the host answered this call already.
+        if (null === $context->decision() && null === $context->answers() && null !== $context->spec && !$context->spec->hints->readOnly) {
             return $context->needsInput(new Approval("{$call->name} changes files"));
         }
 
@@ -51,7 +55,6 @@ $policy = new class implements ToolMiddleware {
     }
 };
 
-// The terminal answers at once, inside the tool's fiber, so the turn never ends awaiting input.
 $terminal = new class implements ToolMiddleware {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {

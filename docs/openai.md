@@ -25,7 +25,7 @@ $model = new ChatCompletions(
   tool result follow in a user message. User images go as `image_url`, wav/mp3 as `input_audio`;
   other media throw `UnsupportedContentException`.
 - `Options`: `maxOutputTokens` → `max_tokens`, `temperature`, `toolChoice` → `tool_choice`.
-  `Options::$provider['openai']` is merged into the request body last, so it sets anything else
+  `Options::$provider['openai']` (the key is the module's lowercase name) is merged into the request body last, so it sets anything else
   (`max_completion_tokens`, `top_p`, `chat_template_kwargs`, ...). `Required` or `Tool` with no tools
   throws `UnsupportedOptionException`.
 - HTTP 429 → `RateLimited` (with `retryAfter`), a context-length error → `ContextTooLong`, anything

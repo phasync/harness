@@ -27,7 +27,7 @@ $model = new Messages(
   as `cacheRead` and `cacheWrite`.
 - `toolChoice`: Auto → `auto`, None → `none`, Required → `any`, Tool → `tool` (some models reject the
   forced forms; the API's 400 then surfaces as a `ModelError`).
-- `Options::$provider['anthropic']` is merged into the request body last: `thinking`,
+- `Options::$provider['anthropic']` (the key is the module's lowercase name) is merged into the request body last: `thinking`,
   `output_config`, `cache_control` (top-level automatic caching) and the rest go there.
 - HTTP 429 and 529, `rate_limit_error` and `overloaded_error` → `RateLimited`; "prompt is too long" →
   `ContextTooLong`; a stream that ends before `message_stop` → `TransportError`.

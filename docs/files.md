@@ -23,6 +23,24 @@ never silently. `read_file` returns PNG, JPEG, GIF and WebP files as Media and r
 lines past `maxLineLength` are cut with a marker. `glob` and `grep` skip `.git` and do not follow
 symlinked directories; `grep` skips binary files and says how many.
 
+## Root
+
+`new Root($dir)` resolves `$dir` with `realpath()` and throws `\InvalidArgumentException` unless it is
+a directory. A host's own tool over the same directory uses its public API:
+
+- `$root->path`: the absolute, symlink-free directory.
+- `$root->resolve($path)`: the absolute path for `$path` (relative to the root, or absolute inside
+  it), normalized lexically (`.`, `..`, repeated `/`), which need not exist. It throws
+  `\RuntimeException` when the path leaves the root lexically, when its nearest existing ancestor
+  resolves (through a symlink) outside the root, or when it holds a NUL byte.
+- `$root->relative($abs)`: an absolute path inside the root as the model should see it, `.` for the
+  root itself.
+
+Containment is checked when a path is resolved; a symlink created afterwards is not seen, so a
+tool reads or writes right after `resolve()`.
+
+## Errors
+
 Missing or mistyped input is a `Retry` (the model corrects it, counted against the budget); a path
 outside the root, a missing file or a non-unique `old` throws `\RuntimeException`, which the model
 sees as an error result and the log records. Limits are constructor arguments (`limit`,

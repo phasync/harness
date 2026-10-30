@@ -4,7 +4,7 @@ Providers speak HTTP through `Transport`, not through an HTTP client:
 
 ```php
 interface Transport {
-    public function post(string $url, array $headers, string $body): Response;
+    public function post(string $url, array $headers, string $body, Cancel $cancel): Response;
 }
 ```
 
@@ -12,6 +12,10 @@ interface Transport {
 lower-case, repeats joined with `", "`) are public; `body()` yields the body chunks as they arrive and
 can be called once. A non-2xx status is a normal response; a failed connection, a timeout or a
 truncated body throws `TransportException`, which ends a turn `Failed` with `ErrorKind::TransportError`.
+
+`$cancel` is the turn's signal (`Prompt::$cancel`, passed on by the provider). A transport checks it
+while it waits and throws `Harness\Cancelled` once it is set; the run that set it ends the turn
+`Cancelled`.
 
 ## StreamTransport
 
@@ -25,7 +29,9 @@ new StreamTransport(connectTimeout: 10.0, idleTimeout: 300.0, ssl: ['cafile' => 
 ```
 
 `idleTimeout` bounds each wait for more of the response, not the whole request: a long stream that
-keeps sending is never cut off. DNS resolution is blocking (PHP has no non-blocking resolver).
+keeps sending is never cut off. Each wait is cut into slices of at most 250 ms with a check of the
+`Cancel` signal between them, so a cancelled turn ends within 250 ms even while the server sends
+nothing. DNS resolution is blocking (PHP has no non-blocking resolver).
 
 ## Sse
 
@@ -35,6 +41,21 @@ and `retry` are ignored; an event cut off by the end of the stream is dropped.
 
 ```php
 foreach (Sse::parse($response->body()) as $event => $data) { ... }
+```
+
+`Sse` is for `text/event-stream` only. A backend that streams NDJSON (Ollama's `/api/chat`) splits
+`body()` on newlines itself:
+
+```php
+$buffer = '';
+foreach ($response->body() as $chunk) {
+    $buffer .= $chunk;
+    while (($eol = strpos($buffer, "\n")) !== false) {
+        $line   = substr($buffer, 0, $eol);
+        $buffer = substr($buffer, $eol + 1);
+        if ('' !== trim($line)) { $data = json_decode($line, true, flags: JSON_THROW_ON_ERROR); ... }
+    }
+}
 ```
 
 A PSR-18 transport would be a module implementing `Transport`; there is none yet.

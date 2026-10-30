@@ -132,7 +132,8 @@ final class Run
      * or, after a turn that ended `AwaitingInput`, one `Answer` per pending call. `$parentCall` is the
      * tool call this run is nested in (`Agents\AgentTool` passes it): events then carry its id as
      * `parent`, and cancelling the outer run cancels this turn too. Must be iterated
-     * inside `fiber\run()`. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
+     * inside `fiber\run()`. Delivery is synchronous: the turn goes on after an event only once the
+     * consumer asks for the next one. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`.
      *
      * @param Message|list<Answer> $input

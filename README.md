@@ -42,7 +42,7 @@ fiber\run(function () use ($run) {
     }
 });
 
-$ended = $run->ended();   // reason, appended messages, pending calls, usage, error and errorKind
+$ended = $run->ended();   // reason, appended messages, pending calls, usage, error, errorKind, finish
 ```
 
 A turn takes a user `Message`, or the `Answer`s to a turn that ended awaiting input. Each step builds
@@ -52,11 +52,15 @@ their results as one user message. It ends when:
 
 | `Reason`        | when                                                                         |
 | --------------- | ---------------------------------------------------------------------------- |
-| `Done`          | a step produced no tool calls                                                |
+| `Done`          | a step produced no tool calls (see `finish`)                                 |
 | `Stopped`       | a stop predicate returned true (default `[Stop::maxSteps(20)]`)              |
 | `AwaitingInput` | a tool asked the host (`Call::needsInput()`); `Ended::$pending` lists the calls |
 | `Cancelled`     | `$run->cancel()` was called, or the consumer stopped iterating               |
 | `Failed`        | `Ended::$errorKind`: `ModelError`, `ContextTooLong`, `RateLimited`, `TransportError`, `ToolRetriesExceeded`, `MiddlewareError` |
+
+`Done` only means "no tool calls". `Ended::$finish` (and `TurnEnded::$finish`) is the `FinishReason`
+of the turn's last assistant message: a reply cut by the token limit is `Done` with finish `Length`,
+a refused one `Done` with finish `Refusal`. A host that shows a reply as complete checks it.
 
 Iterate a turn inside `fiber\run()`. The turn runs in its own coroutine, a new `\Scope` and its own
 `fiber\run()`, so it ends with everything it started finished. A `\LogicException` (misuse, such as
@@ -64,11 +68,22 @@ an option the provider cannot honour) is rethrown from the iteration after `Turn
 failures end the turn `Failed` and are in `ended()`.
 
 `Run` keeps the conversation in memory: `messages()` returns it, `Ended::$appended` is what a turn
-added. To continue elsewhere, pass `messages:` (and `pending:`, see below) to a new `Run`.
+added (`Harness\Transcript` keeps it in a file). To continue elsewhere, pass `messages:` (and
+`pending:`, see below) to a new `Run`. `isRunning()` is true from `turn()` until `TurnEnded` was handled.
+
+### Cancellation
+
+`$run->cancel()` (from a signal handler or another fiber) sets the turn's `Cancel` signal. The
+`Prompt` carries it to the model and the model to its `Transport`, which checks it while it waits
+(every 250 ms for `StreamTransport`) and throws `Cancelled`; running tools see `Call::isCancelled()`,
+`Shell` kills its process group, nested runs are cancelled with their parent, and calls not yet
+started get a "cancelled" result. The turn ends `Cancelled` without the partial assistant message:
+`Ended::$appended` never holds it. `cancel()` with no turn running does nothing.
 
 ### Tools
 
-`Tool::call(array $input, Call $call): Result`. `Result` keeps apart what the model sees
+`Tool::call(array $input, Call $call): Result`. A `ToolSpec`'s schema must have `"type": "object"`;
+schema nodes PHP holds as empty arrays (`'properties' => []`) are sent as `{}`. `Result` keeps apart what the model sees
 (`content`), what the application gets (`value`, in the `ToolEnded` event) and what is only logged
 (`meta`); `error: true` marks a failure. `Call` carries the call `id`, the `run`, the host's
 `context` (from `Run`), the called tool's `spec`, `progress()`, `isCancelled()` and `needsInput()`.
@@ -81,14 +96,33 @@ result with its message, is emitted as `ToolEnded` with the throwable, and is lo
 The read-only calls of a step (`Hints::$readOnly`) run concurrently; the others run after them, one
 at a time, in the model's order. Results go back in the model's order.
 
+A `ToolSource` is read at every step, so its tools may change between steps:
+
+```php
+final class Unlockable implements ToolSource
+{
+    private bool $open = false;
+
+    public function tools(): iterable
+    {
+        yield new ClosureTool(new ToolSpec('unlock', 'Unlocks the vault', ['type' => 'object']),
+            function (array $in, Call $call): Result { $this->open = true; return Result::text('Unlocked; vault_read is available now'); });
+        if ($this->open) {
+            yield new ClosureTool(new ToolSpec('vault_read', 'Reads the vault', ['type' => 'object'], new Hints(readOnly: true)),
+                fn (array $in, Call $call): Result => Result::text('42'));
+        }
+    }
+}
+```
+
 ## Events
 
 Each item goes `started → delta* → ended`; every event has the `turn` number and the `parent` tool
 call id when its run is nested (null at the top). `toArray()` and `json_encode()` give `type` plus the
-fields, so an SSE route writes one line per event.
+fields, so an SSE route writes one line per event; `Events::fromArray()` rebuilds the typed event.
 
 ```
-TurnStarted(turn)                       TurnEnded(turn, reason, usage, ?error)
+TurnStarted(turn)                       TurnEnded(turn, reason, usage, ?error, ?finish)
 StepStarted(turn, n)                    StepEnded(turn, n)                    n = 0: resumed calls
 MessageStarted(id)                      TextDelta(id, text)        ReasoningDelta(id, text)
 ToolCallStarted(id, name)               ToolInputDelta(id, json)   ToolCallReady(id, name, input)
@@ -96,8 +130,31 @@ ToolDecided(id, decision)               ToolProgress(id, value)    ToolEnded(id,
 MessageEnded(id, message, usage, finish)                           InputRequested(pending)
 ```
 
-The turn pushes events to a queue from its own fibers, concurrent tool calls in the order things
-happen; the consumer awaits the queue. Stopping the iteration cancels the turn.
+| class | `type` | class | `type` |
+| --- | --- | --- | --- |
+| `TurnStarted` | `turn_started` | `ToolCallStarted` | `tool_call_started` |
+| `TurnEnded` | `turn_ended` | `ToolInputDelta` | `tool_input_delta` |
+| `StepStarted` | `step_started` | `ToolCallReady` | `tool_call_ready` |
+| `StepEnded` | `step_ended` | `ToolDecided` | `tool_decided` |
+| `MessageStarted` | `message_started` | `ToolProgress` | `tool_progress` |
+| `TextDelta` | `text_delta` | `ToolEnded` | `tool_ended` |
+| `ReasoningDelta` | `reasoning_delta` | `MessageEnded` | `message_ended` |
+| `InputRequested` | `input_requested` | | |
+
+```json
+{"type":"text_delta","turn":1,"parent":null,"id":"msg_ad35d61424070fe4","text":" green"}
+{"type":"tool_call_ready","turn":1,"parent":null,"id":"call_2ce8","name":"remember","input":{"note":"Favourite colour: green"}}
+{"type":"tool_ended","turn":1,"parent":null,"id":"call_2ce8","outcome":{"content":[{"type":"text","text":"Saved"}],"value":null,"meta":[],"error":false}}
+{"type":"tool_ended","turn":1,"parent":null,"id":"call_9f1a","outcome":{"class":"RuntimeException","message":"disk full"}}
+{"type":"input_requested","turn":1,"parent":null,"pending":[{"call":{"type":"tool_call","id":"call_2ce8","name":"remember","input":{"note":"Favourite colour: green"}},"needs":{"type":"approval","reason":"Save a note"},"state":null}]}
+{"type":"turn_ended","turn":1,"parent":null,"reason":"awaiting_input","usage":{"input":396,"output":59,"cacheRead":0,"cacheWrite":0},"error":null,"finish":"tool_calls"}
+```
+
+Delivery is synchronous: the turn hands each event to the consumer and goes on only when the
+consumer's `foreach` asks for the next one. What happens after an event (a middleware printing a
+prompt, a tool writing a file) happens after the host handled that event, so the stream is ordered
+with the side effects. The consumer sets the pace: a slow SSE write slows the model read. Concurrent
+tool calls emit from their own fibers and wait their turn. Stopping the iteration cancels the turn.
 
 ## Middleware
 
@@ -105,12 +162,13 @@ The only interception mechanism. A class implements `ModelMiddleware`, `ToolMidd
 the array order is outermost first.
 
 ```php
-// Policy: anything not read-only needs approval.
+// Policy: anything not read-only needs approval, unless the host answered this call already.
 final class ApproveWrites implements ToolMiddleware
 {
     public function call(ToolCall $call, Call $context, Closure $next): Result
     {
-        if (null === $context->decision() && null !== $context->spec && !$context->spec->hints->readOnly) {
+        if (null === $context->decision() && null === $context->answers()
+            && null !== $context->spec && !$context->spec->hints->readOnly) {
             return $context->needsInput(new Approval("{$call->name} changes files"));
         }
 
@@ -120,17 +178,58 @@ final class ApproveWrites implements ToolMiddleware
 ```
 
 Deny by returning `new Result([...], error: true)`; truncate by rewriting the `Result`; compact by
-rewriting the `Prompt` (`ModelMiddleware::stream($prompt, $next)`); retry by wrapping `$next` (a
-`ModelException` carries `kind` and `retryAfter`); trace by wrapping both. To observe without
-altering, read the events.
+rewriting the `Prompt` (`ModelMiddleware::stream($prompt, $next)`, passing `$prompt->cancel` on to
+the new one); trace by wrapping both. To observe without altering, read the events.
+
+Retry by wrapping `$next`, but only before the first delta went on: the run's accumulator folds each
+delta as it is yielded, so a stream restarted after that would add its text a second time. Past the
+first delta, rethrow. A `ModelException` carries `kind` and `retryAfter`.
+
+```php
+final class RetryModel implements ModelMiddleware
+{
+    public function stream(Prompt $prompt, Closure $next): iterable
+    {
+        for ($try = 1; ; ++$try) {
+            $yielded = false;
+            try {
+                foreach ($next($prompt) as $delta) {
+                    $yielded = true;
+                    yield $delta;
+                }
+
+                return;
+            } catch (ModelException $e) {
+                if ($yielded || $try === 3 || ErrorKind::RateLimited !== $e->kind) {
+                    throw $e;
+                }
+                fiber\sleep($e->retryAfter ?? 2 ** $try);
+            }
+        }
+    }
+}
+```
 
 ## Pause and resume
 
 A turn that ends `AwaitingInput` lists `Pending(call, needs, state)`: `needs` is an `Approval` or a
 list of `Question`s, `state` is the tool's own JSON-safe data. The next turn takes one
 `Answer(callId, Decision::allow() | Decision::deny($reason) | ['questionId' => answer])` per pending
-call: approved calls run (`$call->decision()` is set), denied ones go to the model as error results,
-a tool that asked questions is called again with `$call->answers()` and `$call->state()`.
+call: approved calls run (`$call->decision()` is set), denied ones go to the model as error results
+(`Denied: <reason>`), a tool that asked questions is called again with `$call->answers()`. `state()`
+is the state it passed. A tool that asked for approval *with* a state is called again on a denial
+too and handles it itself (`Agents\AgentTool` does, to tell its sub-agent).
+
+`Pending::toArray()`, with an approval and with questions:
+
+```json
+{"call":{"type":"tool_call","id":"call_1","name":"write_file","input":{"path":"a.txt","content":"..."}},
+ "needs":{"type":"approval","reason":"write_file changes files"},
+ "state":null}
+{"call":{"type":"tool_call","id":"call_2","name":"ask_user","input":{"question":"Which colour?"}},
+ "needs":{"type":"questions","questions":[{"id":"colour","text":"Which colour?","choices":["red","blue"]}]},
+ "state":{"step":2}}
+```
 
 Everything is plain data, so a web request can end the turn and another process resume it:
 
@@ -146,10 +245,17 @@ $run = new Run($model, $tools, middleware: [new ApproveWrites()],
 foreach ($run->turn([new Answer($callId, Decision::allow())]) as $event) { ... }
 ```
 
-A host that answers at once (a CLI) does it in a middleware outside the policy, in the tool's fiber:
-after `$next()` returns with `$context->pending()` set, it asks the terminal
-(`fgets(fiber\readable(STDIN))`), calls `$context->answer(...)` and calls `$next()` again.
-[`examples/files.php`](examples/files.php) does exactly this.
+[`examples/web.php`](examples/web.php) is this host, one request per invocation.
+
+The rule for approvals: gate in one `ToolMiddleware`, and reach for `needsInput()` only when the
+turn must end. A host that can answer at once (a CLI) asks in the middleware itself, then calls
+`$next()` or returns an error `Result` ([`examples/shell.php`](examples/shell.php)); a web host,
+which answers in a later request, returns `needsInput()`. [`examples/files.php`](examples/files.php)
+shows a policy shared by both: the terminal middleware outside it answers the pending call at once
+with `$context->answer(...)` and calls `$next()` again.
+
+A sub-agent that pauses pauses its parent: the parent's call carries the sub-agent's approval or
+questions, and the answer goes back down ([docs/agents.md](docs/agents.md)).
 
 ## Modules
 
@@ -163,7 +269,13 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Tools\Files` | `ReadFile`, `WriteFile`, `EditFile`, `ListDir`, `Glob`, `Grep` under a `Root` | [docs/files.md](docs/files.md) |
 | `Harness\Tools\Shell` | `Shell`: bash commands with streamed output | [docs/shell.md](docs/shell.md) |
 | `Harness\Agents` | `AgentTool`: a sub-agent as a tool | [docs/agents.md](docs/agents.md) |
-| `Harness\Testing` | `FakeModel`, `FakeTransport` | [docs/testing.md](docs/testing.md) |
+| `Harness\Mcp` | `McpServer`: an MCP server's tools, over stdio or Streamable HTTP | [docs/mcp.md](docs/mcp.md) |
+| `Harness\Transcript` | `JsonlTranscript`, `JsonlEvents`: the conversation and the events in files | [docs/transcript.md](docs/transcript.md) |
+| `Harness\Testing` | `FakeModel`, `FakeTransport`, `TestCall` | [docs/testing.md](docs/testing.md) |
+
+`Options::$provider` is keyed by the provider module's lowercase name (`openai`, `anthropic`); a
+third-party provider documents its own key. `Sse` parses `text/event-stream` only; a backend that
+streams NDJSON splits `body()` on newlines itself ([docs/http.md](docs/http.md)).
 
 ## Examples
 
@@ -174,7 +286,9 @@ export HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl
 php examples/chat.php                       # streamed conversation; Ctrl-C cancels a reply
 php examples/files.php ./project "task"     # file tools; writes need approval on the terminal
 php examples/shell.php ./project "task"     # a shell; every command needs approval
-php examples/subagent.php ./project "question"   # delegates reading to a sub-agent
+php examples/subagent.php ./project "question"   # delegates reading to sub-agents, rendered per line
+php examples/mcp.php "task"                 # a chat with an MCP server's tools (the test server by default)
+php examples/web.php state.json say "hi"    # one turn per request, events as JSON lines, state in a file
 ```
 
 ## Tests
