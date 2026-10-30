@@ -5,11 +5,11 @@
     "license": "MIT",
     "require": {
         "php": "^8.2",
-        "fiber-interop/api": "dev-main",
+        "fiber-interop/api": "^0.3.1",
         "psr/log": "^1 || ^2 || ^3"
     },
     "require-dev": {
-        "fiber-interop/phasync": "dev-main",
+        "fiber-interop/phasync": "^0.4.1",
         "fiber-interop/revolt": "dev-main",
         "friendsofphp/php-cs-fixer": "^3",
         "pestphp/pest": "^3 || ^4",

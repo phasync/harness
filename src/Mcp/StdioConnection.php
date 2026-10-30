@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace Harness\Mcp;
 
 use function fiber\await;
+use fiber\Deferred;
 use function fiber\readable;
 use function fiber\writable;
 use Harness\Cancel;
 use Harness\Cancelled;
-use Harness\Internal\Signal;
 
 /**
  * An MCP server as a child process (`proc_open($command)`, no shell), speaking newline-delimited
@@ -41,7 +41,7 @@ final class StdioConnection implements Connection
     private array $open = [];
     /** @var array<string, \Closure(array<string, mixed>): void> */
     private array $progress = [];
-    /** @var list<Signal> */
+    /** @var list<Deferred> */
     private array $waiting = [];
 
     /**
@@ -107,7 +107,7 @@ final class StdioConnection implements Connection
     {
         $line = \json_encode($message, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE) . "\n";
         while ($this->writing) {
-            $this->waiting[] = $turn = new Signal();
+            $this->waiting[] = $turn = new Deferred();
             await($turn);
         }
         $this->writing = true;
@@ -137,7 +137,7 @@ final class StdioConnection implements Connection
             }
             $this->alive();
             if ($this->reading) {
-                $this->waiting[] = $turn = new Signal();
+                $this->waiting[] = $turn = new Deferred();
                 try {
                     await($turn, self::POLL);
                 } catch (\fiber\TimeoutException) {
@@ -225,7 +225,7 @@ final class StdioConnection implements Connection
         $waiting       = $this->waiting;
         $this->waiting = [];
         foreach ($waiting as $turn) {
-            $turn->fulfil();
+            $turn->resolve();
         }
     }
 

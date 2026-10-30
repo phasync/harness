@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace Harness\Transcript;
 
 use function fiber\await;
+use fiber\Deferred;
 use Harness\Event;
 use Harness\Events;
-use Harness\Internal\Signal;
 
 /**
  * An event sink: `write()` appends one JSON line per event (`Event::toArray()`) to `$path`, opened
@@ -21,7 +21,7 @@ final class JsonlEvents
     /** @var resource */
     private mixed $handle;
     private bool $writing = false;
-    /** @var list<Signal> */
+    /** @var list<Deferred> */
     private array $waiting = [];
 
     public function __construct(private readonly string $path)
@@ -38,7 +38,7 @@ final class JsonlEvents
     {
         $line = \json_encode($event, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE) . "\n";
         while ($this->writing) {
-            $this->waiting[] = $turn = new Signal();
+            $this->waiting[] = $turn = new Deferred();
             await($turn);
         }
         $this->writing = true;
@@ -49,7 +49,7 @@ final class JsonlEvents
             $waiting       = $this->waiting;
             $this->waiting = [];
             foreach ($waiting as $turn) {
-                $turn->fulfil();
+                $turn->resolve();
             }
         }
     }

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Harness\Internal;
 
 use function fiber\await;
+use fiber\Deferred;
 use Harness\Event;
 
 /**
@@ -15,14 +16,14 @@ use Harness\Event;
  */
 final class EventQueue
 {
-    /** @var \SplQueue<array{0: Event, 1: Signal}> */
+    /** @var \SplQueue<array{0: Event, 1: Deferred}> */
     private \SplQueue $events;
     /** Fulfilled when an event arrives or the queue closes, while the consumer waits. */
-    private ?Signal $arrival = null;
+    private ?Deferred $arrival = null;
     /** Fulfilled when the consumer is done with the event it holds. */
-    private ?Signal $held   = null;
-    private bool $closed    = false;
-    private bool $detached  = false;
+    private ?Deferred $held   = null;
+    private bool $closed      = false;
+    private bool $detached    = false;
 
     public function __construct()
     {
@@ -38,7 +39,7 @@ final class EventQueue
         if ($this->detached) {
             return;
         }
-        $handled = new Signal();
+        $handled = new Deferred();
         $this->events->enqueue([$event, $handled]);
         $this->wake();
         await($handled);
@@ -67,7 +68,7 @@ final class EventQueue
             if ($this->closed) {
                 return null;
             }
-            $this->arrival = new Signal();
+            $this->arrival = new Deferred();
             await($this->arrival);
         }
         [$event, $this->held] = $this->events->dequeue();
@@ -81,7 +82,7 @@ final class EventQueue
         $this->detached = true;
         $this->release();
         while (!$this->events->isEmpty()) {
-            $this->events->dequeue()[1]->fulfil();
+            $this->events->dequeue()[1]->resolve();
         }
     }
 
@@ -89,13 +90,13 @@ final class EventQueue
     {
         $held       = $this->held;
         $this->held = null;
-        $held?->fulfil();
+        $held?->resolve();
     }
 
     private function wake(): void
     {
         $arrival       = $this->arrival;
         $this->arrival = null;
-        $arrival?->fulfil();
+        $arrival?->resolve();
     }
 }
