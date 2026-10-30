@@ -53,6 +53,8 @@ final class Run
     private int $turns         = 0;
     private bool $running      = false;
     private bool $cancelled    = false;
+    /** The tool call this run's current turn is nested in, if any. */
+    private ?Call $parentCall  = null;
     private ?Ended $ended      = null;
     /** @var \WeakMap<\Throwable, string> where an exception came from: 'model', 'tool' or 'middleware' */
     private \WeakMap $origin;
@@ -122,8 +124,9 @@ final class Run
 
     /**
      * Runs one turn and yields its events, the last being `TurnEnded`. `$input` is a user message,
-     * or, after a turn that ended `AwaitingInput`, one `Answer` per pending call. `$parent` is the
-     * tool call id when this run is nested in another (set by `Agents\AgentTool`). Must be iterated
+     * or, after a turn that ended `AwaitingInput`, one `Answer` per pending call. `$parentCall` is the
+     * tool call this run is nested in (`Agents\AgentTool` passes it): events then carry its id as
+     * `parent`, and cancelling the outer run cancels this turn too. Must be iterated
      * inside `fiber\run()`. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`.
      *
@@ -131,17 +134,19 @@ final class Run
      *
      * @return \Generator<int, Event>
      */
-    public function turn(Message|array $input, ?string $parent = null): \Generator
+    public function turn(Message|array $input, ?Call $parentCall = null): \Generator
     {
         if ($this->running) {
             throw new \LogicException('A turn is already running on this Run; finish iterating it first');
         }
-        $answers         = $this->checkInput($input);
-        $this->running   = true;
-        $this->cancelled = false;
-        $this->ended     = null;
-        $turn            = ++$this->turns;
-        $queue           = new EventQueue();
+        $answers          = $this->checkInput($input);
+        $this->running    = true;
+        $this->cancelled  = false;
+        $this->parentCall = $parentCall;
+        $this->ended      = null;
+        $parent           = $parentCall?->id;
+        $turn             = ++$this->turns;
+        $queue            = new EventQueue();
 
         $globals = [$_GET, $_POST, $_COOKIE, $_FILES, $_SERVER, $_REQUEST];
         $task    = go(fn () => (new \Scope())->run(function () use ($globals, $input, $answers, $turn, $parent, $queue) {
@@ -175,20 +180,20 @@ final class Run
     /**
      * Asks the running turn to stop: the model stream is abandoned at the next delta, tool calls not
      * yet started get a "cancelled" error result, running ones see `Call::isCancelled()`. The turn
-     * ends `Reason::Cancelled`. Throws when no turn is running.
+     * ends `Reason::Cancelled`. Has no effect when no turn is running: a consumer may still be reading
+     * the buffered events of a turn whose coroutine already ended.
      */
     public function cancel(): void
     {
-        if (!$this->running) {
-            throw new \LogicException('No turn is running');
+        if ($this->running) {
+            $this->cancelled = true;
         }
-        $this->cancelled = true;
     }
 
-    /** True while a running turn has been cancelled. */
+    /** True while a running turn has been cancelled, directly or through the run it is nested in. */
     public function isCancelled(): bool
     {
-        return $this->running && $this->cancelled;
+        return $this->running && ($this->cancelled || ($this->parentCall?->isCancelled() ?? false));
     }
 
     /** @return list<Message> every message of the conversation */
@@ -298,7 +303,7 @@ final class Run
                 }
             }
             for ($n = 1; Reason::AwaitingInput !== $reason; ++$n) {
-                if ($this->cancelled) {
+                if ($this->isCancelled()) {
                     $reason = Reason::Cancelled;
                     break;
                 }
@@ -330,7 +335,7 @@ final class Run
                     $reason = Reason::AwaitingInput;
                     break;
                 }
-                if ($this->cancelled) {
+                if ($this->isCancelled()) {
                     $reason = Reason::Cancelled;
                     break;
                 }
@@ -396,7 +401,7 @@ final class Run
                     $delta instanceof Delta\ToolCallEnd    => $emit(new ToolCallReady($turn, $parent, $delta->id, ($c = $acc->toolCall($delta->id))->name, $c->input)),
                     default                                => null,
                 };
-                if ($this->cancelled) {
+                if ($this->isCancelled()) {
                     return null;
                 }
             }
@@ -491,7 +496,12 @@ final class Run
     {
         // Calls that cannot run (malformed input, unknown tool) have no side effects either.
         $together = fn (ToolCall $c): bool => isset($invalid[$c->id]) || !isset($this->stepTools[$c->name]) || $this->stepTools[$c->name]->spec()->hints->readOnly;
-        $start    = fn (ToolCall $call): object => go(fn () => $this->runCall($call, $answers[$call->id] ?? null, $invalid[$call->id] ?? null, $turn, $parent, $emit, $retries));
+        // A closure, not fn: $retries is shared by reference with every call's fiber.
+        $start = function (ToolCall $call) use ($answers, $invalid, $turn, $parent, $emit, &$retries): object {
+            return go(function () use ($call, $answers, $invalid, $turn, $parent, $emit, &$retries) {
+                return $this->runCall($call, $answers[$call->id] ?? null, $invalid[$call->id] ?? null, $turn, $parent, $emit, $retries);
+            });
+        };
         $tasks    = [];
         foreach ($calls as $i => $call) {
             if ($together($call)) {
@@ -520,7 +530,7 @@ final class Run
 
     private function runCall(ToolCall $call, ?Answer $answer, ?string $invalid, int $turn, ?string $parent, \Closure $emit, int &$retries): ToolResult|Pending
     {
-        if ($this->cancelled) {
+        if ($this->isCancelled()) {
             $result = new Result([new Text('Cancelled before it ran')], error: true);
             $emit(new ToolEnded($turn, $parent, $call->id, $result));
 

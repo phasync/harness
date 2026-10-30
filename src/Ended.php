@@ -24,4 +24,21 @@ final readonly class Ended
         public ?ErrorKind $errorKind = null,
     ) {
     }
+
+    /**
+     * JSON-safe: the messages and pending calls as arrays, the error as `{class, message}`.
+     *
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'reason'    => $this->reason->value,
+            'appended'  => \array_map(static fn (Message $m) => $m->toArray(), $this->appended),
+            'pending'   => \array_map(static fn (Pending $p) => $p->toArray(), $this->pending),
+            'usage'     => $this->usage->toArray(),
+            'error'     => null === $this->error ? null : ['class' => $this->error::class, 'message' => $this->error->getMessage()],
+            'errorKind' => $this->errorKind?->value,
+        ];
+    }
 }

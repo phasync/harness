@@ -40,7 +40,7 @@ abstract readonly class Event implements \JsonSerializable
         return match (true) {
             $value instanceof \BackedEnum                           => $value->value,
             $value instanceof \Throwable                            => ['class' => $value::class, 'message' => $value->getMessage()],
-            \is_object($value) && \method_exists($value, 'toArray') => $value->toArray(),
+            \is_object($value) && \method_exists($value, 'toArray') => self::export($value->toArray()),
             \is_array($value)                                       => \array_map(self::export(...), $value),
             default                                                 => $value,
         };
