@@ -317,7 +317,7 @@ Each lives in its own namespace; the core never imports one.
 | Module | | |
 | --- | --- | --- |
 | `Harness\Http` (core) | `StreamTransport`, `Sse`, `Response` | [docs/http.md](docs/http.md) |
-| `Harness\Provider\OpenAI` | `ChatCompletions`: llama.cpp, vLLM, exl3, Ollama, OpenAI | [docs/openai.md](docs/openai.md) |
+| `Harness\Provider\OpenAI` | `ChatCompletions`: llama.cpp, vLLM, exl3, Ollama, OpenAI; `Responses`: the Responses API | [docs/openai.md](docs/openai.md) |
 | `Harness\Provider\Anthropic` | `Messages`: the Messages API with thinking blocks | [docs/anthropic.md](docs/anthropic.md) |
 | `Harness\Tools\Files` | `ReadFile`, `WriteFile`, `EditFile`, `ListDir`, `Glob`, `Grep` under a `Root` | [docs/files.md](docs/files.md) |
 | `Harness\Tools\Shell` | `Shell`: bash commands with streamed output | [docs/shell.md](docs/shell.md) |

@@ -60,6 +60,11 @@ Implements SPEC.md revision 3, from what the round-2 users needed.
   `Rule::when()` with a `Verdict` (`Allow`, `Deny`, `Ask`), and `Policy::describe()` for a system
   prompt. `Rule::hints()` takes the verdict first (`Rule::hints(Verdict::Allow, readOnly: true)`):
   PHP allows no positional argument after a named one. `Rule::when()` takes a text naming the rule.
+- `Provider\OpenAI\Responses`: the Responses API over `Transport`, with reasoning replayed by
+  `encrypted_content` (`store: false`, the default) or by id, `function_call`/`function_call_output`
+  by `call_id`, and strict schemas attempted by default (optional properties made nullable, and their
+  nulls removed from the arguments before the tool sees them). Tested over `FakeTransport`; its live
+  test is skipped without `OPENAI_API_KEY`.
 - `Testing\TestPrompt::make()`: a `Prompt` with a never-set `Cancel`, for testing a `ModelMiddleware`.
 - Examples `compact.php` and `policy.php`; `files.php` and `mcp.php` answer any need.
 - Docs: docs/compact.md, docs/policy.md; docs/mcp.md "Writing a server" (the JSON of
