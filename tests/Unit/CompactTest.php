@@ -81,13 +81,13 @@ it('replaces the oldest half with a summary, cut where tool pairs stay together,
         ->and(\array_slice($prompt->messages, 2))->toBe(\array_slice($messages, 5))
         ->and($prompt->system)->toBe('sys')
         ->and($prompt->tools)->toBe([$spec])
-        ->and($compact->last())->toEqual(new Harness\Compact\Compaction(4, 6, 'S1', bytesOf(TestPrompt::make(null, $messages)), bytesOf($prompt), false));
+        ->and($compact->last())->toEqual(new Harness\Compact\Compaction(4, 6, 'S1', bytesOf(TestPrompt::make(null, $messages)), bytesOf($prompt), false, finish: Harness\FinishReason::Stop));
 
     $asked = $summarizer->prompts[0];
     $text  = $asked->messages[0]->parts[0]->text;
     expect($asked->tools)->toBe([])
         ->and($asked->system)->toContain('Remaining')
-        ->and($text)->toStartWith("The start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe part to summarize")
+        ->and($text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nsys\n\nThe start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe part to summarize")
         ->and($text)->toContain('[calls read {"n":2}]')->toContain(\str_repeat('2', 300))
         ->and($text)->not->toContain('[calls read {"n":3}]')
         ->and($text)->not->toContain('thinking');
@@ -417,4 +417,120 @@ it('compacts two conversations at once on one instance, each with its own summar
     $b[] = assistant(new Text('on'));
     expect(step($compact, $a)->messages[1])->toBe($pa->messages[1])
         ->and(step($compact, $b)->messages[1])->toBe($pb->messages[1]);
+});
+
+it('takes a summary cut at the output token limit as a collapse: asked once more, and fatal twice', function () {
+    $cut     = [new Harness\Delta\TextDelta('1. Asked: the ta'), new Harness\Delta\Finish(Harness\FinishReason::Length)];
+    $compact = new Compact($summarizer = new FakeModel($cut, says('a whole summary')), 2000, bytesOf(...), log: $log = lines());
+    $prompt  = step($compact, agentic(5));
+    expect($summarizer->prompts)->toHaveCount(2)
+        ->and($prompt->messages[1]->parts[0]->text)->toEndWith('a whole summary')
+        ->and($compact->last()->finish)->toBe(Harness\FinishReason::Stop)
+        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer was cut at its output token limit after 16 bytes (finish: length); asking once more']);
+
+    $twice = new Compact(new FakeModel($cut, $cut), 2000, bytesOf(...));
+    expect(fn () => step($twice, agentic(5)))->toThrow(RuntimeException::class, 'the summarizer was cut at its output token limit after 16 bytes (finish: length), twice');
+});
+
+it('gives the summarizer the run\'s system text as the agent\'s instructions, and none when there is none', function () {
+    $summaries = new Summaries();
+    step(new Compact($summaries, 2000, bytesOf(...)), agentic(5), 'Call every file a ledger.');
+    step(new Compact($none = new Summaries(), 2000, bytesOf(...)), agentic(5), null);
+    expect($summaries->prompts[0]->messages[0]->parts[0]->text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nCall every file a ledger.\n\nThe start of the conversation")
+        ->and($none->prompts[0]->messages[0]->parts[0]->text)->toStartWith('The start of the conversation');
+});
+
+it('drops a round that would not shrink the prompt, and spends no side call on a part that small again', function () {
+    $log        = lines();
+    $summarizer = new FakeModel(says(\str_repeat('s', 600)));
+    $compact    = new Compact($summarizer, 150, bytesOf(...), log: $log);
+    $messages   = [user('the task'), assistant(new Text('a1')), user('u2'), assistant(new Text('a3')), user('u4')];
+    $prompt     = step($compact, $messages);
+    expect($prompt->messages)->toBe($messages)
+        ->and($compact->last())->toBeNull()
+        ->and($summarizer->prompts)->toHaveCount(1)
+        ->and($log->lines[0][0])->toBe('warning')
+        ->and($log->lines[0][1])->toStartWith('Compact: the prompt is ')->toEndWith('but has nothing more to summarize');
+
+    // One more short exchange: the part to summarize is still smaller than the summary was.
+    $messages[] = assistant(new Text('a5'));
+    expect(step($compact, $messages)->messages)->toBe($messages)
+        ->and($summarizer->prompts)->toHaveCount(1)
+        ->and(\array_column($log->lines, 0))->toBe(['warning', 'warning']);
+});
+
+it('gives its calibration as a JSON value, and starts calibrated from one', function () {
+    $compact = new Compact(new Summaries(), 100000, bytesOf(...));
+    expect($compact->calibration())->toBeNull();
+    $small = [user('the task')];
+    $large = agentic(3);
+    step($compact, $small, reported: bytesOf(TestPrompt::make('sys', $small)) + 300);
+    step($compact, $large, reported: 2 * bytesOf(TestPrompt::make('sys', $large)) + 300);
+    $calibration = $compact->calibration();
+    $json        = \json_encode($calibration, \JSON_THROW_ON_ERROR);
+    $restored    = Harness\Compact\Calibration::fromArray(\json_decode($json, true));
+    expect($restored)->toEqual($calibration)
+        ->and($calibration->fitted)->toBeTrue()
+        ->and(\json_decode($json, true))->toBe([
+            'low'    => ['counted' => bytesOf(TestPrompt::make('sys', $small)), 'reported' => bytesOf(TestPrompt::make('sys', $small)) + 300],
+            'high'   => ['counted' => bytesOf(TestPrompt::make('sys', $large)), 'reported' => 2 * bytesOf(TestPrompt::make('sys', $large)) + 300],
+            'ratio'  => $calibration->ratio,
+            'offset' => $calibration->offset,
+        ])
+        ->and(fn () => Harness\Compact\Calibration::fromArray(['low' => ['counted' => 1]]))->toThrow(InvalidArgumentException::class);
+
+    // A new instance with it counts calibrated from its first step: over the budget at once.
+    $messages = agentic(5);
+    $fresh    = new Compact(new Summaries(), $calibration->tokens(bytesOf(TestPrompt::make('sys', $messages))) - 1, bytesOf(...), calibration: $restored);
+    step($fresh, $messages);
+    expect($fresh->last())->not->toBeNull()
+        ->and($fresh->last()->ratio)->toBe($calibration->ratio)
+        ->and($fresh->calibration())->toBe($restored);
+});
+
+it('takes its budget from the context window less 20 %, and throws with neither', function () {
+    $windowed = TestPrompt::make('sys', agentic(5), options: new Harness\Options(contextWindow: 2500));
+    $model    = new FakeModel(says('ok'));
+    $compact  = new Compact(new Summaries(), null, bytesOf(...), log: $log = lines());
+    \iterator_to_array($compact->stream($windowed, fn (Prompt $p) => $model->stream($p)), false);
+    expect($compact->last())->not->toBeNull()
+        ->and(bytesOf($model->prompts[0]))->toBeLessThanOrEqual(2000)
+        ->and($log->lines[0][1])->toContain('(budget 2000 tokens');
+
+    expect(fn () => step(new Compact(new Summaries()), agentic(1)))->toThrow(LogicException::class, 'pass budgetTokens, or set Options::$contextWindow')
+        ->and(fn () => \iterator_to_array((new Compact(new Summaries(), 3000))->stream($windowed, fn (Prompt $p) => (new FakeModel(says('ok')))->stream($p)), false))
+        ->toThrow(LogicException::class, 'the budget of 3,000 tokens is over the context window of 2,500');
+});
+
+it('detects a prompt the server cut: a report under 70 % of the calibrated count', function () {
+    $log     = lines();
+    $compact = new Compact(new Summaries(), 100000, bytesOf(...), log: $log);
+    $small   = [user('the task')];
+    $large   = agentic(3);
+    step($compact, $small, reported: bytesOf(TestPrompt::make('sys', $small)));
+    step($compact, $large, reported: bytesOf(TestPrompt::make('sys', $large)));
+    $calibration = $compact->calibration();
+    expect($calibration->fitted)->toBeTrue()->and($log->lines)->toBe([]);
+
+    $messages = agentic(5);
+    $counted  = bytesOf(TestPrompt::make('sys', $messages));
+    step($compact, $messages, reported: \intdiv($counted, 2));
+    expect($compact->last()->truncatedUpstream)->toBeTrue()
+        ->and($compact->last()->removed)->toBe(0)
+        ->and($compact->last()->before)->toBe($counted)
+        ->and($compact->calibration())->toBe($calibration)
+        ->and($log->lines)->toBe([['warning', 'Compact: the provider reported ' . \intdiv($counted, 2) . " input tokens for a prompt calibrated at $counted: the server cut the prompt. Configure its context window (a server that evicts silently drops the system prompt first) and set Options::\$contextWindow"]]);
+
+    // A report near the count is not a cut.
+    step($compact, $messages, reported: $counted - 10);
+    expect($compact->last())->toBeNull();
+});
+
+it('hands a continued prompt on as one, its last message untouched', function () {
+    $messages = [...agentic(5), assistant(new Text('I will now'))];
+    $model    = new FakeModel(says('ok'));
+    \iterator_to_array((new Compact(new Summaries(), 2000, bytesOf(...)))->stream(TestPrompt::make('sys', $messages, continue: true), fn (Prompt $p) => $model->stream($p)), false);
+    expect($model->prompts[0]->continue)->toBeTrue()
+        ->and($model->prompts[0]->messages[\count($model->prompts[0]->messages) - 1])->toBe($messages[11])
+        ->and(\count($model->prompts[0]->messages))->toBeLessThan(12);
 });

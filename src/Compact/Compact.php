@@ -6,6 +6,7 @@ namespace Harness\Compact;
 
 use Harness\Accumulator;
 use Harness\Cancel;
+use Harness\FinishReason;
 use Harness\Message;
 use Harness\Model;
 use Harness\ModelMiddleware;
@@ -24,7 +25,9 @@ use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
- * Keeps each step's prompt within `$budgetTokens` by replacing its oldest messages with a summary.
+ * Keeps each step's prompt within a token budget by replacing its oldest messages with a summary.
+ * The budget is `$budgetTokens`, or when that is null the step's `Options::$contextWindow` less a
+ * reserve of 20 %, taken at first use; with neither, the step throws a `\LogicException`.
  * When the prompt counts over the budget, the oldest half of the messages after the first
  * `$keepFirst` is replaced by one user message holding a summary that `$summarizer` wrote in a side
  * call (what was asked, what was done, what is known, what remains), followed by an assistant
@@ -36,14 +39,19 @@ use Psr\Log\NullLogger;
  * A summary is reused while the conversation keeps the same prefix and the result fits the budget,
  * so the provider's cache sees a stable prefix; when the budget is exceeded again, the earlier
  * summary is summarized again together with the oldest half of what follows it, round after round
- * until the prompt fits or nothing is left to summarize (a warning is logged then). The last 8
+ * until the prompt fits or nothing is left to summarize (a warning is logged then). A round whose
+ * summary would not make the prompt smaller is dropped with that warning, and a later round runs
+ * only for a part larger than the summary that was dropped, so no side call is spent per step on a
+ * part too small to shrink. The last 8
  * summaries are kept, each under the messages it summarized, so one instance may serve several
  * conversations at once (the forks of a sub-agent's template share it). Each new summary is logged
  * at info level; `last()` says what the last step, of any conversation, did.
  *
- * The side call has no tools, `$summarizerOptions` and the turn's `Cancel`. A summary that comes
- * back empty, or shorter than a quarter of the summary it replaces, is asked for once more; a
- * second such summary fails the step with a `\RuntimeException` naming both sizes.
+ * The side call has no tools, `$summarizerOptions` and the turn's `Cancel`; it is given the run's
+ * system text as the agent's instructions, the kept first messages and the part to summarize. A
+ * summary that comes back empty, cut at the output token limit (`FinishReason::Length`), or shorter
+ * than a quarter of the summary it replaces, is asked for once more; a second such summary fails
+ * the step with a `\RuntimeException` naming what went wrong.
  *
  * The count is `$count($prompt)` calibrated by the provider's reported input tokens of the prompts
  * Compact passed on (a report of zero is ignored): `ratio * $count + offset`, the line through the
@@ -54,7 +62,12 @@ use Psr\Log\NullLogger;
  * (system text, tool specs, the first `$keepFirst` messages), counted at first use, must count at
  * most half the budget, by the calibrated count once there is a line, or the step throws a
  * `\LogicException`: a budget that passes at first use fails on a later step when the provider's
- * reports show the counter undercounted.
+ * reports show the counter undercounted. The calibration is a `Calibration` value: `calibration()`
+ * returns it and the constructor takes one, so a host that builds a Compact per request keeps it.
+ *
+ * Once the calibration is a line, a reported input count under 70 % of the calibrated count means the server cut
+ * the prompt (a server that evicts silently when the prompt exceeds its window): a warning names
+ * both numbers, `last()` has `truncatedUpstream` set, and the report is left out of the calibration.
  */
 final class Compact implements ModelMiddleware
 {
@@ -70,46 +83,55 @@ final class Compact implements ModelMiddleware
     /** How many summaries are kept, one per conversation the instance serves. */
     private const CACHE = 8;
 
+    /** The share of the context window a budget taken from it leaves for the prompt. */
+    private const WINDOW_SHARE = 0.8;
+
+    /** A report under this share of the calibrated count means the server cut the prompt. */
+    private const TRUNCATED = 0.7;
+
     /** @var \Closure(Prompt): int */
     private readonly \Closure $count;
     private readonly LoggerInterface $log;
     /**
      * Newest first: the conversation's messages up to the cut (`summarized`), what replaces them
      * (the kept first messages, the summary and its acknowledgement), the summary, the number of
-     * messages it stands for, and the size of the summary it replaced.
+     * messages it stands for, the size of the summary it replaced and how its side call ended.
      *
-     * @var list<array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int}>
+     * @var list<array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int, finish: FinishReason}>
      */
-    private array $cache      = [];
-    private float $ratio      = 1.0;
-    private float $offset     = 0.0;
-    /** @var array{0: int, 1: int}|null the smallest prompt reported: `$count` of it and the report */
-    private ?array $low       = null;
-    /** @var array{0: int, 1: int}|null the largest prompt reported */
-    private ?array $high      = null;
-    /** Whether ratio and offset are the line through low and high, not high's difference alone. */
-    private bool $fitted      = false;
+    private array $cache = [];
+    private ?Calibration $calibration;
+    /** The budget in use, fixed at first use. */
+    private ?int $budget = null;
     /** The fixed part of the prompt, by `$count`, at first use. */
-    private ?int $fixed       = null;
+    private ?int $fixed = null;
+    /** `$count` of the last summary that did not shrink the prompt: a smaller part is not summarized. */
+    private ?int $noGain      = null;
     private ?Compaction $last = null;
 
-    /** @param (\Closure(Prompt): int)|null $count null: `Compact::approximate(...)` */
+    /**
+     * @param int|null                     $budgetTokens null: the step's `Options::$contextWindow` less 20 %
+     * @param (\Closure(Prompt): int)|null $count        null: `Compact::approximate(...)`
+     * @param Calibration|null             $calibration  a calibration kept from an earlier instance
+     */
     public function __construct(
         private readonly Model $summarizer,
-        private readonly int $budgetTokens,
+        private readonly ?int $budgetTokens = null,
         ?\Closure $count = null,
         private readonly int $keepFirst = 1,
         ?LoggerInterface $log = null,
         private readonly Options $summarizerOptions = new Options(maxOutputTokens: 1024),
+        ?Calibration $calibration = null,
     ) {
-        if ($budgetTokens < 1) {
-            throw new \InvalidArgumentException('Compact needs a budget of at least 1 token');
+        if (null !== $budgetTokens && $budgetTokens < 1) {
+            throw new \InvalidArgumentException('Compact needs a budget of at least 1 token, or null for the context window less 20 %');
         }
         if ($keepFirst < 0) {
             throw new \InvalidArgumentException('keepFirst is 0 or more');
         }
-        $this->count = $count ?? self::approximate(...);
-        $this->log   = $log ?? new NullLogger();
+        $this->count       = $count ?? self::approximate(...);
+        $this->log         = $log ?? new NullLogger();
+        $this->calibration = $calibration;
     }
 
     /**
@@ -131,57 +153,97 @@ final class Compact implements ModelMiddleware
         return \intdiv($bytes, 4) + 1000 * $media + 4 * \count($prompt->messages) + 10 * \count($prompt->tools);
     }
 
-    /** What the last step's prompt went through: null when it went on unchanged. */
+    /** What the last step's prompt went through: null when it went on unchanged and was not cut upstream. */
     public function last(): ?Compaction
     {
         return $this->last;
     }
 
+    /**
+     * The counter's calibration from the provider's reports so far, null before the first. Persist
+     * `toArray()` and pass `Calibration::fromArray()` to the next instance's constructor.
+     */
+    public function calibration(): ?Calibration
+    {
+        return $this->calibration;
+    }
+
     public function stream(Prompt $prompt, \Closure $next): iterable
     {
-        [$compacted, $counted] = $this->compact($prompt);
-        $reported              = 0;
+        [$compacted, $counted, $calibration, $compaction] = $this->compact($prompt);
+        $reported                                         = 0;
         foreach ($next($compacted) as $delta) {
             if ($delta instanceof Usage) {
                 $reported = \max($reported, $delta->input);
             }
             yield $delta;
         }
-        if ($reported > 0) {
-            if (null === $this->low || $counted <= $this->low[0]) {
-                $this->low = [$counted, $reported];
-            }
-            if (null === $this->high || $counted >= $this->high[0]) {
-                $this->high = [$counted, $reported];
-            }
-            [[$c0, $r0], [$c1, $r1]] = [$this->low, $this->high];
-            // Two close prompts give a slope that the next large tool result would multiply.
-            $this->fitted = $c1 > $c0 && $c1 >= 2 * $c0;
-            $this->ratio  = $this->fitted ? ($r1 - $r0) / ($c1 - $c0) : 1.0;
-            $this->offset = $r1 - $this->ratio * $c1;
+        if (0 === $reported) {
+            return;
         }
+        // Only a line predicts a prompt of another size: one report's difference may belong to a
+        // long prompt, and a short one would then report far under it without being cut.
+        $estimate = true === $calibration?->fitted ? $calibration->tokens($counted) : null;
+        if (null !== $estimate && $reported < self::TRUNCATED * $estimate) {
+            $this->log->warning('Compact: the provider reported {reported} input tokens for a prompt calibrated at {estimate}: the server cut the prompt. Configure its context window (a server that evicts silently drops the system prompt first) and set Options::$contextWindow', ['reported' => $reported, 'estimate' => $estimate]);
+            $this->last = null === $compaction
+                ? new Compaction(0, \count($compacted->messages), '', $estimate, $estimate, false, null, $calibration->ratio, $calibration->offset, null, true)
+                : new Compaction($compaction->removed, $compaction->kept, $compaction->summary, $compaction->before, $compaction->after, $compaction->reused, $compaction->previousSummaryBytes, $compaction->ratio, $compaction->offset, $compaction->finish, true);
+
+            return;     // a cut prompt's report would teach the calibration the cut
+        }
+        $this->calibration = $this->calibration?->with($counted, $reported) ?? new Calibration($counted, $reported, $counted, $reported);
     }
 
-    /** @return array{0: Prompt, 1: int} the prompt to hand on and `$count` of it */
+    /**
+     * The budget: `$budgetTokens`, or the context window less the reserve, fixed at first use.
+     */
+    private function budget(Prompt $prompt): int
+    {
+        if (null !== $this->budget) {
+            return $this->budget;
+        }
+        $window = $prompt->options->contextWindow;
+        if (null === $this->budgetTokens) {
+            if (null === $window) {
+                throw new \LogicException('Compact has no budget: pass budgetTokens, or set Options::$contextWindow on the run, whose window less a reserve of 20 % becomes the budget');
+            }
+
+            return $this->budget = (int) \floor(self::WINDOW_SHARE * $window);
+        }
+        if (null !== $window && $this->budgetTokens > $window) {
+            throw new \LogicException('Compact: the budget of ' . \number_format($this->budgetTokens) . ' tokens is over the context window of ' . \number_format($window) . ' (Options::$contextWindow); set it below the window by the output tokens a step needs, or pass null for the window less 20 %');
+        }
+
+        return $this->budget = $this->budgetTokens;
+    }
+
+    /**
+     * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: ?Compaction} the prompt to hand on, `$count` of
+     *                                                                   it, the calibration it was counted with and what was done
+     */
     private function compact(Prompt $prompt): array
     {
         // Another conversation's step may change the calibration while this one waits.
-        [$ratio, $constant, $fitted] = [$this->ratio, $this->offset, $this->fitted];
-        $tokens                      = fn (int $counted): int => (int) \ceil($ratio * $counted + $constant);
-        $calibration                 = 'counter ratio ' . \round($ratio, 3) . ', offset ' . \round($constant);
+        $cal         = $this->calibration;
+        $fitted      = $cal?->fitted ?? false;
+        $tokens      = fn (int $counted): int => null === $cal ? $counted : $cal->tokens($counted);
+        $calibration = 'counter ratio ' . \round($cal?->ratio ?? 1.0, 3) . ', offset ' . \round($cal?->offset ?? 0.0);
+        $budget      = $this->budget($prompt);
         // Counted at first use, compared calibrated once there is a line: one report's difference,
         // taken from a long restored conversation, says little about the fixed part.
-        $this->fixed ??= ($this->count)(self::with($prompt, \array_slice($prompt->messages, 0, $this->keepFirst)));
+        $this->fixed ??= ($this->count)(new Prompt($prompt->system, \array_slice($prompt->messages, 0, $this->keepFirst), $prompt->tools, $prompt->options, $prompt->cancel));
         $fixed = $fitted ? $tokens($this->fixed) : $this->fixed;
-        if (2 * $fixed > $this->budgetTokens) {
-            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens' . ($fitted ? " ($calibration)" : '') . ', over half the budget of ' . \number_format($this->budgetTokens) . ': the budget must leave room above it for a summary and the recent half. Raise budgetTokens to ' . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
+        if (2 * $fixed > $budget) {
+            $raise = null === $this->budgetTokens ? 'Raise Options::$contextWindow (the budget is 80 % of it) or pass budgetTokens of ' : 'Raise budgetTokens to ';
+            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens' . ($fitted ? " ($calibration)" : '') . ', over half the budget of ' . \number_format($budget) . ': the budget must leave room above it for a summary and the recent half. ' . $raise . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
         }
         $counted = ($this->count)($prompt);
         $before  = $tokens($counted);
-        if ($before <= $this->budgetTokens) {
+        if ($before <= $budget) {
             $this->last = null;
 
-            return [$prompt, $counted];
+            return [$prompt, $counted, $cal, null];
         }
         $messages = $prompt->messages;
         // === holds the same Message objects: a fork's copy of the messages shares them.
@@ -200,8 +262,9 @@ final class Compact implements ModelMiddleware
             $offset = \count($entry['summarized']) - \count($entry['replacement']);
             $floor  = \count($entry['replacement']);
         }
-        $rounds = 0;
-        while (($after = $tokens($counted = ($this->count)(self::with($prompt, $view)))) > $this->budgetTokens) {
+        $rounds  = 0;
+        $nothing = 'Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize';
+        while (($after = $tokens($counted = ($this->count)(self::with($prompt, $view)))) > $budget) {
             $start = \min($this->keepFirst, \count($view));
             if ($start > 0 && $start < \count($view) && self::hasResults($view[$start])) {
                 ++$start;   // the results of the last kept message's tool calls stay with it
@@ -216,47 +279,68 @@ final class Compact implements ModelMiddleware
                 for ($cut = $floor + 1; $cut < \count($view) && self::hasResults($view[$cut]); ++$cut) {
                 }
             }
-            if ($cut >= \count($view)) {
-                $this->log->warning('Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize', ['tokens' => $after, 'budget' => $this->budgetTokens]);
+            $segment = \array_slice($view, $start, $cut - $start);
+            if ($cut >= \count($view) || (null !== $this->noGain && $this->countMessages($prompt, $segment) <= $this->noGain)) {
+                $this->log->warning($nothing, ['tokens' => $after, 'budget' => $budget]);
                 break;
             }
             // A later round summarizes the earlier summary together with what follows it.
-            $previous = null === $entry ? null : \strlen($entry['summary']);
-            $summary  = $this->summarize(\array_slice($view, 0, $start), \array_slice($view, $start, $cut - $start), $prompt->cancel, $previous);
-            $replace  = [new Message(Role::User, [new Text("[A summary of the earlier conversation, which was compacted to save context]\n\n$summary")])];
+            $previous            = null === $entry ? null : \strlen($entry['summary']);
+            [$summary, $finish]  = $this->summarize($prompt->system, \array_slice($view, 0, $start), $segment, $prompt->cancel, $previous);
+            $replace             = [new Message(Role::User, [new Text("[A summary of the earlier conversation, which was compacted to save context]\n\n$summary")])];
             if (Role::User === $view[$cut]->role) {
                 $replace[] = new Message(Role::Assistant, [new Text('Understood. I continue from that summary.')]);
             }
-            $known  = $cut + $offset;
-            $entry  = [
+            $known     = $cut + $offset;
+            $candidate = [
                 'summarized'  => \array_slice($messages, 0, $known),
                 'replacement' => [...\array_slice($view, 0, $start), ...$replace],
                 'summary'     => $summary,
                 'removed'     => $known - $start,
                 'previous'    => $previous,
+                'finish'      => $finish,
             ];
-            $view   = [...$entry['replacement'], ...\array_slice($messages, $known)];
+            $next = [...$candidate['replacement'], ...\array_slice($messages, $known)];
+            if (($this->count)(self::with($prompt, $next)) >= $counted) {
+                // Two small messages replaced by a larger summary: keep them, and spend no side
+                // call on a part this small again.
+                $this->noGain = $this->countMessages($prompt, $replace);
+                $this->log->warning($nothing, ['tokens' => $after, 'budget' => $budget, 'summaryBytes' => \strlen($summary)]);
+                break;
+            }
+            $entry  = $candidate;
+            $view   = $next;
             $offset = $known - \count($entry['replacement']);
             $floor  = \count($entry['replacement']);
             ++$rounds;
-            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens, {calibration})', ['removed' => $entry['removed'], 'bytes' => \strlen($summary), 'budget' => $this->budgetTokens, 'calibration' => $calibration]);
+            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens, {calibration})', ['removed' => $entry['removed'], 'bytes' => \strlen($summary), 'budget' => $budget, 'calibration' => $calibration]);
         }
         if (null === $entry || $view === $messages) {
             $this->last = null;
 
-            return [$prompt, $counted];
+            return [$prompt, $counted, $cal, null];
         }
         $this->remember($entry);
-        $this->last = new Compaction($entry['removed'], \count($messages) - \count($entry['summarized']), $entry['summary'], $before, $after, 0 === $rounds, $entry['previous'], $ratio, $constant);
+        $this->last = new Compaction($entry['removed'], \count($messages) - \count($entry['summarized']), $entry['summary'], $before, $after, 0 === $rounds, $entry['previous'], $cal?->ratio ?? 1.0, $cal?->offset ?? 0.0, $entry['finish']);
 
-        return [self::with($prompt, $view), $counted];
+        return [self::with($prompt, $view), $counted, $cal, $this->last];
+    }
+
+    /**
+     * `$count` of messages alone, without the system text and tool specs.
+     *
+     * @param list<Message> $messages
+     */
+    private function countMessages(Prompt $prompt, array $messages): int
+    {
+        return ($this->count)(new Prompt(null, $messages, [], $prompt->options, $prompt->cancel));
     }
 
     /**
      * Puts the entry first, in place of the entries it supersedes: its own, when reused, and the
      * earlier summaries of the same conversation, whose messages are a prefix of its own.
      *
-     * @param array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int} $entry
+     * @param array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int, finish: FinishReason} $entry
      */
     private function remember(array $entry): void
     {
@@ -266,14 +350,18 @@ final class Compact implements ModelMiddleware
     }
 
     /**
-     * The summary of `$segment`, with the `$kept` messages before it for context (the task, which
-     * the summarizer would otherwise report as unknown). A collapsed one (empty, or under a quarter
-     * of the `$previous` summary's bytes) is asked for once more, and fails the step the second time.
+     * The summary of `$segment` and how its side call ended, with the agent's instructions and the
+     * `$kept` messages before it for context (the task, which the summarizer would otherwise report
+     * as unknown, in the terms the instructions use). A collapsed one (empty, cut at the token
+     * limit, or under a quarter of the `$previous` summary's bytes) is asked for once more, and
+     * fails the step the second time.
      *
      * @param list<Message> $kept
      * @param list<Message> $segment
+     *
+     * @return array{0: string, 1: FinishReason}
      */
-    private function summarize(array $kept, array $segment, Cancel $cancel, ?int $previous): string
+    private function summarize(?string $system, array $kept, array $segment, Cancel $cancel, ?int $previous): array
     {
         $context = '';
         foreach ($kept as $message) {
@@ -283,7 +371,8 @@ final class Compact implements ModelMiddleware
         foreach ($segment as $message) {
             $transcript .= self::render($message);
         }
-        $ask = '' === $context
+        $ask = null === $system || '' === \trim($system) ? '' : "The agent's instructions (context only, do not summarize them):\n\n" . \trim($system) . "\n\n";
+        $ask .= '' === $context
             ? "The conversation so far:\n\n{$transcript}Write the summary."
             : "The start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\n{$context}The part to summarize, which follows it:\n\n{$transcript}Write the summary.";
         $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text($ask)])], [], $this->summarizerOptions, $cancel);
@@ -299,13 +388,15 @@ final class Compact implements ModelMiddleware
                 }
             }
             $text   = \trim($text);
-            $finish = $acc->finish()?->value ?? 'none';
-            if ('' !== $text && (null === $previous || 4 * \strlen($text) >= $previous)) {
-                return $text;
+            $finish = $acc->finish() ?? throw new \Harness\ModelException(\Harness\ErrorKind::ModelError, 'The summarizer\'s stream ended without a Finish delta');
+            if ('' !== $text && FinishReason::Length !== $finish && (null === $previous || 4 * \strlen($text) >= $previous)) {
+                return [$text, $finish];
             }
-            $what = null === $previous
-                ? "returned no text (finish: $finish)"
-                : 'collapsed the summary to ' . \number_format(\strlen($text)) . ' bytes from the ' . \number_format($previous) . "-byte summary it replaces, under a quarter (finish: $finish)";
+            $what = match (true) {
+                '' === $text                     => "returned no text (finish: {$finish->value})",
+                FinishReason::Length === $finish => 'was cut at its output token limit after ' . \number_format(\strlen($text)) . ' bytes (finish: length)',
+                default                          => 'collapsed the summary to ' . \number_format(\strlen($text)) . ' bytes from the ' . \number_format((int) $previous) . "-byte summary it replaces, under a quarter (finish: {$finish->value})",
+            };
             if (2 === $attempt) {
                 throw new \RuntimeException("Compact: the summarizer $what, twice; a collapsed summary loses what the agent knew. Give it more output tokens or turn its thinking off in summarizerOptions, or use another summarizer");
             }
@@ -365,6 +456,6 @@ final class Compact implements ModelMiddleware
     /** @param list<Message> $messages */
     private static function with(Prompt $prompt, array $messages): Prompt
     {
-        return new Prompt($prompt->system, $messages, $prompt->tools, $prompt->options, $prompt->cancel);
+        return new Prompt($prompt->system, $messages, $prompt->tools, $prompt->options, $prompt->cancel, $prompt->continue);
     }
 }
