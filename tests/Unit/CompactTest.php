@@ -119,12 +119,12 @@ it('folds everything older than the step in flight into a checkpoint when the re
     $asked = $summarizer->prompts[0];
     $text  = $summarizer->asked(0);
     expect($asked->tools)->toBe([])
-        ->and($asked->system)->toContain("## Goal\n")->toContain("## Progress\n### Done\n")->toContain("### In progress\n")->toContain("### Blocked\n")
-        ->and($asked->system)->toContain("## Decisions\n")->toContain("## Known\n")->toContain("## Next\n")->toContain("## Context\n")
-        ->and($asked->system)->toContain('List every file, page or other resource already read')->toContain('complete about facts and terse in wording')
+        ->and($asked->system)->toContain('the task as the user put it')->toContain('every source already consulted')->toContain('every fact established so far, with its source')
+        ->and($asked->system)->toContain('the choices made, and why')->toContain('what remains, in order')->toContain('there is no fixed form')
+        ->and($asked->system)->toContain('so nothing is done or read twice')->toContain('complete about facts and terse in wording')
         ->and($text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nsys\n\nThe start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe messages to fold into a new checkpoint:")
         // A quarter of the budget (500 tokens, under 3/4 of the 2048 output tokens), in words.
-        ->and($text)->toEndWith('Write the checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no resource from Done and no fact from Known.')
+        ->and($text)->toEndWith('Write the checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.')
         ->and($text)->toContain('[calls read {"n":4}]')->toContain(\str_repeat('4', 300))
         ->and($text)->not->toContain('[calls read {"n":5}]')
         ->and($text)->not->toContain('thinking');
@@ -157,7 +157,7 @@ it('keeps the latest user message verbatim when the cut falls after it', functio
         ->and($prompt->messages[2]->parts[0]->text)->toBe('Understood. I continue from the checkpoint.')
         ->and($prompt->messages[3])->toBe($messages[2])
         ->and(\array_slice($prompt->messages, 4))->toBe(\array_slice($messages, 11))
-        // It is folded too, so the Goal can quote it.
+        // It is folded too, so the checkpoint can quote it.
         ->and($summaries->asked(0))->toContain('Now count the servers on provider B.')
         ->and($compact->last()->removed)->toBe(9)
         ->and($compact->last()->kept)->toBe(3);
@@ -200,7 +200,7 @@ it('reuses the checkpoint while the conversation fits, and updates it with what 
     $update   = $summarizer->asked(1);
     expect($summarizer->prompts)->toHaveCount(2)
         ->and($update)->toContain("The current checkpoint:\n\nS1\n\nThe messages since the checkpoint, to fold into it:\n\nASSISTANT:\n[calls read {\"n\":5}]")
-        ->and($update)->toEndWith('Update the checkpoint: keep every fact it holds (every entry under Done, Decisions and Known stays, in the same detail), move what the new messages finished from In progress and Next to Done, and add what they establish. Write the whole updated checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no resource from Done and no fact from Known.')
+        ->and($update)->toEndWith('Update the checkpoint: keep every fact, source and decision it holds in the same detail, record what the new messages finished as done, and add what they establish. Write the whole updated checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.')
         ->and($update)->not->toContain('[calls read {"n":4}]')
         ->and($update)->not->toContain('[calls read {"n":9}]')
         ->and($third->messages[0])->toBe($messages[0])

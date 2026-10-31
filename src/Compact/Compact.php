@@ -27,8 +27,9 @@ use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
- * Keeps each step's prompt within a token budget by folding its older messages into a sectioned
- * checkpoint (Goal; Progress: Done, In progress, Blocked; Decisions; Known; Next; Context). The
+ * Keeps each step's prompt within a token budget by folding its older messages into a checkpoint:
+ * the task in the user's words, what was done and consulted, the facts established with their
+ * sources, the decisions, and what was under way and remains, in the form the work suggests. The
  * budget is `$budgetTokens`, or when that is null the step's `Options::$contextWindow` less a
  * reserve of 20 %, taken at first use; with neither, the step throws a `\LogicException`.
  *
@@ -68,37 +69,21 @@ use Psr\Log\NullLogger;
 final class Compact implements ModelMiddleware
 {
     private const PROMPT = <<<'TXT'
-        You keep the checkpoint of a conversation between a user and an AI agent that uses tools. The agent continues from the checkpoint alone, without the messages it replaces. Write it in Markdown under exactly these headings, in this order:
+        You write the checkpoint of a conversation between a user and an AI agent that uses tools. The agent continues from the checkpoint alone: the messages it replaces are gone, and whatever the checkpoint does not hold, the agent no longer knows.
 
-        ## Goal
-        The task and its constraints, quoting the user's own words for each requirement.
+        A checkpoint the agent can continue from holds:
+        - the task as the user put it, quoting their words where the exact wording constrains the work, and every requirement they added later;
+        - what has been done and what came of it, including every source already consulted (a file, a page, a query, a record) named exactly, with what in it mattered, so nothing is done or read twice;
+        - every fact established so far, with its source, exact enough to use without going back: names, paths, figures, quotes, signatures, dates;
+        - the choices made, and why;
+        - what was under way when the checkpoint was written, what failed or waits and on what, and what remains, in order.
 
-        ## Progress
-        ### Done
-        Every finished step with its result. List every file, page or other resource already read, by its exact path or name, with what in it matters, so the agent does not read it again.
-        ### In progress
-        What the agent was doing when the checkpoint was taken.
-        ### Blocked
-        What failed or waits on something, with the error.
-
-        ## Decisions
-        Choices made, with why.
-
-        ## Known
-        Facts established so far, each with its source: paths, names, numbers, quotes.
-
-        ## Next
-        What remains, in order. Nothing that is under Done.
-
-        ## Context
-        Anything else the agent will need.
-
-        Be complete about facts and terse in wording. Write "None." under a heading with nothing to report. Write only the checkpoint.
+        Organize it as the work itself suggests, under the headings a researcher, an accountant or a programmer would choose for this task; there is no fixed form. Be complete about facts and terse in wording. Write only the checkpoint.
         TXT;
 
-    private const UPDATE = 'Update the checkpoint: keep every fact it holds (every entry under Done, Decisions and Known stays, in the same detail), move what the new messages finished from In progress and Next to Done, and add what they establish. Write the whole updated checkpoint.';
+    private const UPDATE = 'Update the checkpoint: keep every fact, source and decision it holds in the same detail, record what the new messages finished as done, and add what they establish. Write the whole updated checkpoint.';
 
-    private const HEADER = "[A checkpoint of the earlier conversation, which was compacted to save context. What is under Done is finished: do not do it again.]\n\n";
+    private const HEADER = "[A checkpoint of the earlier conversation, compacted to save context. Its facts are your own observations from the sources it names, as good as the source itself; what it records as done is done. Do not do or read again what it holds.]\n\n";
     private const ACK    = 'Understood. I continue from the checkpoint.';
 
     /** How many checkpoints are kept, one per conversation the instance serves. */
@@ -477,7 +462,7 @@ final class Compact implements ModelMiddleware
         $ask .= null === $previous
             ? "The messages to fold into a new checkpoint:\n\n{$transcript}Write the checkpoint."
             : "The current checkpoint:\n\n$previous\n\nThe messages since the checkpoint, to fold into it:\n\n$transcript" . self::UPDATE;
-        $ask .= " Keep it under $words words: when it would not fit, shorten the wording and merge entries, but drop no resource from Done and no fact from Known.";
+        $ask .= " Keep it under $words words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.";
         $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text($ask)])], [], $this->summarizerOptions, $cancel);
         $bytes  = null === $previous ? null : \strlen($previous);
         for ($attempt = 1;; ++$attempt) {

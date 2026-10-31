@@ -232,6 +232,15 @@
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 
+### Changed
+
+- `Compact`'s summarizer is told what a checkpoint the agent can continue from must hold (the task
+  in the user's words, everything done and consulted, every fact with its source, the decisions,
+  what is under way and what remains) and chooses the form itself, instead of writing under fixed
+  Goal/Progress/Decisions/Known/Next/Context headings that forced a software-task shape on research,
+  accounting or any other work. The checkpoint's header tells the agent its facts are its own
+  observations, as good as the source, so it does not read a source again for a fact it holds.
+
 ### Changed (breaking)
 
 - **`Transport` gets `get(string $url, array $headers, Cancel $cancel): Response`**, implemented

@@ -1,8 +1,8 @@
 # Harness\Compact
 
 `Compact` is a `ModelMiddleware` that keeps each step's prompt within a token budget by folding the
-older messages into a checkpoint: a sectioned record of the task, what was done and what is known,
-which the agent continues from.
+older messages into a checkpoint: the task, what was done and consulted, what is known and what
+remains, which the agent continues from.
 
 ```php
 $summarizerOptions = new Options(maxOutputTokens: 2048, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]);
@@ -28,22 +28,23 @@ The instance keeps the budget it took at first use.
 
 ## The checkpoint
 
-The side call writes Markdown under fixed headings:
+The side call is told what a checkpoint the agent can continue from must hold, and chooses the
+form itself (the headings a researcher, an accountant or a programmer would use for the task):
 
-| Heading | holds |
-| --- | --- |
-| Goal | the task and its constraints, quoting the user |
-| Progress: Done | every finished step with its result, and every file or resource already read, by path, so the agent does not read it again |
-| Progress: In progress, Blocked | what was under way; what failed or waits, with the error |
-| Decisions | choices made, with why |
-| Known | facts with their sources: paths, names, numbers, quotes |
-| Next | what remains, in order |
-| Context | anything else the agent will need |
+- the task as the user put it, quoting their words where the wording constrains the work, and every
+  requirement added later;
+- what has been done and what came of it, with every source already consulted (a file, a page, a
+  query, a record) named exactly and what in it mattered, so nothing is done or read twice;
+- every fact established, with its source, exact enough to use without going back: names, paths,
+  figures, quotes, signatures, dates;
+- the choices made, and why;
+- what was under way, what failed or waits and on what, and what remains, in order.
 
 The prompt asks for completeness about facts and terseness in wording, and for at most a quarter of
 the budget and three quarters of `summarizerOptions`' output tokens, in words, so the checkpoint
 fits beside the rest and is not cut. The agent gets it as one user message headed "A checkpoint of
-the earlier conversation ... What is under Done is finished: do not do it again", followed by an
+the earlier conversation ... Its facts are your own observations from the sources it names, as good as
+the source itself; what it records as done is done", followed by an
 assistant acknowledgement when the next message is a user message, so roles alternate.
 
 ## What it does
@@ -58,15 +59,14 @@ When the prompt counts over the budget:
 - Whatever the reserve, the recent part holds the step in flight: the last assistant message and
   its results (or the latest user message when no reply follows it).
 - The latest user message stays verbatim: when the cut falls after it (a tool loop answering it
-  outgrew the reserve), it is folded into the checkpoint, so the Goal can quote it, and also kept
+  outgrew the reserve), it is folded into the checkpoint, so the task can quote it, and also kept
   right after the checkpoint, so the agent answers the current question, not an older one.
 - While the conversation keeps the prefix a checkpoint covers and the prompt fits with it, the
   checkpoint is reused, so a provider's prompt cache sees a stable prefix. When the budget is
   exceeded again, the side call gets the current checkpoint and the messages since, with the
-  instruction to keep every fact it holds (every entry under Done, Decisions and Known), move
-  finished work to Done and add what the new messages establish. A checkpoint is never
-  summarized from scratch.
-- A checkpoint's *Next* and *Known* can look one action behind for the steps still in the kept-recent
+  instruction to keep every fact, source and decision it holds, record finished work as done and
+  add what the new messages establish. A checkpoint is never summarized from scratch.
+- A checkpoint's facts and remaining work can look one action behind for the steps still in the kept-recent
   tail, since it is updated only on the next fold: the model sees those steps verbatim, so this is
   correct, not stale.
 - When the checkpoint and the step in flight alone are over the budget, the prompt goes on and a
