@@ -88,3 +88,22 @@ it('loses the second of two separate "Update File" sections for the same file, t
         // ...and the file must actually hold both edits, not just the first section's.
         ->and(\file_get_contents($this->dir . '/config.php'))->toBe("<?php\n\$a = 2;\n\$b = 20;\n");
 });
+
+it('rejects a malformed section header mid-patch, naming the line', function () {
+    // Tests PatchParser.php line 45 and ApplyPatchTest pattern "rejects a patch ... naming the line".
+    // After a Delete File section (which has no content lines), an invalid line that doesn't
+    // match any section marker should throw with the line number.
+    // This covers PatchParser error handling for unexpected lines mid-patch.
+    \file_put_contents($this->dir . '/a.txt', "one\ntwo\n");
+
+    $patch = <<<'PATCH'
+    *** Begin Patch
+    *** Delete File: a.txt
+    *** INVALID HEADER: this line is malformed
+    *** End Patch
+    PATCH;
+
+    $apply = new ApplyPatch($this->root);
+    expect(fn () => $apply->call(['patch' => $patch], callFor()))
+        ->toThrow(RuntimeException::class, 'unexpected line 3');
+});

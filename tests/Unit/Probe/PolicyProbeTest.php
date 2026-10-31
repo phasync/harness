@@ -49,3 +49,11 @@ it('validates flags with = value syntax against the allow rule flag list', funct
         // --unknown=value should ask (--unknown is not in the allowed flags list)
         ->and(verdictOfProbe('git status --unknown=value'))->toBe(Verdict::Ask);
 });
+
+it('peels wrapper options with = value syntax (env -C=/path)', function () {
+    // env -C=/path changes directory and runs the wrapped command
+    // Testing that 'env -C=/tmp ls' is peeled to 'ls' and allowed
+    expect(verdictOfProbe('env -C=/tmp ls'))->toBe(Verdict::Allow)
+        // And that 'env -C=/tmp rm' is peeled to 'rm' and denied
+        ->and(verdictOfProbe('env -C=/tmp rm'))->toBe(Verdict::Deny);
+});

@@ -109,7 +109,7 @@ final class Html
                 continue;
             }
             if ('br' === $tag) {
-                $out .= ' ';
+                $out .= "\u{E000}"; // a line break survives the whitespace collapse, see below
             } elseif ('a' === $tag) {
                 $text = self::collapse(self::inline($child));
                 $href = $child->getAttribute('href');
@@ -121,7 +121,7 @@ final class Html
             }
         }
 
-        return self::collapse($out);
+        return \trim(\preg_replace('/ ?\x{E000} ?/u', "\n", self::collapse($out)) ?? '');
     }
 
     /** One line per `tr`, its `td`/`th` cells joined with `" | "`. */

@@ -11,6 +11,7 @@ use Harness\Result;
 use Harness\Run;
 use Harness\Testing\FakeModel;
 use Harness\Tools;
+use Harness\Tools\Files\PatchParser;
 use Harness\Tools\Plan\Plan;
 use Harness\Tools\Plan\Reminder;
 
@@ -124,4 +125,18 @@ it('reminder with every: 3 shows which of 7 model calls carry the goal and plan'
     // That's prompts [2] and [5] in the 0-indexed array
     expect($promptsWithGoal)->toHaveCount(2)
         ->and($run->ended()->reason)->toBe(Harness\Reason::Done);
+});
+
+it('patch parser rejects malformed patch formats naming the line', function () {
+    // Add File content line without a '+' prefix (PatchParser.php line 66).
+    expect(fn () => PatchParser::parse("*** Begin Patch\n*** Add File: test.txt\nno-prefix\n*** End Patch"))
+        ->toThrow(RuntimeException::class, "must start with '+'");
+
+    // Hunk line with a prefix other than ' ', '-' or '+' (PatchParser.php line 130).
+    expect(fn () => PatchParser::parse("*** Begin Patch\n*** Update File: test.txt\n@@\n?invalid\n*** End Patch"))
+        ->toThrow(RuntimeException::class, "must start with ' ', '-' or '+'");
+
+    // A patch with no Add, Delete or Update section at all (PatchParser.php line 53).
+    expect(fn () => PatchParser::parse("*** Begin Patch\n*** End Patch"))
+        ->toThrow(RuntimeException::class, 'no Add, Delete or Update section');
 });

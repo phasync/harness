@@ -37,3 +37,8 @@ it('renders a table with nested inline tags in cells', function () {
     expect(Html::extract('<table><tr><td>Text <b>bold</b> here</td><td><a href="http://x">link</a></td></tr></table>'))
         ->toBe('Text bold here | link (http://x)');
 });
+
+it('renders br in a paragraph as a line break', function () {
+    expect(Html::extract('<p>Line 1<br/>Line 2</p>'))
+        ->toBe("Line 1\nLine 2");
+});

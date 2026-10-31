@@ -74,3 +74,19 @@ it('returns promptly when background child holds the pipe', function () {
         expect($dead)->toBeTrue();
     }
 });
+
+it('preserves partial output when timeout kills command', function () {
+    $start = \microtime(true);
+    $r     = \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
+        ['command' => 'for i in 1 2 3 4 5; do echo line$i; sleep 0.2; done', 'timeout' => 0.5],
+        callFor()
+    ));
+    $elapsed = \microtime(true) - $start;
+
+    expect($r->content[0]->text)->toContain('Killed: timed out after 0.5 s')
+        ->and($r->error)->toBeTrue()
+        ->and($r->value)->toBeNull()
+        ->and($elapsed)->toBeLessThan(2.0);
+
+    expect($r->content[0]->text)->toContain('line');
+});

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use function fiber\go;
 use Harness\Http\Response;
 use Harness\Mcp\HttpConnection;
 use Harness\Mcp\McpException;
@@ -43,4 +44,26 @@ it('throws when HttpConnection receives a 500 response instead of JSON', functio
     $server = new McpServer(new HttpConnection($transport, 'https://example.com/mcp'));
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class, 'HTTP 500');
+});
+
+it('queues concurrent StdioConnection writes when two coroutines send at once', function () {
+    // Test that StdioConnection.send() queues fibers when one is already writing.
+    // This exercises lines 117-118 in StdioConnection: the waiting[] queue and await().
+    // Checked against existing test: "routes progress, out-of-order responses and cancellation over one stdio process"
+    // which also uses concurrent go() calls but with different focus (progress/cancellation).
+    $results = \fiber\run(function () {
+        $server = new McpServer(new StdioConnection([\PHP_BINARY, \dirname(__DIR__, 2) . '/Support/mcp-server.php']));
+        $tools  = [];
+        foreach ($server->tools() as $tool) {
+            $tools[$tool->spec()->name] = $tool;
+        }
+
+        // Create two concurrent requests that will try to send at nearly the same time.
+        // Both coroutines call tool->call() which calls request() which calls send().
+        $c1 = go(fn () => $tools['echo']->call(['text' => 'first'], callFor())->content[0]->text);
+        $c2 = go(fn () => $tools['echo']->call(['text' => 'second'], callFor())->content[0]->text);
+
+        return [\fiber\await($c1), \fiber\await($c2)];
+    });
+    expect($results)->toEqual(['first', 'second']);
 });

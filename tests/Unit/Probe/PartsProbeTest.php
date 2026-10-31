@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+use function fiber\go;
+use function fiber\readable;
+use function fiber\sleep;
+use function fiber\writable;
 use Harness\Accumulator;
 use Harness\Delta;
 use Harness\Delta\Finish;
@@ -10,6 +14,8 @@ use Harness\Delta\ToolCallEnd;
 use Harness\Delta\ToolCallStart;
 use Harness\Delta\ToolInputDelta;
 use Harness\FinishReason;
+use Harness\Http\StreamTransport;
+use Harness\Http\TransportException;
 use Harness\Message;
 use Harness\Part\Media;
 use Harness\Part\Reference;
@@ -61,4 +67,41 @@ it('preserves seeded Media and Reference parts through delta accumulation with t
 it('rejects unknown delta types as a provider bug', function () {
     $acc = new Accumulator();
     expect(fn () => $acc->add(new ProbePartsUnknownDelta()))->toThrow(LogicException::class, 'Unknown delta');
+});
+
+/**
+ * A one-shot HTTP server for testing StreamTransport error paths: reads one request and writes
+ * raw response chunks with pauses between them. Returns [port, server_task].
+ */
+function probeHttpServe(Closure $respond): array
+{
+    $server = \stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+    $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+    $task   = go(function () use ($server, $respond) {
+        $conn = \stream_socket_accept(readable($server), 0);
+        \stream_set_blocking($conn, false);
+        $request = '';
+        while (!\str_contains($request, "\r\n\r\n") || \strlen(\substr($request, \strpos($request, "\r\n\r\n") + 4)) < (int) (\preg_match('/content-length: (\d+)/i', $request, $m) ? $m[1] : 0)) {
+            $request .= \fread(readable($conn), 65536);
+        }
+        foreach ($respond($request) as $chunk) {
+            \fwrite(writable($conn), $chunk);
+            sleep(0.01);
+        }
+        \fclose($conn);
+        \fclose($server);
+
+        return $request;
+    });
+
+    return [$port, $task];
+}
+
+it('rejects malformed status line from server (StreamTransport line 91 error path)', function () {
+    expect(fn () => \fiber\run(function () {
+        [$port] = probeHttpServe(fn () => [
+            "INVALID 200 OK\r\n\r\n",
+        ]);
+        (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
+    }))->toThrow(TransportException::class, 'Malformed status line');
 });

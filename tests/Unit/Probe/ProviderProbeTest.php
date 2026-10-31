@@ -8,6 +8,7 @@ use Harness\Http\Response;
 use Harness\Message;
 use Harness\Options;
 use Harness\Part\Media;
+use Harness\Part\Reasoning;
 use Harness\Part\Reference;
 use Harness\Part\Text;
 use Harness\Part\ToolCall;
@@ -17,6 +18,7 @@ use Harness\Provider\Anthropic\Messages as AnthropicMessages;
 use Harness\Provider\OpenAI\ChatCompletions;
 use Harness\Role;
 use Harness\Testing\FakeTransport;
+use Harness\ToolChoice;
 use Harness\ToolSpec;
 use Harness\Usage;
 
@@ -70,4 +72,38 @@ it('sends Anthropic tool result with Media (image) in request body', function ()
             'is_error' => false,
         ]],
     ]);
+});
+
+it('builds Anthropic request with system cache_control, tool_choice, temperature, and thinking replay', function () {
+    $respBody = "event: message_start\ndata: " . \json_encode(['message' => ['id' => 'm', 'usage' => ['input_tokens' => 5, 'output_tokens' => 1]]]) . "\n\nevent: message_delta\ndata: " . \json_encode(['delta' => ['stop_reason' => 'end_turn']]) . "\n\nevent: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n";
+    $t        = new FakeTransport(new Response(200, [], \str_split($respBody, 23)));
+    $tools    = [new ToolSpec('search', 'Search', ['type' => 'object'])];
+    $options  = new Options(
+        temperature: 0.7,
+        toolChoice: ToolChoice::None,
+        provider: [
+            'anthropic' => [
+                'system' => [['type' => 'text', 'text' => 'You are helpful', 'cache_control' => ['type' => 'ephemeral']]],
+            ],
+        ]
+    );
+    $msgs = [
+        user('question'),
+        new Message(Role::Assistant, [
+            new Reasoning('thinking', ['model' => 'claude-x', 'blocks' => [['type' => 'thinking', 'thinking' => 'consider', 'signature' => 'SIG']]]),
+            new Text('answer'),
+        ]),
+    ];
+    [...(new AnthropicMessages($t, 'key', 'claude-x'))->stream(new Prompt('Sys', $msgs, $tools, $options, live()))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body)->toMatchArray([
+        'system'      => [['type' => 'text', 'text' => 'You are helpful', 'cache_control' => ['type' => 'ephemeral']]],
+        'temperature' => 0.7,
+        'tool_choice' => ['type' => 'none'],
+        'tools'       => [['name' => 'search', 'description' => 'Search', 'input_schema' => ['type' => 'object']]],
+    ])
+        ->and($body['messages'][1]['content'])->toBe([
+            ['type' => 'thinking', 'thinking' => 'consider', 'signature' => 'SIG'],
+            ['type' => 'text', 'text' => 'answer'],
+        ]);
 });
