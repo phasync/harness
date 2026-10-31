@@ -14,7 +14,7 @@ use Harness\Internal\Utf8;
  * outside them becomes the first line; headings become `"# "`.."######" lines by level; paragraphs and blockquotes are
  * separated by a blank line; `li` becomes a `"- "` line (a list is one block, its items one per
  * line, a nested list's items on their own lines indented two spaces under the parent item); `a` becomes `"text (url)"`
- * only when the link text differs from the URL; `pre` is kept verbatim; a table becomes one row
+ * only when the link text differs from the URL; `pre` is kept verbatim (a `br` in it is a line break); a table becomes one row
  * per line, its cells joined with `" | "` (a nested table's rows on their own lines inside the cell); everything else has its whitespace collapsed to single
  * spaces and entities decoded (both by the DOM parser). The input is UTF-8 (`WebFetch` converts from
  * the declared charset); it reaches the parser as ASCII with numeric entities, so a `<meta charset>`
@@ -91,7 +91,7 @@ final class Html
             } elseif ('ul' === $tag || 'ol' === $tag) {
                 self::add($blocks, \implode("\n", self::blocks($child)));
             } elseif ('pre' === $tag) {
-                self::add($blocks, \rtrim($child->textContent, "\n"));
+                self::add($blocks, \rtrim(self::verbatim($child), "\n"));
             } elseif ('table' === $tag) {
                 self::add($blocks, self::table($child));
             } elseif ('br' !== $tag) {
@@ -145,7 +145,7 @@ final class Html
             } elseif ('table' === $tag) { // a nested table: its rows on their own lines inside the cell
                 $out .= "\0n" . \str_replace("\n", "\0n", self::table($child)) . "\0n";
             } elseif ('pre' === $tag) { // kept verbatim: spliced back in after the collapse, on its own lines
-                $verbatim[] = \rtrim($child->textContent, "\n");
+                $verbatim[] = \rtrim(self::verbatim($child), "\n");
                 $out .= "\0n\0v\0n";
             } else {
                 $out .= self::inline($child);
@@ -182,6 +182,21 @@ final class Html
         }
 
         return \implode("\n", $rows);
+    }
+
+    /** A `pre`'s text as written: its text nodes, and a `br` as the line break it renders as. */
+    private static function verbatim(\DOMNode $node): string
+    {
+        $out = '';
+        foreach ($node->childNodes as $child) {
+            $out .= match (true) {
+                $child instanceof \DOMText    => $child->textContent,
+                $child instanceof \DOMElement => 'br' === \strtolower($child->tagName) ? "\n" : self::verbatim($child),
+                default                       => '',
+            };
+        }
+
+        return $out;
     }
 
     private static function collapse(string $text): string

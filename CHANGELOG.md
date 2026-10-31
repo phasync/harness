@@ -222,6 +222,8 @@
   as windows-1254, the Encoding standard's decoders for those labels (#107). With `cacheDir` set, a
   continuation (`offset` > 0) reads the cached text however old, so it continues the page it
   started instead of splicing the offset into a page that changed once the TTL ran out (#110).
+  `Html` keeps a `<br>` inside `<pre>` as a line break instead of dropping it and merging the
+  lines (#112).
 - `shell` widens the cut past `maxOutput` to the line boundaries the kept parts have, so the
   `[N bytes cut]` marker sits between real lines and one unbroken line gets it inline, instead of
   wrapping the marker in two line breaks the output never had (#99).

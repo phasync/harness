@@ -1299,3 +1299,54 @@ it('refuses to replay a tool call whose reasoning item could not be replayed (Re
     expect(fn () => \fiber\run(fn () => [...(new Responses($t, 'https://api.openai.com/v1', 'gpt-5-mini', 'k'))->stream(new Prompt(null, $msgs, [], new Options(), live()))]))
         ->toThrow(UnsupportedContentException::class, "The reply calling 'lookup' has reasoning without encrypted_content");
 }); // #111: the function_call was sent alone, its reasoning item silently dropped
+
+/*
+ * Round 25, the last of this pass: attacking #111's fix and the two items judged soft last round,
+ * all verified directly against the real code (both adapters) -- every one dry, nothing new.
+ *
+ * - A `Reasoning` part stamped for a DIFFERENT model, with a `ToolCall` right after it in the same
+ *   message: `assistant()`'s `$dropped` flag is only set inside the `($part->raw['model'] ?? null)
+ *   === $this->model` branch (src/Provider/OpenAI/Responses.php), so reasoning for another model
+ *   never sets it -- the tool call is sent with no reasoning item, same as before #111, and no
+ *   exception. Correct: the API's own requirement (a function_call needs ITS OWN response's
+ *   reasoning item) only concerns items from the same response; a tool call replayed alongside
+ *   reasoning from an unrelated model's turn was never going to carry that reasoning anyway, the
+ *   same as #82's whole-message drop for another model. This is the one worth pinning: it is the
+ *   most likely spot for a future tightening of #111 to over-fire on.
+ * - Reasoning dropped (same model, no `encrypted_content`) but only `Text` follows, no `ToolCall`:
+ *   `$dropped` is set, but the guard only checks it against `$part instanceof ToolCall`; the text
+ *   is sent fine regardless. Correct, not pinned (narrower than the case above, same mechanism).
+ * - `store: true` with the identical shape: the `$this->store` branch runs first and always
+ *   replays by `id`, never reaching the `encrypted_content` check, so `$dropped` is never set.
+ *   Correct, not pinned (store mode has nothing in this guard to attack).
+ * - Usage missing entirely (ChatCompletions never sends a `usage` chunk): `Ended`'s docblock makes
+ *   no promise about unknown vs. zero usage, and `Accumulator`'s default `Usage()` is already zero
+ *   in every field -- there is no "unknown" state to lose. Not a defect, nothing to pin beyond
+ *   what the type already guarantees.
+ * - ChatCompletions tool call whose arguments never arrive before `finish_reason: tool_calls`:
+ *   `Accumulator::decode()` treats an empty accumulated JSON string exactly like `"{}"` (returns
+ *   `[]`, no `invalidInput()` set) -- a zero-argument tool call is legitimate, not an error.
+ *   Already the correct, intended behaviour; not a defect.
+ */
+it('does not refuse a tool call next to reasoning dropped whole for a different model', function () {
+    $msgs = [
+        new Message(Role::User, [new Text('hi')]),
+        new Message(Role::Assistant, [
+            new Reasoning('secret thought', ['model' => 'some-other-model', 'items' => [['id' => 'rs_1', 'summary' => []]]]),
+            new ToolCall('call_1', 'lookup', ['q' => 'x']),
+        ]),
+        new Message(Role::User, [new ToolResult('call_1', [new Text('42')], false), new Text('continue')]),
+    ];
+    $sse = "event: response.completed\ndata: " . \json_encode(['type' => 'response.completed', 'response' => ['usage' => ['input_tokens' => 1, 'output_tokens' => 1]]]) . "\n\n";
+    $t   = new FakeTransport(new Response(200, ['content-type' => 'text/event-stream'], [$sse]));
+
+    // Correct: reasoning for a different model is dropped as a whole (as #82 already established
+    // for a message with only reasoning); #111's guard must not treat that as "this reply's own
+    // reasoning went missing" and refuse to send the tool call that follows it.
+    $events = \fiber\run(fn () => [...(new Responses($t, 'https://api.openai.com/v1', 'gpt-5-mini', 'k'))->stream(new Prompt(null, $msgs, [], new Options(), live()))]);
+    $body   = \json_decode($t->requests[0]['body'], true);
+
+    expect($events)->not->toBeEmpty()
+        ->and($body['input'])->toContainEqual(['type' => 'function_call', 'call_id' => 'call_1', 'name' => 'lookup', 'arguments' => '{"q":"x"}'])
+        ->and(\array_filter($body['input'], static fn (array $i) => 'reasoning' === $i['type']))->toBe([]);
+}); // #111 stays scoped to the same model's own reasoning; cross-model drops (#82) are unaffected

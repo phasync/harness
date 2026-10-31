@@ -732,3 +732,17 @@ it('continues an offset from the cached page it started, however old the cache e
         \exec('rm -rf ' . \escapeshellarg($dir));
     }
 }); // #110: the offset was applied to a fresh fetch of a changed page
+
+/*
+ * Html::extract()'s docblock promises, flatly, "`pre` is kept verbatim". A top-level `<pre>` is
+ * handled by `blocks()` with `\rtrim($child->textContent, "\n")` -- but `textContent` concatenates
+ * only TEXT nodes; a `<br>` child is a void element with no text of its own, so it contributes
+ * nothing at all to `textContent`, not even a newline. A literal `<br>` inside a `<pre>` (a pattern
+ * real server-rendered pages do use -- a templating engine inserting its own line breaks into a
+ * preformatted block, rather than literal "\n" bytes) is a legitimate line break everywhere else
+ * in this very file's own handling (`inline()` turns it into the "\0n" sentinel); inside `<pre>`
+ * it instead vanishes completely, merging two lines into one with no separator of any kind.
+ */
+it('keeps a <br> inside <pre> as a line break, not a silently vanished tag', function () {
+    expect(Html::extract('<pre>line1<br>line2</pre>'))->toBe("line1\nline2");
+}); // #112: textContent skipped the br and the lines merged
