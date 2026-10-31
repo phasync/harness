@@ -137,10 +137,15 @@ final readonly class Shell implements Tool
         }
         \fclose($out);
         $status = $exited ?? \proc_get_status($process);
-        if ($group) {
-            \posix_kill(-$status['pid'], 9); // the whole group, however the command ended: a background child does not outlive the call
-        } elseif ($status['running']) {
-            \proc_terminate($process, 9);
+        $kill   = static function () use ($group, $process, $status): void {
+            // the whole group, however the command ended: a background child does not outlive the call; before
+            // setsid has made the group (a deadline shorter than its start-up) the pid itself is what there is
+            if (!$group || !\posix_kill(-$status['pid'], 9)) {
+                $group ? \posix_kill($status['pid'], 9) : \proc_terminate($process, 9);
+            }
+        };
+        if ($group || $status['running']) {
+            $kill();
         }
         while ($status['running']) {
             sleep(0.01);
@@ -148,9 +153,9 @@ final readonly class Shell implements Tool
             if (!$status['running']) {
                 break;
             }
-            if (\microtime(true) > $deadline + 1.0) {
-                $group ? \posix_kill(-$status['pid'], 9) : \proc_terminate($process, 9);
+            if (null !== $killed || \microtime(true) > $deadline + 1.0) { // a killed call insists at every poll; one that ended by itself gives a lingering process a second
                 $killed ??= 'timed out after ' . $timeout . ' s';
+                $kill();
             }
         }
         \proc_close($process);

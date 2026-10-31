@@ -172,6 +172,9 @@
   alone (#85).
 - Anthropic no longer glues two assistant turns into one when the user turn between them had
   nothing sendable; that is an `UnsupportedContentException` (#86).
+- `shell` kills a timed-out or cancelled command at every poll until it is gone, and the process
+  itself when its group does not exist yet; a timeout shorter than `setsid`'s start-up left the
+  command running for up to a second (#87).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

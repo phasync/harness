@@ -440,3 +440,27 @@ it('does not report a .png file as an image when its content is plain text', fun
     // bytes, so a provider asked to decode this as an image will fail on perfectly good text.
     expect($result->content[0])->toBeInstanceOf(Harness\Part\Text::class);
 }); // #85: the extension alone decided
+
+/*
+ * Round 17. Attacked the #85 magic-bytes fix: a real PNG named `.jpg` (magic disagrees with the
+ * extension) is now read as text or refused as binary depending on its bytes -- judged this an
+ * acceptable, narrow ruling (the fix's point was to require both signals to agree, not to let
+ * either one decide alone; a model that wants the image back can still read it by its real
+ * extension or `.png`). A WebP shorter than 12 bytes and a GIF87a signature both round-tripped
+ * correctly (no crash, no false negative on the 87a variant).
+ *
+ * `grep`'s `ignore_case` option has no such caveat in its docs or its own spec text ("Case-
+ * insensitive (default false)") -- but `Grep::call()` builds its regex with only the `i` modifier,
+ * never `u` (PCRE_UTF8). Without `u`, PCRE's case-insensitive matching is ASCII-only; a non-ASCII
+ * letter's upper and lower forms are different multi-byte sequences that `i` alone never folds
+ * together. `ignore_case: true` silently stops working the moment the pattern or the matched text
+ * leaves ASCII.
+ */
+it('matches case-insensitively on a non-ASCII letter, not just ASCII ones', function () {
+    \file_put_contents($this->dir . '/cafe.txt', "café content here\n");
+    $result = (new Grep($this->root))->call(['pattern' => 'CAFÉ', 'ignore_case' => true, 'path' => 'cafe.txt'], callFor());
+
+    // BUG: today this is "No lines match 'CAFÉ'" -- the 'i' modifier alone never case-folds 'É'
+    // against 'é' because the regex is missing PCRE's 'u' (UTF-8) modifier.
+    expect($result->content[0]->text)->toContain('café content here');
+})->group('bug');

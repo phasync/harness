@@ -554,4 +554,4 @@ it('kills a command promptly even for a timeout small enough to race the setsid 
         expect($elapsed)->toBeLessThan(0.5) // comfortably above the 0.001 s timeout, comfortably below the ~1 s raced fallback
             ->and($r->content[0]->text)->toStartWith('Killed: timed out after 0.001 s');
     }
-})->group('bug');
+}); // #87: the group kill was a silent ESRCH before setsid ran, retried only after deadline + 1 s

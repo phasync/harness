@@ -916,3 +916,61 @@ it('does not merge two assistant turns together when the user turn between them 
         ->toThrow(UnsupportedContentException::class, 'Two assistant messages in a row')
         ->and($t->requests)->toBe([]);
 }); // #86: merged into one assistant message with a tool_use and no tool_result
+
+/*
+ * Round 17's attack on #86:
+ *
+ * - A prompt that legitimately starts with an assistant message: Anthropic's real API requires
+ *   the first message to have role `user`; nothing in `Messages::messages()`/`request()` checks
+ *   this, so `[{"role":"assistant",...},{"role":"user",...}]` is actually sent (confirmed:
+ *   `FakeTransport` recorded the POST). A real gap, same shape as #86 but at the other end of the
+ *   conversation; the regression below is the sharper find, so this is reported but not pinned.
+ * - Two assistant messages in a row through Chat Completions / Responses: neither has any
+ *   adjacency check at all (no merge logic exists for either role in `ChatCompletions::messages()`
+ *   or `Responses::input()` -- every message maps independently); both APIs do accept consecutive
+ *   assistant messages (that's how OpenAI's "developer injects an extra assistant turn" patterns
+ *   work), and this is implicitly what docs/openai.md already describes (every message type maps
+ *   1:1, no mention of any alternation requirement). Not a defect.
+ *
+ * - The one that reproduces: a `Resume` whose continued assistant message (`Prompt::$continue`)
+ *   follows a dropped, all-empty user message. `request()` calls `$this->messages($prompt->messages)`
+ *   -- which builds and validates the FULL conversation, #86's guard included -- *before* it ever
+ *   looks at `$prompt->continue` to route into `prefill()`. `prefill()` itself only needs the last
+ *   entry of `messages()`'s output to be `assistant` (it pops that entry and replaces it with the
+ *   rebuilt prefill content); it does not care what came immediately before it. But if the message
+ *   right before the edit is an all-empty user turn (redacted to nothing by a content filter, or
+ *   simply blank -- #83's territory) and the message before THAT is itself an assistant reply (an
+ *   entirely ordinary multi-turn conversation), dropping the empty user turn makes those two
+ *   assistant messages adjacent in `messages()`'s own output, and #86 throws
+ *   `UnsupportedContentException` ("Two assistant messages in a row...") before `prefill()` is ever
+ *   reached -- turning a perfectly continuable edit (prefill never needed anything before the
+ *   trailing assistant message) into a hard failure, with an error message that talks about
+ *   "alternates user and assistant turns" even though the *actual* operation being attempted,
+ *   continuing the model's last reply, has nothing to do with the turn before the dropped one.
+ *
+ * Verified directly against the real code (both adapters): `[user("first question"),
+ * assistant("first answer"), user(Text("")), assistant("One. Two. ")]` with `Prompt::$continue`
+ * (a `Resume` continuing the trailing assistant message) throws `UnsupportedContentException`
+ * ("Two assistant messages in a row") instead of sending the prefill request `prefill()` is fully
+ * capable of building.
+ */
+it('still continues a Resume when the message before the edit was a dropped empty user turn', function () {
+    $msgs = [
+        user('first question'),
+        new Message(Role::Assistant, [new Text('first answer')]),
+        new Message(Role::User, [new Text('')]), // redacted to nothing, dropped by #83
+        new Message(Role::Assistant, [new Text('One. Two. ')]), // the edit to continue
+    ];
+    $t = new FakeTransport(new Response(200, [], \str_split(
+        "event: message_delta\ndata: " . \json_encode(['type' => 'message_delta', 'delta' => ['stop_reason' => 'end_turn']]) . "\n\n"
+        . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n",
+        23,
+    )));
+
+    // Today: UnsupportedContentException ("Two assistant messages in a row") -- the continuation
+    // never gets a chance; prefill() only needed the trailing assistant message to work.
+    [...(new Messages($t, 'k', 'claude-x'))->stream(Harness\Testing\TestPrompt::make(null, $msgs, continue: true))];
+    $sent = \json_decode($t->requests[0]['body'], true);
+    expect($sent['messages'])->toHaveCount(3)
+        ->and($sent['messages'][2])->toBe(['role' => 'assistant', 'content' => [['type' => 'text', 'text' => 'One. Two.']]]);
+})->group('bug');
