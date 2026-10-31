@@ -6,7 +6,8 @@ declare(strict_types=1);
  * The request/response host idiom: each invocation is one request that runs one turn, prints its
  * events as JSON lines (what an SSE or WebSocket route would forward) and keeps the conversation and
  * the pending calls in a JSON file between requests. A write needs the user's approval; a tool can
- * ask the user a question.
+ * ask the user a question. A Compact built per request keeps the prompt within the context window,
+ * and its calibration is kept in the file too, so the next request starts calibrated.
  *
  *   php examples/web.php state.json say "Remember that my favourite colour is blue"
  *   php examples/web.php state.json answer '{"<call id>": {"approval": "allow"}}'   # or {"deny": "why"}
@@ -19,6 +20,8 @@ use Harness\Answer;
 use Harness\Approval;
 use Harness\Call;
 use Harness\ClosureTool;
+use Harness\Compact\Calibration;
+use Harness\Compact\Compact;
 use Harness\Decision;
 use Harness\Hints;
 use Harness\Http\StreamTransport;
@@ -45,7 +48,7 @@ $url                      = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_O
 if (null === $file || !\in_array($command, ['say', 'answer'], true) || null === $arg) {
     exit("Usage: php examples/web.php <state.json> say <message> | answer <json>\n");
 }
-$state = \is_file($file) ? \json_decode(\file_get_contents($file), true, 512, \JSON_THROW_ON_ERROR) : ['messages' => [], 'pending' => [], 'notes' => []];
+$state = \is_file($file) ? \json_decode(\file_get_contents($file), true, 512, \JSON_THROW_ON_ERROR) : ['messages' => [], 'pending' => [], 'notes' => [], 'calibration' => null];
 
 $ask = new ClosureTool(
     new ToolSpec('ask_user', 'Ask the user a question and get the answer', ['type' => 'object', 'properties' => ['question' => ['type' => 'string']], 'required' => ['question']], new Hints(readOnly: true)),
@@ -75,12 +78,21 @@ $policy = new class implements ToolMiddleware {
     }
 };
 
+$model = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default');
+// The budget is the context window less 20 %; the summarizer's thinking is off (docs/compact.md).
+$compact = new Compact(
+    $model,
+    null,
+    summarizerOptions: new Options(maxOutputTokens: 1024, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]),
+    calibration: null === ($state['calibration'] ?? null) ? null : Calibration::fromArray($state['calibration']),
+);
+
 $run = new Run(
-    new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default'),
+    $model,
     new Tools($ask, $remember),
     system: 'You are a brief assistant. Notes so far: ' . (\implode('; ', $state['notes']) ?: 'none') . '. Save new facts about the user with remember.',
-    middleware: [$policy],
-    options: new Options(maxOutputTokens: 1000),
+    middleware: [$policy, $compact],
+    options: new Options(maxOutputTokens: 1000, contextWindow: (int) (\getenv('HARNESS_CONTEXT_WINDOW') ?: 32768)),
     messages: \array_map(Message::fromArray(...), $state['messages']),
     pending: \array_map(Pending::fromArray(...), $state['pending']),
 );
@@ -106,6 +118,7 @@ fiber\run(function () use ($run, $input, $sink) {
     }
 });
 
-$state['messages'] = \array_map(fn (Message $m) => $m->toArray(), $run->messages());
-$state['pending']  = \array_map(fn (Pending $p) => $p->toArray(), $run->ended()->pending);
+$state['messages']    = \array_map(fn (Message $m) => $m->toArray(), $run->messages());
+$state['pending']     = \array_map(fn (Pending $p) => $p->toArray(), $run->ended()->pending);
+$state['calibration'] = $compact->calibration()?->toArray();
 \file_put_contents($file, \json_encode($state, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));

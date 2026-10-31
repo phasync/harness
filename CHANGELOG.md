@@ -1,5 +1,86 @@
 # Changelog
 
+## 0.0.1-beta5
+
+Implements SPEC.md revision 5: interrupt, edit and resume a reply; steer a running turn; a known
+context window; the round-4 users' Compact findings; the last documentation gaps.
+
+### Changed (breaking)
+
+- **A `\LogicException` from a tool fails the turn** (`ErrorKind::ToolError`, new) and is rethrown
+  from the iteration after `TurnEnded`, as one from the model or a middleware is. Before, it became
+  an error result the model retried: in round 4 a lead agent re-delegated forever because a child's
+  `Compact` budget-floor exception came back as a tool error. Through `Agents\AgentTool` a child's
+  reaches the parent the same way. A tool that throws `\InvalidArgumentException` (a
+  `\LogicException`) for bad model input now fails the turn: throw `Retry` for that.
+- **`Reason::Interrupted`** and **`ErrorKind::ToolError`** are new cases: a `match` over `Reason`
+  or `ErrorKind` without a default arm throws `UnhandledMatchError` when they occur.
+- **`Compact` takes a summary cut at the output token limit (`FinishReason::Length`) as a
+  collapse**: asked once more, and the step fails the second time. Beta4 accepted a cut summary.
+- **`Compact`'s side call includes the run's system text** as "the agent's instructions", before
+  the kept first messages, so summaries keep the task's terms. The ask starts differently.
+- **`Compact` drops a round that would not shrink the prompt**, with the "nothing more to
+  summarize" warning, instead of replacing two small messages by a larger summary, and runs a later
+  round only for a part larger than the summary it dropped, so no side call is spent per step.
+- **`Compact` stops calibrating on a report it takes as an upstream cut** (below).
+
+### Added
+
+- **`Run::interrupt()`**: as `cancel()`, but the turn ends `Reason::Interrupted` and
+  **`Ended::$partial`** holds the assistant message as delivered so far (text as streamed,
+  reasoning, complete tool calls); it is not in `messages()` or `appended`, and `finish` is null.
+- **`Resume(Message $edited)`**, a turn's third kind of input: the edit is appended and a step runs
+  with **`Prompt::$continue`** true (new last constructor parameter, default false; a middleware
+  that rewrites a prompt passes it on). The accumulator is seeded with the edit, so the step's
+  `MessageEnded` carries the whole message, and **`Event\MessageResumed(id)`** (`message_resumed`)
+  replaces `MessageStarted`. Valid only after a user message with nothing pending; otherwise
+  `turn()` throws. `Accumulator::__construct(?Message $seed = null)` and `Accumulator::partial()`
+  serve it.
+- Providers on `Prompt::$continue`: `ChatCompletions` sends the edit last (llama.cpp and exl3
+  continue it; vLLM needs `continue_final_message` and `add_generation_prompt` in
+  `provider['openai']`); `Anthropic\Messages` sends a prefill (reasoning left out, trailing
+  whitespace cut) and throws `UnsupportedOptionException` with thinking on; `Responses` throws.
+  The exceptions name the fallback a host may choose. Live on llama.cpp (qwen3.8-flash-next): an
+  interrupt after "Number one.", replaced by four sentences, continued with " Number five." and only
+  the continuation streamed.
+- **`Run::interject(Message $user)`** queues a user message for the running turn; it lands after
+  the step's tool results, before the next model call, with **`Event\Interjected(message)`**
+  (`interjected`). A reply without tool calls does not end the turn while one waits.
+  **`Ended::$queued`** lists those that could not land. With no turn running it throws.
+- **`Options::$contextWindow`** (`?int`, tokens; new last constructor parameter), validated and
+  passed on; the core does nothing else with it.
+- **`Compact\Calibration`**, the counter's calibration as a JSON value (low and high points,
+  `ratio`, `offset`, `fitted`; `toArray()`, `fromArray()`, `jsonSerialize()`).
+  **`Compact::calibration(): ?Calibration`** and a constructor parameter `?Calibration
+  $calibration = null` (last), so a host that builds a Compact per request starts calibrated.
+- **`Compact`'s `budgetTokens` may be null** (now the default): the budget is the step's
+  `Options::$contextWindow` less 20 %, taken at first use; with neither the step throws a
+  `\LogicException`, and a budget over the window throws too.
+- **`Compact` detects a prompt cut upstream**: once the calibration is a line, a reported input
+  count under 70 % of the calibrated count logs a warning naming both and sets
+  **`Compaction::$truncatedUpstream`**; the report is left out of the calibration. Only with a line:
+  an offset from one long prompt flagged a later short one as cut in the tests.
+- **`Compaction::$finish`**, how the accepted summary's side call ended.
+- `Ended::toArray()` gives `partial` and `queued`; `TestPrompt::make()` takes `continue`.
+
+### Docs
+
+- README: interrupt, edit, resume with the providers and the limits (no resuming inside a
+  reasoning block; no half tool call); steering a running turn; the context window, and that a
+  server which evicts silently must be configured on the server (Ollama: `OLLAMA_CONTEXT_LENGTH` or
+  `num_ctx` in the Modelfile); `Call`'s pause members; only phasync and Revolt are tested; a
+  `tool_decided` line in the JSON sample and that the inline idiom emits none; a web host's answers
+  nest by call id; the retry after `Failed` beside the resume after `AwaitingInput`.
+- docs/compact.md: the thinking-off summarizer options as the first line, with why; the budget from
+  the window; exactly what the summarizer sees; Length collapses; dropped rounds; `Calibration` and
+  persisting it; upstream truncation; the upgrader's note on the floor; the summary cache as
+  implemented (keyed by the same `Message` objects; a per-request Compact starts without summaries).
+- docs/openai.md and docs/anthropic.md: continuation per provider. SPEC.md's Policy wording now
+  says, as docs/policy.md does, that the answering middleware is listed before `Policy`.
+- `examples/chat.php`: Ctrl-C interrupts, the partial's last line may be retyped, the reply
+  continues; a line typed while it streams is an interjection. `examples/web.php` builds a Compact
+  per request with the budget from `contextWindow` and persists its `Calibration` in the state file.
+
 ## 0.0.1-beta4
 
 Implements SPEC.md revision 4: the round-3 users' problems were in `Compact`, plus one unbounded

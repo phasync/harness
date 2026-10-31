@@ -34,7 +34,7 @@ $shell  = new Shell('/tmp');
 $shell->call(['command' => 'echo hi'], TestCall::make($shell->spec(), emit: function ($e) use (&$events) { $events[] = $e; }));
 ```
 
-`TestPrompt::make(?string $system = null, array $messages = [], array $tools = [], Options $options = new Options())`
+`TestPrompt::make(?string $system = null, array $messages = [], array $tools = [], Options $options = new Options(), bool $continue = false)`
 is a `Prompt` with a `Cancel` that is never set, for calling a `ModelMiddleware` directly:
 
 ```php

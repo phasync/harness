@@ -135,7 +135,10 @@ because a child's `Compact` budget-floor `LogicException` came back as a tool er
 
 ### Policy, Mcp, Transcript, Agents, Tools, Providers, Testing (modules)
 
-As built. `Responses` and `Anthropic` stay fake-tested until keys exist.
+As built. `Responses` and `Anthropic` stay fake-tested until keys exist. A host that answers
+`Policy`'s `Ask` inline lists its answering middleware *before* `Policy` in the middleware array
+(outermost): `Ask` returns without calling `$next`, so a middleware listed after it never sees the
+pause. docs/policy.md says the same.
 
 ## Examples and CLI
 

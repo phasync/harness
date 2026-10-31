@@ -30,6 +30,12 @@ $model = new ChatCompletions(
   throws `UnsupportedOptionException`.
 - HTTP 429 → `RateLimited` (with `retryAfter`), a context-length error → `ContextTooLong`, anything
   else → `ModelError`; an `error` object inside the stream → `ModelError`.
+- A `Prompt::$continue` (a `Resume`) sends the assistant message to continue last, its reasoning
+  as `reasoning_content` for the same model. llama.cpp and exl3 continue it as they are; vLLM
+  needs `Options::$provider['openai']` set to `['continue_final_message' => true,
+  'add_generation_prompt' => false]` for the resumed turn. llama.cpp (tested with a Qwen thinking
+  model) streams only the continuation and does not reason again. A server that does not continue
+  starts a new reply after the edit instead; nothing detects that.
 
 ## Responses
 
@@ -62,3 +68,6 @@ $model = new Responses(new StreamTransport(), 'https://api.openai.com/v1', 'gpt-
   `Options::$provider['openai']` is merged into the body last (`reasoning`, `text`, `truncation`, ...).
 - HTTP 429 or `rate_limit_exceeded` → `RateLimited` (with `retryAfter`), `context_length_exceeded`
   → `ContextTooLong`, anything else → `ModelError`.
+- A `Prompt::$continue` throws `UnsupportedOptionException`: the API cannot continue an assistant
+  message. The host may choose the fallback itself: append the edit as a finished assistant message
+  and ask for the next one.

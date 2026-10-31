@@ -31,5 +31,11 @@ $model = new Messages(
   `output_config`, `cache_control` (top-level automatic caching) and the rest go there.
 - HTTP 429 and 529, `rate_limit_error` and `overloaded_error` → `RateLimited`; "prompt is too long" →
   `ContextTooLong`; a stream that ends before `message_stop` → `TransportError`.
+- A `Prompt::$continue` (a `Resume`) is sent as a prefill: the assistant message goes last,
+  without its reasoning and with the trailing whitespace of its last text cut, as the API requires,
+  and the reply continues it. With `thinking` on the API takes no prefill: it throws
+  `UnsupportedOptionException`, naming the fallback (append the edit as a finished assistant
+  message and ask for the next one). A message that ends with a tool call throws
+  `UnsupportedContentException`.
 
 Not live-tested in this round (no key); the live test runs with `ANTHROPIC_API_KEY` set.

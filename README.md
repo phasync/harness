@@ -14,7 +14,9 @@ harness runs on phasync, Revolt (AMPHP, ReactPHP) or any other adapter, and beha
 composer require phasync/harness fiber-interop/phasync   # or fiber-interop/revolt, /amp, /react
 ```
 
-PHP 8.2+. Dependencies: `fiber-interop/api` and `psr/log`.
+PHP 8.2+. Dependencies: `fiber-interop/api` and `psr/log`. This repository's own suite runs under
+the phasync and the Revolt adapter only; amp and react are fiber-interop adapters the harness has
+not been tested on.
 
 ## The loop
 
@@ -47,7 +49,8 @@ fiber\run(function () use ($run) {
 $ended = $run->ended();   // reason, appended messages, pending calls, usage, error, errorKind, finish
 ```
 
-A turn takes a user `Message`, or the `Answer`s to a turn that ended awaiting input. Each step builds
+A turn takes a user `Message`, the `Answer`s to a turn that ended awaiting input, or a `Resume` of an
+interrupted reply. Each step builds
 a `Prompt` from the system text, the messages so far and the current tools (the `ToolSource` is read
 at every step), streams the model, appends the assistant message, runs its tool calls and appends
 their results as one user message. It ends when:
@@ -58,7 +61,8 @@ their results as one user message. It ends when:
 | `Stopped`       | a stop predicate returned true (default `[Stop::maxSteps(20)]`)              |
 | `AwaitingInput` | a tool asked the host (`Call::needsInput()`); `Ended::$pending` lists the calls |
 | `Cancelled`     | `$run->cancel()` was called, or the consumer stopped iterating               |
-| `Failed`        | `Ended::$errorKind`: `ModelError`, `ContextTooLong`, `RateLimited`, `TransportError`, `ToolRetriesExceeded`, `MiddlewareError` |
+| `Interrupted`   | `$run->interrupt()` was called; `Ended::$partial` holds the reply so far     |
+| `Failed`        | `Ended::$errorKind`: `ModelError`, `ContextTooLong`, `RateLimited`, `TransportError`, `ToolRetriesExceeded`, `MiddlewareError`, `ToolError` |
 
 `Done` only means "no tool calls". `Ended::$finish` (and `TurnEnded::$finish`) is the `FinishReason`
 of the turn's last assistant message: a reply cut by the token limit is `Done` with finish `Length`,
@@ -72,8 +76,9 @@ same adapter class is a no-op); `fiber\run()` composes, so it may be called anyw
 fiber the adapter did not create (a Swerve worker, a queue worker's job), and returns once
 everything started inside it has finished. The turn runs in its own coroutine, a new `\Scope`
 and its own `fiber\run()`, so it ends with everything it started finished. A `\LogicException` (misuse, such as
-an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`; runtime
-failures end the turn `Failed` and are in `ended()`.
+an option the provider cannot honour), from the model, a middleware or a tool, ends the turn
+`Failed` and is rethrown from the iteration after `TurnEnded`; runtime failures end the turn
+`Failed` and are in `ended()`.
 
 A failed turn discards the step in progress, as a cancelled one does: its partial assistant
 message, and the results of its calls that finished. `Ended::$appended` and `messages()` hold only
@@ -99,6 +104,55 @@ at once when a delta arrives first). A turn in a tool call ends when the tool re
 250 ms for `Shell` (which then kills the process group) and for `Mcp` over stdio, and for your own
 tools as soon as they check `Call::isCancelled()`.
 
+### Interrupt, edit, resume
+
+`$run->interrupt()` stops a reply as `cancel()` does, but the turn ends `Interrupted` and
+`Ended::$partial` holds the assistant message as delivered so far: its text as streamed, its
+reasoning, its complete tool calls. The partial is in `$partial` only; `messages()` and `appended`
+hold complete steps, and `finish` is null. The host edits it and the model goes on from the edit:
+
+```php
+$partial = $run->ended()->partial;                      // Message(Assistant, [Reasoning, Text('One. Two.')])
+$edited  = new Message(Role::Assistant, [new Text('One. Four.')]);
+foreach ($run->turn(new Resume($edited)) as $event) { ... }   // MessageResumed, then deltas after "Four."
+```
+
+The turn appends the edit and runs a step with `Prompt::$continue`: the deltas extend it, the
+step's `MessageEnded` carries the whole message (`One. Four. Five.`), and `MessageResumed(id)`
+takes the place of `MessageStarted`. Tool calls the continued message ends with run as in any
+step. A `Resume` is valid only when the run's last message is a user message and nothing awaits
+input; otherwise `turn()` throws.
+
+Providers: `ChatCompletions` sends the edit last, which llama.cpp and exl3 continue (vLLM with the
+keys in [docs/openai.md](docs/openai.md)); `Anthropic\Messages` sends it as a prefill without
+thinking and throws `UnsupportedOptionException` with thinking on; `Responses` throws (the API has
+no continuation). The exception names the fallback a host may choose: append the edit as a
+finished assistant message and ask for the next one. Nothing emulates it silently.
+
+Limits: a continuation cannot resume inside a reasoning block; the edit applies to the visible
+text, and the model does not reason again. A model interrupted mid tool call has no half call to
+continue: the partial holds the complete calls only.
+
+### Steering a running turn
+
+`$run->interject($userMessage)` queues a user message for the running turn. It lands at the next
+step boundary, after the step's tool results and before the next model call, with an
+`Interjected(message)` event, so a long turn is redirected without losing the step in flight.
+Several land in order. A reply without tool calls does not end the turn while one waits: the model
+answers it. Those that cannot land before the turn ends (it stopped, paused, failed or was
+cancelled) are in `Ended::$queued`. With no turn running it throws: use `turn()`.
+
+### The context window
+
+`Options::$contextWindow` is the model's window in tokens as the host knows it. The core only
+validates it and passes it on; `Harness\Compact` takes its budget from it. The harness assumes a
+server that errors when the prompt exceeds the window (hosted APIs, llama.cpp without context
+shift), which ends the turn `Failed` with `ContextTooLong`. A server that evicts silently must be
+configured, because the system prompt is the first thing it drops: Ollama's default window is 4k
+tokens; raise it on the server (`OLLAMA_CONTEXT_LENGTH`, or `num_ctx` in the model's Modelfile),
+since its OpenAI endpoint takes no `num_ctx` in the request. `Compact` detects a prompt cut this way
+([docs/compact.md](docs/compact.md)).
+
 ### Tools
 
 A tool implements `Tool`: `spec(): ToolSpec` (name, description, JSON schema of the input, `Hints`)
@@ -108,12 +162,17 @@ A `ToolSpec`'s schema must have `"type": "object"`;
 schema nodes PHP holds as empty arrays (`'properties' => []`) are sent as `{}`. `Result` keeps apart what the model sees
 (`content`), what the application gets (`value`, in the `ToolEnded` event) and what is only logged
 (`meta`); `error: true` marks a failure. `Call` carries the call `id`, the `run`, the host's
-`context` (from `Run`), the called tool's `spec`, `progress()`, `isCancelled()` and `needsInput()`.
+`context` (from `Run`), the called tool's `spec`, `progress()`, `isCancelled()`, `needsInput()`,
+and for pausing and resuming `pending()`, `answer()`, `answers()`, `decision()` and `state()`
+([Pause and resume](#pause-and-resume)).
 
 A tool fails in one of two ways. `throw new Retry('why')` gives the model an error result to correct,
 counted against `Options::$toolRetries` (default 3, together with unknown tool names and malformed
 input); past it the turn fails `ToolRetriesExceeded`. Any other throwable gives the model an error
-result with its message, is emitted as `ToolEnded` with the throwable, and is logged.
+result with its message, is emitted as `ToolEnded` with the throwable, and is logged. A
+`\LogicException` (misuse, which the model cannot fix) is neither: it ends the turn `Failed` with
+`ToolError` and is rethrown after `TurnEnded`; through `Agents\AgentTool` a child's reaches the
+parent the same way.
 
 The read-only calls of a step (`Hints::$readOnly`) run concurrently; the others run after them, one
 at a time, in the model's order. Results go back in the model's order.
@@ -149,7 +208,8 @@ fields, so an SSE route writes one line per event; `Events::fromArray()` rebuild
 ```
 TurnStarted(turn)                       TurnEnded(turn, reason, usage, ?error, ?finish)
 StepStarted(turn, n)                    StepEnded(turn, n)                    n = 0: resumed calls
-MessageStarted(id)                      TextDelta(id, text)        ReasoningDelta(id, text)
+MessageStarted(id)                      MessageResumed(id)                    Interjected(message)
+TextDelta(id, text)                     ReasoningDelta(id, text)
 ToolCallStarted(id, name)               ToolInputDelta(id, json)   ToolCallReady(id, name, input)
 ToolDecided(id, needId, decision)       ToolProgress(id, value)    ToolEnded(id, Result|Throwable)
 MessageEnded(id, message, usage, finish)                           InputRequested(pending)
@@ -157,6 +217,7 @@ MessageEnded(id, message, usage, finish)                           InputRequeste
 
 `ToolDecided` is emitted on a resume once per decision answered on a call, before the call runs
 again: every `Approval`, whatever its id, and every `Question` declined with `Decision::deny()`.
+The inline-answering idiom (below) emits none: the run never saw a pause.
 
 | class | `type` | class | `type` |
 | --- | --- | --- | --- |
@@ -167,7 +228,8 @@ again: every `Approval`, whatever its id, and every `Question` declined with `De
 | `MessageStarted` | `message_started` | `ToolProgress` | `tool_progress` |
 | `TextDelta` | `text_delta` | `ToolEnded` | `tool_ended` |
 | `ReasoningDelta` | `reasoning_delta` | `MessageEnded` | `message_ended` |
-| `InputRequested` | `input_requested` | | |
+| `InputRequested` | `input_requested` | `MessageResumed` | `message_resumed` |
+| `Interjected` | `interjected` | | |
 
 ```json
 {"type":"text_delta","turn":1,"parent":null,"id":"msg_ad35d61424070fe4","text":" green"}
@@ -176,6 +238,7 @@ again: every `Approval`, whatever its id, and every `Question` declined with `De
 {"type":"tool_ended","turn":1,"parent":null,"id":"call_9f1a","outcome":{"class":"RuntimeException","message":"disk full"}}
 {"type":"input_requested","turn":1,"parent":null,"pending":[{"call":{"type":"tool_call","id":"call_2ce8","name":"remember","input":{"note":"Favourite colour: green"}},"needs":[{"type":"approval","id":"approval","reason":"Save a note"}],"state":null}]}
 {"type":"turn_ended","turn":1,"parent":null,"reason":"awaiting_input","usage":{"input":396,"output":59,"cacheRead":0,"cacheWrite":0},"error":null,"finish":"tool_calls"}
+{"type":"tool_decided","turn":2,"parent":null,"id":"call_2ce8","needId":"approval","decision":{"allowed":true,"reason":null}}
 ```
 
 Delivery is synchronous: the turn hands each event to the consumer and goes on only when the
@@ -298,7 +361,24 @@ $run = new Run($model, $tools, middleware: [new ApproveWrites()],
 foreach ($run->turn([new Answer($callId, ['approval' => Decision::allow()])]) as $event) { ... }
 ```
 
-[`examples/web.php`](examples/web.php) is this host, one request per invocation.
+[`examples/web.php`](examples/web.php) is this host, one request per invocation. The browser's
+answers nest by call id and then need id, `{"<callId>": {"<needId>": ...}}`, since need ids
+(`approval`) repeat across calls.
+
+After `Failed` the same persistence holds: `messages()` keeps the complete steps, and the user
+message that started the failed step is already in it. A turn starts from a user message, so a
+retry builds the run on the messages before that one and sends it again:
+
+```php
+// After AwaitingInput: answer the pending calls.
+$run = new Run($model, $tools, messages: $messages, pending: $pending);
+$run->turn($answers);
+
+// After Failed (say RateLimited): the last message is the user's, already in $messages.
+$last = $messages[\count($messages) - 1];
+$run  = new Run($model, $tools, messages: \array_slice($messages, 0, -1));
+$run->turn($last);
+```
 
 A host that can answer at once (a CLI) does not end the turn: a middleware placed before (outside)
 the one that asks calls `$next`, and while the call is pending asks the user, answers in place and
@@ -371,7 +451,7 @@ Each is one file, runnable against any Chat Completions endpoint:
 
 ```bash
 export HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert
-php examples/chat.php                       # streamed conversation; Ctrl-C cancels a reply
+php examples/chat.php                       # streamed conversation; Ctrl-C interrupts a reply to edit it, a line typed meanwhile steers it
 php examples/files.php ./project "task"     # file tools; writes need approval on the terminal
 php examples/shell.php ./project "task"     # a shell; every command needs approval
 php examples/subagent.php ./project "question"   # delegates reading to sub-agents, rendered per line
