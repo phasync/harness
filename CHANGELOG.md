@@ -120,6 +120,15 @@
   it no longer fail the fetch (#52).
 - `TurnEnded` is delivered without waiting for the host to ask for a next event, so a generator kept
   open past it no longer deadlocks `fiber\run()` (#53).
+- `web_fetch` decodes every member of a concatenated gzip body; bytes after the last member are
+  ignored, as gzip does (#54).
+- A Chat Completions chunk that gives a seen tool-call index a different function name is a
+  `ModelException` too (#55).
+- A JSON-quoted name is decoded as one segment of a longer path as well, `sub/"evil.txt\nfake.php"` (#56).
+- `Input::number()` refuses an infinite value (#57).
+- A turn's misuse exception is kept by the `Run` and thrown from the iteration after `TurnEnded`, or
+  from the `break` or release of the generator, in or after the run; the turn's task itself never
+  fails, so `fiber\run()` no longer throws it as an unawaited error (#58).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 

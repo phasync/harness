@@ -495,3 +495,49 @@ it('does not fold a second tool call into the first when a chunk reuses the same
     expect(fn () => [...$model->stream(new Prompt(null, [], [], new Options(), live()))])
         ->toThrow(ModelException::class, "changed its id from 'call_A' to 'call_B'");
 }); // #49: one ToolCall named toolA with the invalid input {"x":1}{"y":2}; toolB vanished
+
+/*
+ * Round 10's attack on #49's fix:
+ *
+ * - A later chunk at a seen index repeating the SAME id (Azure and some proxies send the id on
+ *   every chunk, not just the first, unlike OpenAI itself): executed -- `$call['id'] !== $ids[$index]`
+ *   is false when they match, so the guard does not fire; the call reassembles correctly
+ *   (`{"x":1}` from two fragments). Passes, as it must.
+ * - First appearance of an index with an `id` but no `name`: already throws "began without a
+ *   function name" via the existing `?? throw` on the first-appearance branch -- not new.
+ * - `tool_calls` with indices out of order or skipped (`0` then `2`, no `1`): executed -- `$ids` is
+ *   a plain associative array keyed by whatever index appears, with no assumption of contiguity or
+ *   order anywhere (not even in the final `foreach ($ids as $id) yield new ToolCallEnd($id)`, which
+ *   iterates insertion order, not numeric order, and correctness never depends on either). Both
+ *   calls come out distinct and correct. Not a defect.
+ *
+ * - The one that reproduces: #49's guard is `elseif (isset($call['id']) && $call['id'] !==
+ *   $ids[$index])` -- it only ever inspects `id`. `function.name` is read exclusively on the
+ *   *first* appearance of an index (inside the `!isset($ids[$index])` branch) and is never looked
+ *   at again afterwards. A later chunk at a seen index that carries a *different* `function.name`
+ *   but omits `id` entirely -- exactly the shape of every ordinary continuation chunk for a single
+ *   real call (OpenAI itself sends `id` only once, on the call's first chunk, and never repeats
+ *   `name` either) -- sails straight through the `isset($call['id'])` check, which is false, so the
+ *   `elseif` never even runs. This is #49's exact corruption (a second, independently valid tool
+ *   call silently folded into the first, its name discarded, the first call's valid JSON wrecked
+ *   into garbage), reopened by removing one field the fix never looked at.
+ *
+ * Verified directly against the real code (both adapters): `index: 0` first names `toolA` with
+ * valid arguments `{"x":1}`; a second chunk at `index: 0`, with no `id` at all, names `toolB` with
+ * its own valid arguments `{"y":2}`. The result is identical to #49's original bug: one `ToolCall`
+ * named `toolA` whose JSON is now the invalid `{"x":1}{"y":2}`; `toolB` never appears.
+ */
+it('does not fold a second tool call into the first when only its name changes, not its id', function () {
+    $body = 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => ['tool_calls' => [
+        ['index' => 0, 'id' => 'call_A', 'type' => 'function', 'function' => ['name' => 'toolA', 'arguments' => '{"x":1}']],
+    ]], 'finish_reason' => null]]]) . "\n\n"
+          . 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => ['tool_calls' => [
+              ['index' => 0, 'function' => ['name' => 'toolB', 'arguments' => '{"y":2}']],
+          ]], 'finish_reason' => null]]]) . "\n\n"
+          . 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => [], 'finish_reason' => 'tool_calls']]]) . "\n\n"
+          . "data: [DONE]\n\n";
+    $model = new ChatCompletions(new FakeTransport(new Response(200, [], \str_split($body, 23))), 'http://h/v1', 'm');
+
+    expect(fn () => [...$model->stream(new Prompt(null, [], [], new Options(), live()))])
+        ->toThrow(ModelException::class, "changed its name from 'toolA' to 'toolB'");
+}); // #55: #49 checked the id only; a continuation chunk carries none

@@ -20,7 +20,8 @@ use Harness\ToolSpec;
  * from a generic header) and `Accept: text/html,application/xhtml+xml,text/*,application/json`.
  * `text/plain`, `application/json` and other `text/*` replies come back as is; anything else is an
  * error result naming the content type. A gzip or deflate `Content-Encoding` is decoded, any other
- * is an error result. The response body is read up to `maxBytes` (default 5 MB) of decoded bytes
+ * is an error result (a gzip body may hold several members). The response body is read up to
+ * `maxBytes` (default 5 MB) of decoded bytes
  * and then stopped; the extracted text is cut at `maxChars` (default 20000) per call with the
  * files tools' tail idiom (`offset` continues from where the previous call left off). A
  * private-network or non-http(s) URL (`localhost`, `127/8`, `10/8`, `172.16/12`, `192.168/16`,
@@ -168,36 +169,25 @@ final readonly class WebFetch implements Tool
         }
         $type     = \strtolower(\trim(\explode(';', $response->headers['content-type'] ?? '')[0]));
         $encoding = \strtolower(\trim($response->headers['content-encoding'] ?? ''));
-        $inflate  = match ($encoding) {
+        $inflater = match ($encoding) {
             '', 'identity'   => null,
-            'gzip', 'x-gzip' => \inflate_init(\ZLIB_ENCODING_GZIP),
-            'deflate'        => \inflate_init(\ZLIB_ENCODING_DEFLATE),
+            'gzip', 'x-gzip' => new Inflater(\ZLIB_ENCODING_GZIP, $url),
+            'deflate'        => new Inflater(\ZLIB_ENCODING_DEFLATE, $url),
             default          => throw new \RuntimeException("'$url' is sent with Content-Encoding $encoding, which web_fetch cannot decode"),
         };
         $body = '';
         foreach ($response->body() as $chunk) {
             // compressed input is fed in small slices: DEFLATE expands up to ~1000:1, so one whole
             // transport chunk could decode to tens of MB before maxBytes is looked at
-            foreach (null === $inflate ? [$chunk] : \str_split($chunk, 256) as $piece) {
-                $body .= null === $inflate ? $piece : self::inflate($inflate, $piece, $url);
-                if (\strlen($body) >= $this->maxBytes || (null !== $inflate && \ZLIB_STREAM_END === \inflate_get_status($inflate))) {
-                    break 2; // enough, or the compressed member is complete: bytes after it are not fed to the decoder
+            foreach (null === $inflater ? [$chunk] : \str_split($chunk, 256) as $piece) {
+                $body .= null === $inflater ? $piece : $inflater->add($piece);
+                if (\strlen($body) >= $this->maxBytes || (null !== $inflater && $inflater->done())) {
+                    break 2;
                 }
             }
         }
 
         return [$type, \substr($body, 0, $this->maxBytes)];
-    }
-
-    /** The next piece of a compressed body, decoded; a body that does not decode is an error, not text. */
-    private static function inflate(\InflateContext $inflate, string $chunk, string $url): string
-    {
-        \set_error_handler(static fn (int $no, string $message): bool => throw new \RuntimeException("'$url' sends a compressed body that does not decode: $message"));
-        try {
-            return \inflate_add($inflate, $chunk);
-        } finally {
-            \restore_error_handler();
-        }
     }
 
     private function toText(string $contentType, string $body): string

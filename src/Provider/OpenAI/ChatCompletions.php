@@ -63,7 +63,7 @@ final readonly class ChatCompletions implements Model
             throw self::error($response->status, \implode('', [...$response->body()]), $response->headers['retry-after'] ?? null);
         }
 
-        /** @var array<int, string> $ids tool call index => id */
+        /** @var array<int, array{string, string}> $ids tool call index => [id, function name] */
         $ids    = [];
         $finish = null;
         $usage  = null;
@@ -93,7 +93,7 @@ final readonly class ChatCompletions implements Model
                 }
             }
         }
-        foreach ($ids as $id) {
+        foreach ($ids as [$id]) {
             yield new ToolCallEnd($id);
         }
         if (null !== $usage) {
@@ -113,8 +113,8 @@ final readonly class ChatCompletions implements Model
     }
 
     /**
-     * @param array<string, mixed> $delta
-     * @param array<int, string>   $ids
+     * @param array<string, mixed>              $delta
+     * @param array<int, array{string, string}> $ids
      *
      * @return \Generator<int, Delta>
      */
@@ -133,14 +133,17 @@ final readonly class ChatCompletions implements Model
         foreach ($delta['tool_calls'] ?? [] as $call) {
             $index = (int) ($call['index'] ?? 0);
             if (!isset($ids[$index])) {
-                $ids[$index] = $call['id'] ?? ('call_' . \bin2hex(\random_bytes(8)));
-                yield new ToolCallStart($ids[$index], $call['function']['name'] ?? throw new ModelException(ErrorKind::ModelError, "Tool call $index began without a function name"));
-            } elseif (isset($call['id']) && $call['id'] !== $ids[$index]) {
-                throw new ModelException(ErrorKind::ModelError, "Tool call $index changed its id from '{$ids[$index]}' to '{$call['id']}' mid-stream; a second call takes its own index");
+                $name        = $call['function']['name'] ?? throw new ModelException(ErrorKind::ModelError, "Tool call $index began without a function name");
+                $ids[$index] = [$call['id'] ?? ('call_' . \bin2hex(\random_bytes(8))), $name];
+                yield new ToolCallStart($ids[$index][0], $name);
+            } elseif (isset($call['id']) && $call['id'] !== $ids[$index][0]) {
+                throw new ModelException(ErrorKind::ModelError, "Tool call $index changed its id from '{$ids[$index][0]}' to '{$call['id']}' mid-stream; a second call takes its own index");
+            } elseif (isset($call['function']['name']) && $call['function']['name'] !== $ids[$index][1]) {
+                throw new ModelException(ErrorKind::ModelError, "Tool call $index changed its name from '{$ids[$index][1]}' to '{$call['function']['name']}' mid-stream; a second call takes its own index");
             }
             $arguments = $call['function']['arguments'] ?? '';
             if ('' !== $arguments) {
-                yield new ToolInputDelta($ids[$index], $arguments);
+                yield new ToolInputDelta($ids[$index][0], $arguments);
             }
         }
     }

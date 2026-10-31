@@ -49,8 +49,8 @@ final class Input
         if (\is_string($value) && \is_numeric($value)) {
             $value = (float) $value;
         }
-        if (!\is_int($value) && !\is_float($value) || \is_nan($value) || $value <= $min) {
-            throw new Retry("'$key' must be a number" . (-\INF !== $min ? " > $min" : ''));
+        if (!\is_int($value) && !\is_float($value) || !\is_finite($value) || $value <= $min) {
+            throw new Retry("'$key' must be a finite number" . (-\INF !== $min ? " > $min" : ''));
         }
 
         return (float) $value;

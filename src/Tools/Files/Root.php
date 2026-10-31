@@ -22,20 +22,32 @@ final readonly class Root
         $this->path = $real;
     }
 
+    /** `$text` decoded when it is a JSON string literal naming what `Page::name()` would quote; else as is. */
+    private static function unquote(string $text): string
+    {
+        if (\strlen($text) >= 2 && '"' === $text[0] && '"' === $text[-1]) {
+            $decoded = \json_decode($text);
+            if (\is_string($decoded) && Page::quoted($decoded)) {
+                return $decoded;
+            }
+        }
+
+        return $text;
+    }
+
     /**
      * The absolute path for `$path`, which need not exist yet. A path written as a JSON string
      * literal that decodes to a name `Page::name()` would show that way (one holding a control
-     * character, or wrapped in double quotes) is taken as that name: the exact inverse of how
-     * `list_dir`, `glob` and `grep` show it.
+     * character, or wrapped in double quotes) is taken as that name, whole or as one segment of a
+     * longer path: the exact inverse of how `list_dir`, `glob` and `grep` show it.
      */
     public function resolve(string $path): string
     {
-        if (\strlen($path) >= 2 && '"' === $path[0] && '"' === $path[-1]) {
-            $decoded = \json_decode($path);
-            if (\is_string($decoded) && Page::quoted($decoded)) {
-                $path = $decoded;
-            }
+        $unquoted = self::unquote($path);
+        if ($unquoted === $path && \str_contains($path, '"')) { // not a literal as a whole: maybe one segment is, as composed from a list_dir entry
+            $unquoted = \implode('/', \array_map(self::unquote(...), \explode('/', $path)));
         }
+        $path = $unquoted;
         if (\str_contains($path, "\0")) {
             throw new \RuntimeException('The path contains a NUL byte');
         }

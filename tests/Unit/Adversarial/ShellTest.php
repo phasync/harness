@@ -349,3 +349,37 @@ it('accepts timeout as a numeric string, as Input::int() already does for its ow
 
     expect($r->content[0]->text)->toStartWith('Killed: timed out after 0.3 s');
 }); // #51: a hand-rolled is_int/is_float check gave a Retry for '0.3'
+
+/*
+ * `Input::number()`'s docblock promises "a number", with `$min` as an *exclusive* lower bound
+ * ("so a positive number is `$min = 0`"). It explicitly screens out NaN (`is_nan($value)`) and
+ * anything at or below `$min` -- but nothing screens out positive infinity. `is_numeric('1e400')`
+ * is true (it is syntactically a well-formed number), and `(float) '1e400'` overflows to `INF`,
+ * which is neither NaN nor `<= 0`, so it sails straight through and `Input::number()` returns
+ * `INF` as if it were an ordinary, usable number. The same is true for a raw PHP float `INF`
+ * passed directly (no string involved at all) -- `is_float(INF)` is true, so the type check never
+ * even considers it.
+ *
+ * `Shell::call()`'s own specific use of this happens not to be exploitable, purely by luck of
+ * argument order: `\min(Input::number(...), $this->maxTimeout)` and PHP's `min(INF, $finite)`
+ * returns the finite value. But `Input` is `@internal` shared infrastructure ("reads typed
+ * fields from a tool's input"), not a Shell-only helper, and nothing in its own contract makes
+ * that caller-side `min()` a requirement -- a different field on a different tool (a retry count,
+ * a sleep duration, a byte limit, anything that does not separately clamp its result) would take
+ * `Input::number($input, 'n', 1.0)` at its word that the return is a well-formed, finite number,
+ * and hang or loop forever on a model-supplied `"1e400"`. #43 (this same round-trip) already
+ * established that an infinite `timeout` is exactly the kind of value this codebase considers
+ * invalid enough to reject outright at the `Shell` constructor; `Input::number()`, the shared
+ * validator meant to produce exactly these numbers safely, does not hold its *own* output to that
+ * standard.
+ *
+ * Verified directly: `Input::number(['n' => '1e400'], 'n', 1.0)` and
+ * `Input::number(['n' => \INF], 'n', 1.0)` both return `INF` instead of throwing `Retry`.
+ */
+it('rejects an infinite number, not just NaN, the same way it already screens its own output', function (string|float $value) {
+    // Today: is_nan(INF) is false and INF > 0 (or > any finite $min), so this returns INF instead
+    // of throwing -- the one check this function exists to make (give back a usable number) is
+    // not actually made for the one non-finite value is_nan() does not catch.
+    expect(fn () => Harness\Tools\Input::number(['n' => $value], 'n', 1.0))
+        ->toThrow(Harness\Retry::class, 'finite');
+})->with(['1e400', \INF]); // #57: only NaN and values below the minimum were screened

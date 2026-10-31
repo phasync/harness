@@ -228,3 +228,30 @@ it('lists a name wrapped in double quotes as a JSON literal so its pass-back is 
     $result = (new ReadFile($this->root))->call(['path' => $shown], callFor());
     expect($result->content[0]->text)->toContain('FILE A CONTENT');
 }); // #50: shown plainly, and passing that back resolved to a + newline + b
+
+/*
+ * Round 10, the partial-path question. `glob` and `grep` wrap the WHOLE relative path in one
+ * `Page::name()` call, so a control character anywhere in it quotes the entire string and
+ * `Root::resolve()`'s whole-string check (`$path[0]` and `$path[-1]` both `"`) decodes it back
+ * correctly. `list_dir`, though, lists one directory's immediate children as bare basenames --
+ * `ListDir::call()` does `Page::name($name) . (is_dir(...) ? '/' : '')` on just the name, with no
+ * directory prefix. For a file inside a subdirectory, the only way a model can turn that basename
+ * into a root-relative `path` for `read_file`/`edit_file` is to prepend the directory itself
+ * (`list_dir`'s own `path` input is relative to the root, not to what it lists), e.g.
+ * `'sub/' . $basename`. When the basename needed quoting, that composition puts the directory
+ * prefix *before* the opening quote, so `resolve()`'s check (the first character of the whole
+ * string) never fires -- the quoted literal `list_dir` showed cannot be reached at all once it's
+ * inside a subdirectory, and the resulting "does not exist" says nothing about why.
+ */
+it('resolves a directory-prefixed path composed from list_dir\'s quoted basename', function () {
+    \mkdir($this->dir . '/sub');
+    \file_put_contents($this->dir . '/sub/' . "evil.txt\nfake.php", "secret in sub\n");
+    $basename = \trim((new ListDir($this->root))->call(['path' => 'sub'], callFor())->content[0]->text);
+    expect($basename)->toBe('"evil.txt\nfake.php"');
+
+    // BUG: today this throws "'sub/"evil.txt\nfake.php"' does not exist" -- composing the
+    // directory with the quoted basename list_dir showed (the only way to reach a file in a
+    // subdirectory whose name has a control character) does not resolve.
+    $result = (new ReadFile($this->root))->call(['path' => 'sub/' . $basename], callFor());
+    expect($result->content[0]->text)->toContain('secret in sub');
+}); // #56: only a whole-path literal was decoded; sub/"..." was 'does not exist'

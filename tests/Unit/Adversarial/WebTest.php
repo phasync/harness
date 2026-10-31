@@ -324,3 +324,44 @@ it('does not fail a perfectly decodable gzip body because of trailing bytes afte
     // comes only from the 300 trailing 'G' bytes landing in their own 256-byte slice.
     expect($text)->toBe($plain);
 }); // #52: trailing bytes alone in a slice were a 'data error'
+
+/*
+ * The #52 fix stops reading the moment `\inflate_get_status($inflate) === \ZLIB_STREAM_END`,
+ * so that bytes after the first gzip member's end are never fed to the decoder -- which correctly
+ * fixed trailing garbage, but goes too far: RFC 1952 (the gzip format WebFetch's own docblock
+ * promises to decode) explicitly allows a body to be several independent gzip MEMBERS
+ * concatenated back to back, each to be decoded and their outputs concatenated in order -- this is
+ * exactly what `cat a.gz b.gz > c.gz; gunzip c.gz` relies on, and some servers (streaming gzip
+ * encoders in particular) produce responses shaped this way. WebFetch's docblock says a gzip
+ * `Content-Encoding` "is decoded" with no caveat about multiple members. `fetch()` now `break 2`s
+ * out of the whole read loop as soon as the FIRST member ends, so a second (or third, ...)
+ * member in the same legal, standard gzip body is silently never decoded at all -- not an error,
+ * just quietly missing content.
+ */
+it('decodes every member of a concatenated multi-member gzip body, not just the first', function () {
+    // RFC 1952 ss2: a gzip body may be several independent members end to end; a correct decoder
+    // concatenates the output of each.
+    $body = \gzencode('Hello, ', 9) . \gzencode('World!', 9);
+
+    $text = \fiber\run(function () use ($body) {
+        $server = \stream_socket_server('tcp://127.0.0.1:0');
+        $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+        go(function () use ($server, $body) {
+            $conn    = \stream_socket_accept(readable($server), 0);
+            $request = '';
+            while (!\str_contains($request, "\r\n\r\n")) {
+                $request .= \fread(readable($conn), 65536);
+            }
+            \fwrite(writable($conn), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: " . \strlen($body) . "\r\n\r\n" . $body);
+            \fclose($conn);
+            \fclose($server);
+        });
+        $fetch = new WebFetch(new StreamTransport(), 'agent', allowPrivate: true);
+
+        return $fetch->call(['url' => "http://127.0.0.1:$port/"], TestCall::make())->content[0]->text;
+    });
+
+    // Today: $text is just "Hello, " -- the second member ("World!") is silently dropped, with
+    // no error and no indication that anything is missing.
+    expect($text)->toBe('Hello, World!');
+}); // #54: the read ended at the first member

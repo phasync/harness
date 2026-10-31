@@ -77,9 +77,9 @@ fiber the adapter did not create (a Swerve worker, a queue worker's job), and re
 everything started inside it has finished. The turn runs in its own coroutine, a new `\Scope`
 and its own `fiber\run()`, so it ends with everything it started finished. A `\LogicException` (misuse, such as
 an option the provider cannot honour), from the model, a middleware or a tool, ends the turn
-`Failed` and is rethrown from the iteration after `TurnEnded`; runtime failures end the turn
-`Failed` and are in `ended()`. The rethrow happens inside the consumer's `foreach`, so wrap the
-loop in `try`, not the code after it:
+`Failed` and is rethrown from the iteration after `TurnEnded` (or from the `break` or release that
+leaves the generator there); runtime failures end the turn `Failed` and are in `ended()`. The
+rethrow happens inside the consumer's `foreach`, so wrap the loop in `try`, not the code after it:
 
 ```php
 try {

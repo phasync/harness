@@ -500,3 +500,61 @@ it('does not deadlock fiber\run() when the generator is held open past TurnEnded
     expect($timedOut)->toBeFalse()
         ->and(\trim($out))->toBe('DONE');
 }); // #53: TurnEnded was pushed synchronously; the task waited for a next() that never came
+
+/*
+ * Round 10: attacking #53 from the angle it explicitly opened up. `turn()`'s docblock now reads:
+ * "Once TurnEnded is out the turn's work is done: the generator may be kept and finished later."
+ * -- holding the generator across TurnEnded, then finishing it later (not necessarily inside the
+ * same fiber\run() call), is the documented, supported pattern #53 made safe from deadlocking.
+ *
+ * But #53 also made `TurnEnded` pushed with `wait: false`, so the turn's background task runs to
+ * completion (and, for a failed turn, fails) immediately, without the host ever having asked for
+ * a next event -- before the host's own code even resumes from the `yield`. Nobody calls
+ * `await($task)` for that already-finished, already-failed task unless the generator is actually
+ * destroyed (the `finally`'s `if ($event instanceof TurnEnded && null !== current()) { await($task);
+ * }`, round 9's fix). If the host does exactly what the docblock now invites -- breaks at
+ * TurnEnded, holds the generator in a variable to finish "later" -- and that "later" is after the
+ * CURRENT `fiber\run()` call's closure has already returned (the generator still alive, just not
+ * touched again yet), the task is left unawaited for the rest of that `fiber\run()` call. Nothing
+ * in `turn()`'s docblock or the README's "rethrown from the iteration after TurnEnded, or from
+ * the break that leaves the loop there" says what happens then -- and what happens is that
+ * `fiber\run()` itself throws the turn's `\LogicException`, as an unawaited task failure, past a
+ * try/catch the host wrapped around the very code that iterates and holds the generator.
+ *
+ * This is the same externally-visible symptom as #47 (fixed in round 8: the exception escaping
+ * past fiber\run() instead of surfacing from the turn's own iteration/break), reached through a
+ * different door: not by abandoning the generator, but by doing precisely what the docblock now
+ * recommends -- keeping it to finish later.
+ *
+ * Verified directly against the real code with both adapters: breaking at TurnEnded of a turn
+ * that failed with `UnsupportedOptionException`, holding the generator in a variable and letting
+ * the enclosing `fiber\run()` closure return without touching it again, makes `fiber\run()` throw
+ * that exception -- not the try/catch inside the closure that did the holding.
+ */
+it('does not let fiber\run() throw a held turn\'s exception before the host finishes it', function () {
+    $model = new FakeModel(static function () {
+        throw new UnsupportedOptionException('no temperature here');
+    });
+    $run         = new Harness\Run($model, new Tools());
+    $gen         = null;
+    $caughtOuter = null;
+
+    try {
+        \fiber\run(function () use ($run, &$gen) {
+            $gen = $run->turn(new Message(Role::User, [new Text('go')]));
+            foreach ($gen as $e) {
+                if ($e instanceof Harness\Event\TurnEnded) {
+                    break;  // hold $gen to finish later, as the docblock allows
+                }
+            }
+        });
+    } catch (Throwable $ex) {
+        $caughtOuter = $ex;
+    }
+
+    // fiber\run() returns normally; the exception is the host's when it lets the generator go.
+    expect($caughtOuter)->toBeNull()
+        ->and(function () use (&$gen) {
+            $gen = null;
+        })->toThrow(UnsupportedOptionException::class);
+}); // #58: fiber\run() threw it as an unawaited task error

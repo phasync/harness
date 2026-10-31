@@ -25,7 +25,8 @@ lines past `maxLineLength` are cut with a marker. `glob` and `grep` skip `.git` 
 symlinked directories; `grep` skips binary files and says how many, and `read_file`, `edit_file` and
 `apply_patch` refuse one by name. A file name holding a control character (a newline, say), or one
 wrapped in double quotes, is listed as a JSON string literal, `"evil.txt\nfake.php"`, so it stays one
-entry and reads back unambiguously; every tool takes that literal back as its `path` (a plain name
+entry and reads back unambiguously; every tool takes that literal back as its `path`, alone or as one
+segment of a longer path such as `sub/"evil.txt\nfake.php"` (a plain name
 that happens to be wrapped in double quotes is read as a literal too, so such a file is always
 addressed by its listed form).
 

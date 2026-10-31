@@ -54,10 +54,11 @@ final class Run
     /** @var list<\Closure(Step): bool> */
     private readonly array $stop;
     private readonly LoggerInterface $log;
-    private int $turns         = 0;
-    private bool $running      = false;
-    private bool $open         = false; // a turn() generator exists that has not finished or been released
-    private bool $cancelled    = false;
+    private int $turns               = 0;
+    private bool $running            = false;
+    private bool $open               = false; // a turn() generator exists that has not finished or been released
+    private ?\LogicException $misuse = null; // the last turn's misuse exception, until turn() has thrown it
+    private bool $cancelled          = false;
     private Accumulator $shadow;
     private bool $interrupted  = false;
     /** The interrupted reply, as delivered when the turn's model stream stopped. */
@@ -152,9 +153,10 @@ final class Run
      * inside `fiber\run()`. Delivery is synchronous: the turn goes on after an event only once the
      * consumer asks for the next one. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`,
-     * or from the `break` that leaves the loop there. Once `TurnEnded` is out the turn's work is done:
-     * the generator may be kept and finished later. The next turn may start once it has finished or
-     * been released: not from inside the `TurnEnded` handler.
+     * or from the `break` or release that leaves the generator there, in or after the run. Once
+     * `TurnEnded` is out the turn's work is done: the generator may be kept and finished later. A
+     * turn left before `TurnEnded` is cancelled and keeps no exception. The next turn may start once
+     * the generator has finished or been released: not from inside the `TurnEnded` handler.
      *
      * @param Message|Resume|list<Answer> $input
      *
@@ -171,6 +173,7 @@ final class Run
         $answers             = $this->checkInput($input);
         $this->running       = true;
         $this->open          = true;
+        $this->misuse        = null;
         $this->cancelled     = false;
         $this->interrupted   = false;
         $this->partial       = null;
@@ -199,21 +202,39 @@ final class Run
             $this->open    = false;
             throw $e;
         }
-        $event = null;
+        $event    = null;
+        $finished = false;
         try {
             while (($event = $queue->next()) !== null) {
                 yield $event;
             }
             await($task);
+            $finished = true;
+            $this->rethrow();
         } finally {
             $this->open = false;
             if (!$queue->isClosed()) {
                 $this->cancel();
             }
             $queue->detach();
-            if ($event instanceof TurnEnded && null !== current()) {
-                await($task); // the host left the loop at TurnEnded: a misuse exception still surfaces here, not from fiber\run()
+            if ($event instanceof TurnEnded && !$finished) {
+                // the host left the loop at TurnEnded: the turn's misuse exception surfaces from the
+                // break or the release, inside a run or after it, never from fiber\run() itself
+                if (null !== current()) {
+                    await($task);
+                }
+                $this->rethrow();
             }
+        }
+    }
+
+    /** Throws the last turn's misuse exception, once. */
+    private function rethrow(): void
+    {
+        $misuse = $this->misuse;
+        if (null !== $misuse) {
+            $this->misuse = null;
+            throw $misuse;
         }
     }
 
@@ -529,10 +550,8 @@ final class Run
             $emit(new InputRequested($turn, $parent, $pending));
         }
         $this->running = false; // over before the host sees TurnEnded: ended() works in its handler, interject() throws
+        $this->misuse  = $error instanceof \LogicException ? $error : null; // thrown by turn() once the host is past TurnEnded
         $queue->push(new TurnEnded($turn, $parent, $reason, $usage, $kind, $finish), wait: false); // the host may keep the generator: nothing waits on it
-        if ($error instanceof \LogicException) {
-            throw $error;
-        }
     }
 
     /**
