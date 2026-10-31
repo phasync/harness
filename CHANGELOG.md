@@ -195,7 +195,9 @@
   PHP's warning escape first (#101).
 - `McpServer::tools()` throws an `McpException` when two server tools become the same tool name
   once characters a name cannot hold are replaced (`search.web` and `search_web`) or the name is cut
-  at 64, instead of handing out both and letting a name-keyed map keep one (#96).
+  at 64, instead of handing out both and letting a name-keyed map keep one (#96); a tool whose
+  `inputSchema` is not an object schema is an `McpException` naming it, not `ToolSpec`'s
+  `InvalidArgumentException` (#103).
 - `Run`: the turn's state is set at the `turn()` call, so `isRunning()` is true, `cancel()` and
   `interrupt()` take effect and `interject()` lands before the generator's first iteration, as the
   docblock says; a generator dropped before its first iteration frees the Run (#97).

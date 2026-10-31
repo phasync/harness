@@ -17,7 +17,8 @@ use Harness\ToolSpec;
  * when the list may have changed.
  *
  * Tool names get `$prefix`, and characters a `ToolSpec` name cannot hold become `_`; calls use the
- * server's own name, and two server tools whose names become the same are an `McpException`.
+ * server's own name, and two server tools whose names become the same are an `McpException`, as is
+ * a tool whose `inputSchema` is not an object schema (MCP requires one).
  * `annotations` become `Hints` with MCP's defaults (`destructiveHint` and
  * `openWorldHint` true unless the server says otherwise). A tool whose `x-mcp-header` annotations
  * are invalid is left out, as the spec requires. The client declares form elicitation only.
@@ -123,8 +124,12 @@ final class McpServer implements ToolSource
         $a        = $tool['annotations'] ?? [];
         $readOnly = (bool) ($a['readOnlyHint'] ?? false);
         $name     = \substr((string) \preg_replace('/[^a-zA-Z0-9_-]/', '_', $this->prefix . $tool['name']), 0, 64);
+        $schema   = $tool['inputSchema'] ?? ['type' => 'object'];
+        if (($schema['type'] ?? null) !== 'object') {
+            throw new McpException("The MCP server's tool '{$tool['name']}' has an input schema without \"type\": \"object\" at the top (" . \implode(', ', \array_keys((array) $schema)) . '); MCP requires an object schema, so a oneOf or $ref belongs inside its properties');
+        }
 
-        return new ToolSpec($name, (string) ($tool['description'] ?? $tool['title'] ?? ''), $tool['inputSchema'] ?? ['type' => 'object'], new Hints(
+        return new ToolSpec($name, (string) ($tool['description'] ?? $tool['title'] ?? ''), $schema, new Hints(
             readOnly: $readOnly,
             destructive: !$readOnly && (bool) ($a['destructiveHint'] ?? true),
             idempotent: (bool) ($a['idempotentHint'] ?? false),

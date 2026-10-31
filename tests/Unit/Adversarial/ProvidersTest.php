@@ -1166,4 +1166,4 @@ it('reports a non-object input schema (oneOf/$ref) as an McpException, not a raw
     // an instance of McpException -- this module's own documented exception type.
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class);
-})->group('bug'); // a oneOf/$ref inputSchema kills tools() with the wrong exception type, taking every other tool down with it
+}); // #103: ToolSpec's InvalidArgumentException, naming no server, left Harness\Mcp

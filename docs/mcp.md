@@ -24,7 +24,9 @@ step and a server whose tools change shows the change once its TTL lapses.
 
 - Names: `$prefix` plus the server's name, with characters a `ToolSpec` cannot hold as `_` (`files.read`
   becomes `files_read`); the call uses the server's own name. Two server tools whose names become the
-  same (`search.web` and `search_web`) are an `McpException`: their calls could not be told apart.
+  same (`search.web` and `search_web`) are an `McpException`: their calls could not be told apart. So is
+  a tool whose `inputSchema` has no `"type": "object"` at the top (a `oneOf` or `$ref` there): MCP
+  requires an object schema.
 - `annotations` → `Hints`, with MCP's defaults: `destructiveHint` and `openWorldHint` are true unless
   the server says otherwise, so a policy keyed on `destructive` treats an unannotated tool as
   destructive. `readOnlyHint: true` forces `destructive` false, whatever `destructiveHint` says.
