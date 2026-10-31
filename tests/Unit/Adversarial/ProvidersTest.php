@@ -1251,4 +1251,4 @@ it('reports a tool with no name as an McpException, not a raw InvalidArgumentExc
     // 1-64 characters..."), naming no server and not mentioning that `name` was simply absent.
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class);
-})->group('bug'); // the tools() loop never checks a tool has a name before using it
+}); // #108: ToolSpec's InvalidArgumentException for the empty name left Harness\Mcp

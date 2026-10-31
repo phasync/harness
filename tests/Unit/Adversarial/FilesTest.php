@@ -632,7 +632,7 @@ it('names a path Journal::undo() cannot write back, keeps it recorded, and leaks
  * gets its turn, violating docs/files.md's explicit promise that "a path it cannot restore... does
  * not stop the others."
  */
-it('lets an unreadable path poison undo() with a TypeError that aborts every path still queued behind it', function () {
+it('refuses a change to a file the Journal cannot read, and undo() still restores the others', function () {
     \file_put_contents($this->dir . '/good.txt', "GOOD_ORIGINAL\n");
     \file_put_contents($this->dir . '/bad.txt', "BAD_ORIGINAL\n");
     $journal = new Journal();
@@ -648,16 +648,16 @@ it('lets an unreadable path poison undo() with a TypeError that aborts every pat
         return true;
     });
     try {
-        $w->call(['path' => 'bad.txt', 'content' => 'CHANGED_BAD'], callFor());
-    } catch (RuntimeException) {
-        // bad.txt's own write also fails (no write permission either); record() already ran
+        expect(fn () => $w->call(['path' => 'bad.txt', 'content' => 'CHANGED_BAD'], callFor()))
+            ->toThrow(RuntimeException::class, "Could not read '{$this->dir}/bad.txt': Permission denied");
     } finally {
         \restore_error_handler();
+        \chmod($this->dir . '/bad.txt', 0644);
     }
 
-    expect($warnings)->toBe([]) // #105 closed this leak for undo()'s side; record() still has it
-        ->and(fn () => $journal->undo())->toThrow(TypeError::class) // not the documented RuntimeException
-        ->and(\file_get_contents($this->dir . '/good.txt'))->toBe('CHANGED_GOOD'); // never reached: "the others" were stopped
-
-    \chmod($this->dir . '/bad.txt', 0644);
-})->group('bug');
+    expect($warnings)->toBe([])
+        ->and($journal->changed())->toBe([$this->dir . '/good.txt']) // nothing recorded for a change that was refused
+        ->and($journal->undo())->toBe([$this->dir . '/good.txt'])
+        ->and(\file_get_contents($this->dir . '/good.txt'))->toBe("GOOD_ORIGINAL\n")
+        ->and(\file_get_contents($this->dir . '/bad.txt'))->toBe("BAD_ORIGINAL\n");
+}); // #109: record() stored false and leaked the warning; undo() died with a TypeError before good.txt

@@ -19,13 +19,16 @@ final class Journal
     /** @var list<string> absolute paths, in the order they were first recorded */
     private array $order = [];
 
-    /** @internal called by a Files tool before it writes or deletes `$abs`; a path already recorded keeps its first state. */
+    /**
+     * @internal called by a Files tool before it writes or deletes `$abs`; a path already recorded keeps its first state.
+     * A file that cannot be read is a `\RuntimeException` (`Could not read ...`): the tool then refuses a change it could not undo.
+     */
     public function record(string $abs): void
     {
         if (\array_key_exists($abs, $this->before)) {
             return;
         }
-        $this->before[$abs] = \is_file($abs) ? \file_get_contents($abs) : null;
+        $this->before[$abs] = \is_file($abs) ? Fs::read($abs, "'$abs'") : null;
         $this->order[]      = $abs;
     }
 

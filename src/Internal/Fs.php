@@ -22,6 +22,21 @@ final class Fs
         }
     }
 
+    public static function read(string $abs, string $label): string
+    {
+        $content = null;
+        $reason  = self::try(static function () use ($abs, &$content): bool {
+            $content = \file_get_contents($abs);
+
+            return false !== $content;
+        });
+        if (null !== $reason) {
+            throw new \RuntimeException("Could not read $label: $reason");
+        }
+
+        return (string) $content;
+    }
+
     public static function write(string $abs, string $content, string $label): void
     {
         $reason = self::try(static fn (): bool => false !== \file_put_contents($abs, $content));

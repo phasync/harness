@@ -195,13 +195,16 @@
   PHP's warning escape first (#101). `Journal::undo()` restores through the same path: a path it
   cannot restore does not stop the others, stays recorded for another `undo()` and is named in the
   `RuntimeException` that follows, instead of a warning and a return value listing it as restored
-  (#105).
+  (#105). `Journal::record()` of a file it cannot read throws `Could not read 'x': Permission denied`,
+  so the tool refuses a change it could not undo, instead of a warning, `false` stored as the
+  original and a `TypeError` from `undo()` that stopped the paths behind it (#109).
 - `McpServer::tools()` throws an `McpException` when two server tools become the same tool name
   once characters a name cannot hold are replaced (`search.web` and `search_web`) or the name is cut
   at 64, instead of handing out both and letting a name-keyed map keep one (#96); a tool whose
   `inputSchema` is not an object schema is an `McpException` naming it, not `ToolSpec`'s
   `InvalidArgumentException` (#103); an `inputSchema` that is not a JSON object the same, not a
-  `TypeError` from inside the client (#106).
+  `TypeError` from inside the client (#106); a tools/list entry that is not an object, or a tool
+  without a string name, the same (#108).
 - `Run`: the turn's state is set at the `turn()` call, so `isRunning()` is true, `cancel()` and
   `interrupt()` take effect and `interject()` lands before the generator's first iteration, as the
   docblock says; a generator dropped before its first iteration frees the Run (#97).

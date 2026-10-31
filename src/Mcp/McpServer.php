@@ -59,6 +59,12 @@ final class McpServer implements ToolSource
                 }
                 $seen[$cursor ?? ''] = true;
                 foreach ($page['tools'] ?? [] as $tool) {
+                    if (!\is_array($tool)) {
+                        throw new McpException("The MCP server's tools/list has an entry that is not a JSON object (" . \get_debug_type($tool) . ')');
+                    }
+                    if (!\is_string($tool['name'] ?? null) || '' === $tool['name']) {
+                        throw new McpException("The MCP server's tools/list has a tool without a name (" . (isset($tool['name']) ? 'its name is ' . \get_debug_type($tool['name']) : 'keys: ' . \implode(', ', \array_keys($tool))) . '); MCP requires a string name');
+                    }
                     if (isset($tool['inputSchema']) && !\is_array($tool['inputSchema'])) {
                         throw new McpException("The MCP server's tool '{$tool['name']}' has an inputSchema that is not a JSON object (" . \get_debug_type($tool['inputSchema']) . '); MCP requires an object schema');
                     }
