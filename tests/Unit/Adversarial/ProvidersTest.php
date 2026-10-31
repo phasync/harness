@@ -271,3 +271,56 @@ it('does not replay a tool_use whose preceding thinking block was dropped as uns
     expect($stream)->toThrow(UnsupportedContentException::class)
         ->and($t->requests)->toBe([]);
 }); // #31: the tool_use went out without its thinking block
+
+/*
+ * Round 6's attack on #31's fix: an unsigned `thinking` block followed only by `Text` (no
+ * `ToolCall`) -- `assistant()` drops the block and keeps the text, no exception. Verified directly:
+ * this is correct, not a regression -- Anthropic requires a preserved thinking block only ahead of
+ * a `tool_use` in that turn (what #31 already covers); a text-only continuation has no such
+ * requirement. Also verified: a `redacted_thinking` block (type `redacted_thinking`, carrying
+ * `data`, never `signature`) is never caught by the `'thinking' === $block['type'] && '' ===
+ * $block['signature']` check, because the type comparison alone already excludes it -- it is kept
+ * (with any following tool_use) exactly as it should be. Neither hypothesis held up; this module's
+ * actual next defect is in `Mcp\McpServer`, below.
+ *
+ * `McpServer::tools()` (src/Mcp/McpServer.php) pages `tools/list` with:
+ *   do { $page = $this->request('tools/list', ...); $cursor = $page['nextCursor'] ?? null; ... }
+ *   while (null !== $cursor);
+ * There is no check that `$cursor` actually changed between pages, and no cap on how many pages it
+ * will fetch. A server with a pagination bug -- or one that is simply slow/misbehaving under load --
+ * that keeps handing back the same `nextCursor` it just gave out (instead of `null` once there is no
+ * more data) makes this loop run forever: every iteration re-requests the identical page and gets
+ * the identical non-null cursor back, with no way out. This is the "hang" category this module's
+ * charter names explicitly, and it is reachable from any `Run` step that reads an `McpServer`'s
+ * tools (`tools()` is called every step to refresh an expired cache) -- one misbehaving MCP server
+ * stalls the whole turn indefinitely, not just that one `tools/list` call.
+ *
+ * Verified directly against the real code (both adapters): a `Connection` stub that answers every
+ * `tools/list` with the exact same `nextCursor` is called over and over with no sign of stopping --
+ * bounded here at 50 calls only so the test itself terminates; nothing in `McpServer` would have
+ * stopped it on its own.
+ */
+it('does not keep paging tools/list forever when the cursor never advances', function () {
+    $conn = new class implements Connection {
+        public int $calls = 0;
+
+        public function request(string $method, array $params, Cancel $cancel, ?Closure $notify = null, array $headers = []): array
+        {
+            if ('server/discover' === $method) {
+                return ['supportedVersions' => [McpServer::VERSION]];
+            }
+            if (++$this->calls > 50) {
+                // Not a real protection in the code under test -- only so this test terminates.
+                throw new RuntimeException("tools/list was called {$this->calls} times with the same cursor; tools() never noticed and never stopped");
+            }
+
+            // A server bug: every page claims the very same next page exists, forever.
+            return ['tools' => [], 'nextCursor' => 'same-cursor-forever', 'ttlMs' => 60000];
+        }
+    };
+    $server = new McpServer($conn);
+
+    // Today: tools() keeps requesting the identical cursor past any reasonable bound; there is no
+    // McpException raised about the server's pagination never advancing, and no cap on page count.
+    expect(fn () => $server->tools())->not->toThrow(RuntimeException::class, 'never noticed and never stopped');
+})->group('bug');

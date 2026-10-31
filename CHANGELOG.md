@@ -85,6 +85,8 @@
   carried over to the next chunk (#32).
 - `edit_file` and `apply_patch` refuse a binary file with `read_file`'s message instead of quoting its
   bytes in a not-found error (#33).
+- `web_search`: a hit's title, URL and snippet are collapsed to one line each, so a newline a page
+  put in its title cannot forge an extra numbered result (#34).
 
 ### Changed (breaking)
 

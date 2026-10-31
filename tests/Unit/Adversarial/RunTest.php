@@ -12,6 +12,7 @@ use Harness\Delta\ToolInputDelta;
 use Harness\ErrorKind;
 use Harness\FinishReason;
 use Harness\Hints;
+use Harness\Message;
 use Harness\ModelMiddleware;
 use Harness\Prompt;
 use Harness\Reason;
@@ -231,3 +232,56 @@ it('still blames the model when a middleware would have repaired its malformed s
     expect($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->errorKind)->toBe(ErrorKind::ModelError);
 });
+
+/*
+ * Round 6: `interject()` called while the host is handling the turn's own `TurnEnded` event.
+ *
+ * `isRunning()`'s docblock: "True from turn() until the turn's last event, TurnEnded, was
+ * handled: while it is, cancel(), interrupt() and interject() have an effect". `Run::loop()`
+ * only sets `$this->running = false` AFTER emitting `TurnEnded` (`$emit(new TurnEnded(...));
+ * $this->running = false;`), so during the window the consumer's `foreach` body spends handling
+ * that event, `isRunning()` is still true, exactly as documented -- `interject()` does not throw.
+ *
+ * But by that point `$this->ended` was already built, a few lines earlier, from the *old*
+ * `$this->steer`/`$this->queue` ("`$this->ended = new Ended(..., [...$this->steer,
+ * ...$this->queue]); $this->steer = []; $this->queue = [];`") -- both already reset to `[]`
+ * before `TurnEnded` is even emitted. So a message handed to `interject()` during `TurnEnded`'s
+ * handling is appended to the now-empty `$this->steer`/`$this->queue`, which nothing will ever
+ * read again: not this turn (it is done looping), not `$ended->queued` (already frozen), and not
+ * the next turn (`turn()` resets `$this->steer`/`$this->queue` to `[]` again at the top). The
+ * call succeeds silently -- no exception -- and the message is gone for good.
+ *
+ * This breaks `interject()`'s own documented guarantee: "Those that cannot land before the turn
+ * ends ... are in Ended::$queued, steered ones first." A message that cannot land and is absent
+ * from `Ended::$queued` is exactly the case the docblock says cannot happen.
+ *
+ * Verified directly against the real code with both adapters: interjecting a Queue message from
+ * inside the `if ($e instanceof TurnEnded)` branch of the consuming foreach does not throw, and
+ * `$run->ended()->queued` is empty afterwards -- the message is silently lost.
+ */
+it('does not silently lose a message interjected while handling TurnEnded', function () {
+    $model = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
+    $run   = new Harness\Run($model, new Tools());
+    $lost  = new Message(Role::User, [new Text('lost message')]);
+    $threw = null;
+
+    \fiber\run(function () use ($run, $lost, &$threw) {
+        foreach ($run->turn(new Message(Role::User, [new Text('go')])) as $e) {
+            if ($e instanceof Harness\Event\TurnEnded) {
+                try {
+                    $run->interject($lost, Delivery::Queue);
+                } catch (Throwable $ex) {
+                    $threw = $ex;
+                }
+            }
+        }
+    });
+
+    // Today: interject() does not throw (isRunning() is still true, as its own docblock promises
+    // during TurnEnded's handling), yet the message lands neither in a new turn nor in
+    // ended()->queued: it is simply gone, contradicting interject()'s "cannot land ... in
+    // Ended::$queued" guarantee. Either outcome keeps that guarantee: interject() throws once
+    // TurnEnded has been built (the turn has nothing left to hand the message to), or the message
+    // is still accounted for in queued.
+    expect($threw instanceof LogicException || [] !== $run->ended()->queued)->toBeTrue();
+})->group('bug');
