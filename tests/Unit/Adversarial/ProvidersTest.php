@@ -911,10 +911,8 @@ it('does not merge two assistant turns together when the user turn between them 
         . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n",
         23,
     )));
-    [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(null, $msgs, [], new Options(), live()))];
-    $sent = \json_decode($t->requests[0]['body'], true);
-
-    // Today: 2 messages -- the two separate assistant turns were glued into one, tool_use and
-    // all, with no tool_result ever sent for it.
-    expect($sent['messages'])->toHaveCount(3);
-})->group('bug');
+    // Two replies in a row are not one reply: the API cannot take them, so this fails before the request.
+    expect(fn () => [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(null, $msgs, [], new Options(), live()))])
+        ->toThrow(UnsupportedContentException::class, 'Two assistant messages in a row')
+        ->and($t->requests)->toBe([]);
+}); // #86: merged into one assistant message with a tool_use and no tool_result

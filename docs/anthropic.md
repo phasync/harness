@@ -19,7 +19,9 @@ $model = new Messages(
   becomes one Reasoning part whose `raw['blocks']` holds the blocks verbatim (with signatures; a block
   cut off before its signature arrived is dropped on replay, since the API rejects it). They
   are replayed unchanged to the same model and dropped for another.
-- Consecutive user messages are merged into one turn, tool results first, as the API requires.
+- Consecutive user messages are merged into one turn, tool results first, as the API requires; two
+  assistant messages in a row (the user message between them had nothing sendable) are an
+  `UnsupportedContentException`.
   `ToolResult` maps to `tool_result` with `is_error`; images (PNG, JPEG, GIF, WebP) map to `image`,
   PDF and plain text to `document`, inline or by URL.
 - `stop_reason`: `end_turn`/`stop_sequence` → Stop, `tool_use` → ToolCalls,

@@ -289,11 +289,12 @@ final readonly class Messages implements Model
             }
             $last = \array_key_last($out);
             if (null !== $last && $out[$last]['role'] === $role) {
-                $merged = \array_merge($out[$last]['content'], $content);
-                if ('user' === $role) {
-                    // Tool results must open the user turn.
-                    \usort($merged, static fn (array $a, array $b) => ('tool_result' === $b['type']) <=> ('tool_result' === $a['type']));
+                if ('assistant' === $role) { // two replies in a row are not one reply: the host's prompt, or the user turn between them, is empty
+                    throw new UnsupportedContentException('Two assistant messages in a row; the Messages API alternates user and assistant turns, and nothing of the user message between them was sendable');
                 }
+                $merged = \array_merge($out[$last]['content'], $content);
+                // Tool results must open the user turn.
+                \usort($merged, static fn (array $a, array $b) => ('tool_result' === $b['type']) <=> ('tool_result' === $a['type']));
                 $out[$last]['content'] = $merged;
             } else {
                 $out[] = ['role' => $role, 'content' => $content];

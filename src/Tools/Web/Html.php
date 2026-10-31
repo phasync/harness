@@ -13,7 +13,7 @@ namespace Harness\Tools\Web;
  * separated by a blank line; `li` becomes a `"- "` line (a list is one block, its items one per
  * line, a nested list's items on their own lines indented two spaces under the parent item); `a` becomes `"text (url)"`
  * only when the link text differs from the URL; `pre` is kept verbatim; a table becomes one row
- * per line, its cells joined with `" | "`; everything else has its whitespace collapsed to single
+ * per line, its cells joined with `" | "` (a nested table's rows on their own lines inside the cell); everything else has its whitespace collapsed to single
  * spaces and entities decoded (both by the DOM parser).
  */
 final class Html
@@ -136,6 +136,8 @@ final class Html
                     $out .= "\0n\0i" . \str_replace("\n", "\0n\0i", $item);
                 }
                 $out .= "\0n";
+            } elseif ('table' === $tag) { // a nested table: its rows on their own lines inside the cell
+                $out .= "\0n" . \str_replace("\n", "\0n", self::table($child)) . "\0n";
             } elseif ('pre' === $tag) { // kept verbatim: spliced back in after the collapse, on its own lines
                 $verbatim[] = \rtrim($child->textContent, "\n");
                 $out .= "\0n\0v\0n";
@@ -157,6 +159,11 @@ final class Html
     {
         $rows = [];
         foreach ($table->getElementsByTagName('tr') as $tr) {
+            for ($up = $tr->parentNode; $up instanceof \DOMElement && 'table' !== \strtolower($up->tagName); $up = $up->parentNode) {
+            }
+            if ($up !== $table) {
+                continue; // a nested table's row: rendered inside its cell, not as a row of this one
+            }
             $cells = [];
             foreach ($tr->childNodes as $cell) {
                 if ($cell instanceof \DOMElement && \in_array(\strtolower($cell->tagName), ['td', 'th'], true)) {

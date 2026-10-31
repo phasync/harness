@@ -166,6 +166,12 @@
 - Chat Completions skips an assistant message that maps to nothing (reasoning stamped for another
   model) instead of sending an empty one, as the other providers do (#82); Anthropic leaves out
   empty text parts, which the API rejects (#83).
+- `web_fetch` renders a nested table inside its cell instead of counting its rows as the outer
+  table's (#84).
+- `read_file` returns a file as an image only when its first bytes say so, not on the extension
+  alone (#85).
+- Anthropic no longer glues two assistant turns into one when the user turn between them had
+  nothing sendable; that is an `UnsupportedContentException` (#86).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

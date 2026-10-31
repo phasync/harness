@@ -499,3 +499,59 @@ it('reports every byte of output as progress even when the final text is cut, an
         ->and($sum)->toBe($digits) // but progress alone reconstructs the whole, uncut output
         ->and($sum)->not->toContain('bytes cut'); // and the marker text is a Result-only artifact
 }); // regression: round 13 found no new defect; this pins the progress/cut independence it checked
+
+/*
+ * Round 14 attacked a `timeout` input small enough that the deadline can pass before `bash` has
+ * even started: `call()`'s kill path, once the main read loop decides the deadline is past, does
+ * `posix_kill(-$status['pid'], 9)` exactly once, then only falls back to trying again once
+ * `\microtime(true) > $deadline + 1.0`. `$status['pid']` is the pid `proc_open()` itself spawned
+ * -- `setsid`, on Linux -- and `posix_kill()` with a negative pid signals the whole process
+ * *group* `setsid` becomes the leader of once it calls `setsid()`, right before it `exec`s
+ * `bash`. That `setsid()` call, the `exec`, and `bash`'s own startup all take real, if usually
+ * tiny, wall-clock time; nothing in `call()` waits for any of it before deciding the deadline is
+ * past and trying to kill.
+ *
+ * When `timeout` is small enough that the deadline check fires before `setsid()` has run, the
+ * target process group does not exist yet: the kill is a silent no-op (ESRCH, "No such
+ * process"), and -- since nothing retries it until a full extra second has gone by -- the command
+ * keeps running, genuinely unkilled, for up to that whole extra second. This is a real kernel
+ * scheduling race, not a one-off fluke of one tiny number: verified directly, with debug
+ * instrumentation copying `call()`'s own kill logic line for line, that `posix_kill()` returns
+ * `false` with `errno` `ESRCH` precisely when this happens, and separately, across repeated
+ * single-call trials of `timeout: 0.001` against `sleep 3` on this (ordinarily busy, multi-user)
+ * machine, that it is hit on roughly a quarter to two-thirds of trials, never 0% and never 100%,
+ * under both adapters -- exactly the signature of a race rather than a deterministic outcome.
+ * docs/shell.md promises "[t]he call ends when the shell exits, times out or the run is
+ * cancelled", not "within an extra second of whichever of those is true", so a host relying on
+ * that promise to bound how long a call can run gets a surprise roughly half the time it uses a
+ * very small timeout.
+ *
+ * Also attacked per this round's suggestions, and found already correct: Policy\Shell::check()
+ * on a trailing `&` (parsed and matched like `;`, so an allowed command followed by `&` is still
+ * Allow -- correct, since the shell tool itself kills the whole process group at the end of the
+ * call regardless of backgrounding); `cmd1 ; cmd2` and `cmd1 || rm -rf /` where one command is
+ * denied (Deny always wins: `check()` returns on the first denied simple command it reaches,
+ * whichever side of whichever operator it is on); a line that is only whitespace or only a `#`
+ * comment (`parse()` returns no commands, so `check()` returns `Ask` -- "the shell command is
+ * empty" -- never `Allow`); a here-doc (`parse()` rejects `<<` outright as unparseable before it
+ * ever reaches the body, so a denied word inside the body cannot cause a `Deny`, and the command
+ * is `Ask`, never silently `Allow`ed); `FOO=$(rm -rf /) ls` (the unquoted `$` makes the whole line
+ * unparseable -- `Ask` -- before the environment-assignment check is ever reached). A NUL byte in
+ * a command's output is also safe: NUL is valid UTF-8 (U+0000), so `Utf8::scrub()` leaves it
+ * alone, and `json_encode()` on the resulting `Result` text (containing a literal `"\0"`) works
+ * fine, producing `"\u0000"` -- no violated promise there either.
+ */
+it('kills a command promptly even for a timeout small enough to race the setsid startup', function () {
+    // Today: roughly a quarter to two-thirds of trials hit the race and take ~1.0-1.03 s instead
+    // of a few ms, because the first process-group kill silently failed (ESRCH) and nothing
+    // retried it before the deadline + 1.0 s fallback. 25 independent trials make a false pass
+    // (every one happening to land in the lucky, non-racing case) astronomically unlikely.
+    for ($i = 0; $i < 25; ++$i) {
+        $start   = \microtime(true);
+        $r       = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir()))->call(['command' => 'sleep 3', 'timeout' => 0.001], callFor()));
+        $elapsed = \microtime(true) - $start;
+
+        expect($elapsed)->toBeLessThan(0.5) // comfortably above the 0.001 s timeout, comfortably below the ~1 s raced fallback
+            ->and($r->content[0]->text)->toStartWith('Killed: timed out after 0.001 s');
+    }
+})->group('bug');

@@ -23,6 +23,18 @@ final readonly class ReadFile implements Tool
 {
     private const IMAGES = ['png' => 'image/png', 'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'gif' => 'image/gif', 'webp' => 'image/webp'];
 
+    /** The image type the first bytes announce, or null. */
+    private static function magic(string $bytes): ?string
+    {
+        return match (true) {
+            \str_starts_with($bytes, "\x89PNG")                                            => 'image/png',
+            \str_starts_with($bytes, "\xFF\xD8\xFF")                                       => 'image/jpeg',
+            \str_starts_with($bytes, 'GIF87a') || \str_starts_with($bytes, 'GIF89a')       => 'image/gif',
+            \str_starts_with($bytes, 'RIFF') && 'WEBP' === \substr($bytes, 8, 4)           => 'image/webp',
+            default                                                                        => null,
+        };
+    }
+
     public function __construct(private Root $root, private int $limit = 2000, private int $maxLineLength = 2000)
     {
     }
@@ -57,7 +69,7 @@ final readonly class ReadFile implements Tool
             throw new \RuntimeException("'$path' could not be read");
         }
         $mime = self::IMAGES[\strtolower(\pathinfo($abs, \PATHINFO_EXTENSION))] ?? null;
-        if (null !== $mime) {
+        if (null !== $mime && self::magic($bytes) === $mime) { // the bytes decide: a .png holding text is read as text
             return new Result([new Media($mime, $bytes)], meta: ['bytes' => \strlen($bytes)]);
         }
         if (\str_contains(\substr($bytes, 0, 8192), "\0")) {

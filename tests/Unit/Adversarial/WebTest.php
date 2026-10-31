@@ -522,4 +522,4 @@ it('does not count a nested table\'s rows as rows of the outer table', function 
     // Today: the output has THREE lines, not two -- the nested table's single row ("Inner-1 |
     // Inner-2") is appended again as a spurious extra row of the outer table.
     expect(\substr_count(Html::extract($html), "\n"))->toBe(1);
-})->group('bug');
+}); // #84: getElementsByTagName('tr') reached into the nested table

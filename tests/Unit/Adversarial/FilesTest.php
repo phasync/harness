@@ -439,4 +439,4 @@ it('does not report a .png file as an image when its content is plain text', fun
     // ReadFile trusts the extension alone and never checks the content against real PNG magic
     // bytes, so a provider asked to decode this as an image will fail on perfectly good text.
     expect($result->content[0])->toBeInstanceOf(Harness\Part\Text::class);
-})->group('bug');
+}); // #85: the extension alone decided
