@@ -79,6 +79,7 @@ final readonly class Messages implements Model
         $reasoning = [];
         $usage     = new Usage();
         $stop      = null;
+        $called    = false;
         foreach (Sse::parse($response->body()) as $event => $data) {
             $e = \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
             switch ($event) {
@@ -94,6 +95,7 @@ final readonly class Messages implements Model
                     }
                     if ('tool_use' === $block['type']) {
                         $blocks[$e['index']]['id'] = $block['id'];
+                        $called                    = true;
                         yield new ToolCallStart($block['id'], $block['name']);
                     } elseif ('thinking' === $block['type']) {
                         $blocks[$e['index']] += ['thinking' => '', 'signature' => ''];
@@ -145,6 +147,9 @@ final readonly class Messages implements Model
                 case 'error':
                     throw self::error($e['error'], 200, null);
                 case 'message_stop':
+                    if ('tool_use' === $stop && !$called) {
+                        throw new ModelException(ErrorKind::ModelError, 'The reply ended with stop_reason tool_use but holds no tool_use block');
+                    }
                     yield new Finish(match ($stop) {
                         'end_turn', 'stop_sequence'                   => FinishReason::Stop,
                         'tool_use'                                    => FinishReason::ToolCalls,

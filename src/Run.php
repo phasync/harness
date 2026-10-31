@@ -55,6 +55,7 @@ final class Run
     private readonly LoggerInterface $log;
     private int $turns         = 0;
     private bool $running      = false;
+    private bool $open         = false; // a turn() generator exists that has not finished or been released
     private bool $cancelled    = false;
     private Accumulator $shadow;
     private bool $interrupted  = false;
@@ -150,6 +151,8 @@ final class Run
      * inside `fiber\run()`. Delivery is synchronous: the turn goes on after an event only once the
      * consumer asks for the next one. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`.
+     * The next turn may start once this generator has finished or been released: not from inside
+     * the `TurnEnded` handler.
      *
      * @param Message|Resume|list<Answer> $input
      *
@@ -160,8 +163,12 @@ final class Run
         if ($this->running) {
             throw new \LogicException('A turn is already running on this Run; finish iterating it first');
         }
+        if ($this->open) {
+            throw new \LogicException("The previous turn's generator is still open; exhaust it (TurnEnded is its last event, a misuse exception follows) or release it before starting a new turn");
+        }
         $answers             = $this->checkInput($input);
         $this->running       = true;
+        $this->open          = true;
         $this->cancelled     = false;
         $this->interrupted   = false;
         $this->partial       = null;
@@ -187,6 +194,7 @@ final class Run
         } catch (\Throwable $e) {
             // Typically fiber\NotInRunException: the turn never started.
             $this->running = false;
+            $this->open    = false;
             throw $e;
         }
         try {
@@ -195,6 +203,7 @@ final class Run
             }
             await($task);
         } finally {
+            $this->open = false;
             if (!$queue->isClosed()) {
                 $this->cancel();
             }

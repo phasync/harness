@@ -93,6 +93,14 @@
   tightening it (#37).
 - A file name holding a control character no longer forges extra entries in `list_dir`, `glob` and
   `grep` output: it is shown as a JSON string literal, one line that still names the file (#38).
+- An Anthropic reply ending `stop_reason: tool_use` with no `tool_use` block is a `ModelException`
+  instead of a `Finish(ToolCalls)` that calls nothing (#39).
+- A shell rule whose program name holds whitespace (`Shell::deny('rm ')`) is refused at construction;
+  it could never match and left the command at `Ask` (#40).
+- `turn()` throws while the previous turn's generator is still open, so a turn cannot be started
+  from inside the `TurnEnded` handler and have the earlier turn's misuse exception surface after it (#41).
+- `web_fetch` decodes a gzip or deflate `Content-Encoding` instead of handing the compressed bytes to
+  the model as text; any other encoding is an error result. Requires ext-zlib (#42).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 

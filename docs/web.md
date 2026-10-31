@@ -38,8 +38,9 @@ blank line, renders a list as one `"- "` line per item (a nested list's items in
 differs from the URL, keeps `pre`/`code` verbatim, renders a table as one row per line with cells
 joined by `" | "`, and otherwise collapses whitespace and decodes entities. `text/plain`,
 `application/json` and other `text/*` replies come back as is; anything else is an error result
-naming the content type (`web_fetch does not read <type>; only text`). The response body is read
-up to `maxBytes` (default 5 MB) and then stopped; the extracted text is cut at `maxChars` (default
+naming the content type (`web_fetch does not read <type>; only text`). A gzip or deflate
+`Content-Encoding` is decoded; any other is an error result. The response body is read up to
+`maxBytes` (default 5 MB) of decoded bytes and then stopped; the extracted text is cut at `maxChars` (default
 20000) per call with the files tools' tail idiom, `offset` continuing from where the previous call
 left off.
 

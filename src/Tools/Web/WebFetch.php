@@ -19,7 +19,8 @@ use Harness\ToolSpec;
  * (required, with no default, so a site being fetched can identify the agent instead of guessing
  * from a generic header) and `Accept: text/html,application/xhtml+xml,text/*,application/json`.
  * `text/plain`, `application/json` and other `text/*` replies come back as is; anything else is an
- * error result naming the content type. The response body is read up to `maxBytes` (default 5 MB)
+ * error result naming the content type. A gzip or deflate `Content-Encoding` is decoded, any other
+ * is an error result. The response body is read up to `maxBytes` (default 5 MB) of decoded bytes
  * and then stopped; the extracted text is cut at `maxChars` (default 20000) per call with the
  * files tools' tail idiom (`offset` continues from where the previous call left off). A
  * private-network or non-http(s) URL (`localhost`, `127/8`, `10/8`, `172.16/12`, `192.168/16`,
@@ -166,15 +167,33 @@ final readonly class WebFetch implements Tool
             $url = $target;
         }
         $type     = \strtolower(\trim(\explode(';', $response->headers['content-type'] ?? '')[0]));
-        $body     = '';
+        $encoding = \strtolower(\trim($response->headers['content-encoding'] ?? ''));
+        $inflate  = match ($encoding) {
+            '', 'identity'   => null,
+            'gzip', 'x-gzip' => \inflate_init(\ZLIB_ENCODING_GZIP),
+            'deflate'        => \inflate_init(\ZLIB_ENCODING_DEFLATE),
+            default          => throw new \RuntimeException("'$url' is sent with Content-Encoding $encoding, which web_fetch cannot decode"),
+        };
+        $body = '';
         foreach ($response->body() as $chunk) {
-            $body .= $chunk;
+            $body .= null === $inflate ? $chunk : self::inflate($inflate, $chunk, $url);
             if (\strlen($body) >= $this->maxBytes) {
                 break;
             }
         }
 
         return [$type, \substr($body, 0, $this->maxBytes)];
+    }
+
+    /** The next piece of a compressed body, decoded; a body that does not decode is an error, not text. */
+    private static function inflate(\InflateContext $inflate, string $chunk, string $url): string
+    {
+        \set_error_handler(static fn (int $no, string $message): bool => throw new \RuntimeException("'$url' sends a compressed body that does not decode: $message"));
+        try {
+            return \inflate_add($inflate, $chunk);
+        } finally {
+            \restore_error_handler();
+        }
     }
 
     private function toText(string $contentType, string $body): string

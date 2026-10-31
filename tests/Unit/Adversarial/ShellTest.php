@@ -271,5 +271,5 @@ it('refuses a shell rule program name with whitespace, which could never match a
     // Today: this constructs fine, and the rule silently never matches anything -- a deny rule
     // for 'rm ' (one trailing space) never denies `rm`, degrading to whatever $otherwise is.
     expect(fn () => Shell::deny('rm '))
-        ->toThrow(InvalidArgumentException::class);
-})->group('bug');
+        ->toThrow(InvalidArgumentException::class, 'whitespace');
+}); // #40: constructed fine and matched nothing, so 'rm -rf /' was Ask

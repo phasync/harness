@@ -379,6 +379,7 @@ it('does not report ToolCalls when stop_reason says tool_use but no tool_use blo
         [...$model->stream(new Prompt(null, [], [], new Options(), live()))];
         $this->fail('no exception');
     } catch (ModelException $e) {
-        expect($e->kind)->toBe(ErrorKind::ModelError);
+        expect($e->kind)->toBe(ErrorKind::ModelError)
+            ->and($e->getMessage())->toContain('no tool_use block');
     }
-})->group('bug');
+}); // #39: Finish(ToolCalls) with no tool call in the stream

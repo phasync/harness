@@ -32,8 +32,8 @@ final readonly class Shell
         public ?array $subcommands,
         public ?array $flags,
     ) {
-        if ('' === $program || \str_contains($program, '/')) {
-            throw new \InvalidArgumentException("A shell rule names a program by its name, without a path, got '$program'");
+        if ('' === $program || \str_contains($program, '/') || 1 === \preg_match('/\s/', $program)) {
+            throw new \InvalidArgumentException("A shell rule names a program by its name, without a path or whitespace, got '$program'");
         }
         foreach ([...$subcommands ?? [], ...$flags ?? []] as $word) {
             if (!\is_string($word) || '' === $word) {
