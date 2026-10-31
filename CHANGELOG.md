@@ -192,12 +192,16 @@
   directory the same. Every other failing filesystem write (`mkdir()`, `file_put_contents()`,
   `unlink()` in `write_file`, `edit_file`, `apply_patch` and the `web_fetch` cache) throws with
   the OS's reason (`Could not create the directory for 'x': Permission denied`) instead of letting
-  PHP's warning escape first (#101).
+  PHP's warning escape first (#101). `Journal::undo()` restores through the same path: a path it
+  cannot restore does not stop the others, stays recorded for another `undo()` and is named in the
+  `RuntimeException` that follows, instead of a warning and a return value listing it as restored
+  (#105).
 - `McpServer::tools()` throws an `McpException` when two server tools become the same tool name
   once characters a name cannot hold are replaced (`search.web` and `search_web`) or the name is cut
   at 64, instead of handing out both and letting a name-keyed map keep one (#96); a tool whose
   `inputSchema` is not an object schema is an `McpException` naming it, not `ToolSpec`'s
-  `InvalidArgumentException` (#103).
+  `InvalidArgumentException` (#103); an `inputSchema` that is not a JSON object the same, not a
+  `TypeError` from inside the client (#106).
 - `Run`: the turn's state is set at the `turn()` call, so `isRunning()` is true, `cancel()` and
   `interrupt()` take effect and `interject()` lands before the generator's first iteration, as the
   docblock says; a generator dropped before its first iteration frees the Run (#97).
@@ -205,7 +209,8 @@
   charset>` in an HTML page's first 1024 bytes, instead of letting libxml guess (a Latin-1 page's
   bytes were taken as UTF-8); a charset mbstring does not know is an error result (#98). A leading
   byte-order mark names the encoding and is stripped, outranking a wrong header (#100); the meta
-  prescan skips HTML comments (#102).
+  prescan skips HTML comments (#102); a declared `iso-8859-1`, `latin1` or `us-ascii` is read as
+  windows-1252, as browsers do, so cp1252's quotes and dashes do not vanish as C1 controls (#104).
 - `shell` widens the cut past `maxOutput` to the line boundaries the kept parts have, so the
   `[N bytes cut]` marker sits between real lines and one unbroken line gets it inline, instead of
   wrapping the marker in two line breaks the output never had (#99).

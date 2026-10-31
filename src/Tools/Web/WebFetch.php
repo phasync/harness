@@ -24,7 +24,8 @@ use Harness\ToolSpec;
  * is an error result (a gzip body may hold several members). The body is converted to UTF-8 from
  * a leading byte-order mark (which outranks a wrong header, as in browsers), else the `charset` of
  * `Content-Type`, else a `<meta charset>` in an HTML page's first 1024 bytes (where the HTML
- * prescan looks), else it is taken as UTF-8; a charset mbstring does not know is an error result. The response body is read up to
+ * prescan looks), else it is taken as UTF-8; a charset mbstring does not know is an error result.
+ * A declared `iso-8859-1` (or `latin1`, `us-ascii`, ...) is read as windows-1252, as browsers do. The response body is read up to
  * `maxBytes` (default 5 MB) of decoded bytes
  * and then stopped; the extracted text is cut at `maxChars` (default 20000) per call with the
  * files tools' tail idiom (`offset` continues from where the previous call left off). A
@@ -35,6 +36,9 @@ use Harness\ToolSpec;
  */
 final readonly class WebFetch implements Tool
 {
+    /** Charset labels the WHATWG Encoding standard maps to windows-1252. */
+    private const LATIN1_LABELS = ['iso-8859-1', 'iso8859-1', 'iso_8859-1', 'iso_8859-1:1987', 'iso-ir-100', 'latin1', 'l1', 'cp819', 'ibm819', 'csisolatin1', 'us-ascii', 'ascii', 'ansi_x3.4-1968', 'cp1252', 'x-cp1252'];
+
     /** IPv4 networks treated as private. */
     private const PRIVATE_NETS_V4 = [['0.0.0.0', 8], ['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['169.254.0.0', 16]];
 
@@ -225,6 +229,9 @@ final readonly class WebFetch implements Tool
             if (1 === \preg_match('/<meta[^>]*charset\s*=\s*["\']?\s*([a-z0-9._:-]+)/i', $window, $m)) {
                 $charset = \strtolower($m[1]);
             }
+        }
+        if (\in_array($charset, self::LATIN1_LABELS, true)) {
+            $charset = 'windows-1252'; // the Encoding standard's alias: pages declare Latin-1 and send cp1252's quotes and dashes
         }
         if ('' !== $charset && 'utf-8' !== $charset && 'utf8' !== $charset) {
             try {

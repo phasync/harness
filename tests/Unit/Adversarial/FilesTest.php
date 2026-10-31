@@ -566,3 +566,49 @@ it('does not leak a native PHP warning from mkdir() when a directory ancestor is
     expect($warnings)->toBe([])
         ->and($e->getMessage())->toBe("Could not create the directory for 'readonly/sub/x.txt': Permission denied");
 }); // #101: "mkdir(): Permission denied" escaped as a warning; now it is the error's reason
+
+/*
+ * Round 21: every write/delete path write_file, edit_file and apply_patch use now goes through
+ * `Harness\Internal\Fs`, which turns a failed `mkdir()`/`file_put_contents()`/`unlink()` into a
+ * clean `RuntimeException` and never lets the native PHP warning escape. `Journal::undo()` was
+ * never touched by that refactor -- it still calls `\file_put_contents($abs, $original)` and
+ * `\unlink($abs)` directly, with no error handler and no check of the return value.
+ *
+ * Recorded here with a real failure, not a hypothesis: journal a `write_file` that changes a
+ * file, then make that file read-only before calling `undo()`. Two things go wrong at once:
+ *   - `file_put_contents()` inside `undo()` fails and its native warning
+ *     ("file_put_contents(...): Failed to open stream: Permission denied") escapes uncaught --
+ *     exactly the class of leak #95/#101 closed for write_file/edit_file/apply_patch, still open
+ *     here.
+ *   - `undo()`'s docblock promises `@return list<string> the paths restored`, but the return
+ *     value includes this path regardless of whether the restore actually happened: the file's
+ *     content is still the CHANGED value, not the original, while `undo()` reports it as
+ *     restored -- a documented promise the code does not keep.
+ */
+it('names a path Journal::undo() cannot write back, keeps it recorded, and leaks no PHP warning', function () {
+    \file_put_contents($this->dir . '/a.txt', "ORIGINAL\n");
+    $journal = new Journal();
+    $w       = new WriteFile($this->root, journal: $journal);
+    $w->call(['path' => 'a.txt', 'content' => 'CHANGED'], callFor());
+
+    \chmod($this->dir . '/a.txt', 0444); // the file itself, not its directory, so undo()'s write fails
+
+    $warnings = [];
+    \set_error_handler(function (int $errno, string $message) use (&$warnings): bool {
+        $warnings[] = $message;
+
+        return true;
+    });
+    try {
+        expect(fn () => $journal->undo())->toThrow(RuntimeException::class, "Could not write '{$this->dir}/a.txt': Permission denied");
+    } finally {
+        \restore_error_handler();
+        \chmod($this->dir . '/a.txt', 0644);
+    }
+
+    expect($warnings)->toBe([])
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe('CHANGED')
+        ->and($journal->changed())->toBe([$this->dir . '/a.txt']) // kept for another undo()
+        ->and($journal->undo())->toBe([$this->dir . '/a.txt'])
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("ORIGINAL\n");
+}); // #105: the warning escaped and the path was returned as restored while it held CHANGED

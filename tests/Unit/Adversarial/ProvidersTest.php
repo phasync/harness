@@ -1167,3 +1167,45 @@ it('reports a non-object input schema (oneOf/$ref) as an McpException, not a raw
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class);
 }); // #103: ToolSpec's InvalidArgumentException, naming no server, left Harness\Mcp
+
+/*
+ * Round 22, attacking #103's fix once more: that fix (McpServer::spec(), src/Mcp/McpServer.php:127)
+ * checks `($schema['type'] ?? null) !== 'object'` on `$schema = $tool['inputSchema'] ?? ['type' =>
+ * 'object']` and throws a named `McpException` -- but `spec()` is only reached for a tool that
+ * first passes `headerPaths()` (src/Mcp/McpServer.php:61):
+ *   $headers = self::headerPaths($tool['inputSchema'] ?? []);
+ * `headerPaths()` is declared `private static function headerPaths(array $schema, ...)` -- a typed
+ * parameter, and this file has `declare(strict_types=1)`. The `?? []` only substitutes when
+ * `inputSchema` is missing or null; a server that sends `inputSchema` present but the *wrong JSON
+ * type* (a string, say -- not an object, not an array) sends it straight into `headerPaths()`
+ * unchanged, which throws a raw `\TypeError` naming the internal method and argument position --
+ * not `McpException`, not even the same kind of mistake #103 was fixed for, just one call earlier
+ * in the same `foreach`. The blast radius is identical to #103's: this throw is inside the
+ * `foreach` with no per-tool try/catch, so one tool with a malformed `inputSchema` aborts
+ * `tools()` entirely, taking every other, well-formed tool from that server down with it.
+ *
+ * Verified directly against the real code (both adapters): an MCP server listing one tool with
+ * `inputSchema: "not-an-array"` makes `McpServer::tools()` throw
+ * `TypeError('Harness\Mcp\McpServer::headerPaths(): Argument #1 ($schema) must be of type array,
+ * string given, ...')` -- a raw internal TypeError, not `McpException`.
+ */
+it('reports a non-array input schema as an McpException, not a raw internal TypeError', function () {
+    $conn = new class implements Connection {
+        public function request(string $method, array $params, Cancel $cancel, ?Closure $notify = null, array $headers = []): array
+        {
+            if ('server/discover' === $method) {
+                return ['supportedVersions' => [McpServer::VERSION]];
+            }
+
+            return ['tools' => [
+                ['name' => 'bad', 'description' => 'Sends the wrong JSON type', 'inputSchema' => 'not-an-array'],
+            ], 'ttlMs' => 60000];
+        }
+    };
+    $server = new McpServer($conn);
+
+    // Today: a raw \TypeError out of headerPaths(), naming no server and not caught as McpException
+    // -- the same information loss and whole-server blast radius #103 was fixed for, one call earlier.
+    expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
+        ->toThrow(McpException::class);
+}); // #106: a TypeError from headerPaths() left Harness\Mcp // headerPaths() runs before spec()'s type check and has no type-mismatch guard of its own

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Harness\Tools\Files;
 
+use Harness\Internal\Fs;
+
 /**
  * A record of the first content (or absence) of every absolute path `WriteFile`, `EditFile` and
  * `ApplyPatch` change, for undoing a turn's, or a session's, writes. The host decides the scope: a
@@ -29,26 +31,38 @@ final class Journal
 
     /**
      * Restores every recorded path to its first recorded state, in reverse order: a path that did
-     * not exist is deleted, one that did gets its original content back.
+     * not exist is deleted, one that did gets its original content back. A path that cannot be
+     * restored (made read-only since) does not stop the others; it stays recorded for another
+     * `undo()`, and a `\RuntimeException` naming every such path follows the rest.
      *
      * @return list<string> the paths restored
      */
     public function undo(): array
     {
-        $paths = \array_reverse($this->order);
-        foreach ($paths as $abs) {
+        $restored = [];
+        $failed   = [];
+        foreach (\array_reverse($this->order) as $abs) {
             $original = $this->before[$abs];
-            if (null === $original) {
-                if (\is_file($abs)) {
-                    \unlink($abs);
+            try {
+                if (null === $original) {
+                    if (\is_file($abs)) {
+                        Fs::unlink($abs, "'$abs'");
+                    }
+                } else {
+                    Fs::write($abs, $original, "'$abs'");
                 }
-            } else {
-                \file_put_contents($abs, $original);
+                $restored[] = $abs;
+            } catch (\RuntimeException $e) {
+                $failed[$abs] = $e->getMessage();
             }
         }
-        $this->clear();
+        $this->before = \array_intersect_key($this->before, $failed);
+        $this->order  = \array_values(\array_filter($this->order, static fn (string $abs): bool => isset($failed[$abs])));
+        if ([] !== $failed) {
+            throw new \RuntimeException('Journal::undo() could not restore every path: ' . \implode('; ', $failed) . '. These stay recorded for another undo()');
+        }
 
-        return $paths;
+        return $restored;
     }
 
     /** @return list<string> the absolute paths recorded so far */

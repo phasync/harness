@@ -40,7 +40,7 @@ final class Fs
 
     /**
      * Runs `$op` with its warning captured: null when it succeeded, else the warning's text without
-     * the function name (`Permission denied`), or `failed` when it failed silently.
+     * the function name and stream preamble (`Permission denied`), or `failed` when it failed silently.
      *
      * @param \Closure(): bool $op
      */
@@ -48,7 +48,7 @@ final class Fs
     {
         $reason = null;
         \set_error_handler(static function (int $no, string $message) use (&$reason): bool {
-            $reason = \preg_replace('/^\w+\(\): /', '', $message) ?? $message;
+            $reason = \preg_replace('/^\w+\(.*?\): (Failed to open stream: )?/', '', $message) ?? $message; // "mkdir(): " or "file_put_contents(/x): Failed to open stream: " go
 
             return true;
         });

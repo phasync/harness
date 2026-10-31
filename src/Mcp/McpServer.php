@@ -59,6 +59,9 @@ final class McpServer implements ToolSource
                 }
                 $seen[$cursor ?? ''] = true;
                 foreach ($page['tools'] ?? [] as $tool) {
+                    if (isset($tool['inputSchema']) && !\is_array($tool['inputSchema'])) {
+                        throw new McpException("The MCP server's tool '{$tool['name']}' has an inputSchema that is not a JSON object (" . \get_debug_type($tool['inputSchema']) . '); MCP requires an object schema');
+                    }
                     $headers = self::headerPaths($tool['inputSchema'] ?? []);
                     if (null !== $headers) {
                         $spec = $this->spec($tool);

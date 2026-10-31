@@ -937,3 +937,71 @@ it('keeps a dropped mid-iteration turn "already running" until its abandoned tas
     }
     expect($texts)->toBe(['one', 'two', 'ab']);
 });
+
+/*
+ * Round 18, the last of this pass: the turn lifecycle (#92/#97) held, so this round moved to parts
+ * of Run/middleware touched least. Six angles were tried; five held correctly:
+ *
+ * - Compact's checkpoint when the summarizer itself returns a ToolCall instead of text, or an
+ *   empty reply: both were already traced in round 14/16 -- the Accumulator builds the ToolCall
+ *   part without complaint, summarize()'s text-only extraction loop treats it as empty text, and
+ *   the existing "returned no text, twice" collapse path (already pinned) covers the failure mode
+ *   identically either way.
+ * - A Resume whose partial holds a complete ToolCall for a tool the Tools source no longer has: on
+ *   continuation the full accumulated message (seed + continued text) still carries that ToolCall,
+ *   so `runCalls()` does try to run it -- but `toolChain()`'s "unknown tool" path (a `Retry`, not a
+ *   crash) already handles exactly this, the same as a model hallucinating a tool name; no new
+ *   defect, just the ordinary unknown-tool path reached a different way.
+ * - A queued (non-steer) interjection landing on the very step a Stop predicate then ends the turn
+ *   on: the message is already appended (StepEnded, then Interjected, both fire before the Stop
+ *   loop runs for that step) before Stop is checked, so it correctly stays in messages() and is not
+ *   duplicated into Ended::$queued -- matching Stop's own docblock ("checked after... one a queued
+ *   message continues").
+ * - A tool's own `go()` coroutine, still running when the tool itself has already returned a
+ *   Result: traced with real timing (a leaked coroutine sleeping 0.2s past the tool's return) --
+ *   TurnEnded was not observed until after the leaked coroutine finished, matching the class
+ *   docblock's promise that a turn's `\Scope` "ends with every coroutine it started finished."
+ * - An Answer list for a resumed AwaitingInput turn with ids given in a different order than
+ *   `$this->pending` lists the calls: `checkInput()`/`runCalls()` match answers to calls by id via
+ *   lookup, never by position, so the order given makes no difference to anything.
+ *
+ * The sixth, pinned here as the roundâ€™s regression: a `ModelMiddleware` whose own code fails
+ * *after* the model's stream already finished -- an after-hook, such as a tracing wrapper whose own
+ * logging throws once `$next()`'s `foreach` is exhausted. The model's reply was entirely valid and
+ * complete (a `Finish` delta was already consumed, the Accumulator's message is whole, real tokens
+ * were spent), but because the failure is still inside the same step before `modelStep()` returns,
+ * the whole step is discarded exactly as `loop()`'s catch block documents for any failure: no
+ * `MessageEnded` is ever emitted for that reply, it never reaches `messages()`, and the step's
+ * token usage never reaches `Ended::$usage` either -- a fully good reply, and its real cost, both
+ * vanish without a trace beyond `Ended::$error`.
+ */
+it('discards a fully completed model reply, and its usage, when middleware throws only after the stream finished', function () {
+    $afterHook = new class implements ModelMiddleware {
+        public function stream(Prompt $prompt, Closure $next): iterable
+        {
+            foreach ($next($prompt) as $delta) {
+                yield $delta; // passes everything through unmodified: the model's reply is fully valid
+            }
+            // The model already finished (Finish was yielded, the message is complete) before this
+            // after-hook -- a tracing/logging middleware whose own code breaks once the stream is done.
+            throw new RuntimeException('after-hook logging failed');
+        }
+    };
+    $model = new FakeModel([new TextDelta('a perfectly good reply'), new Usage(3, 7), new Finish(FinishReason::Stop)]);
+    $run   = new Harness\Run($model, new Tools(), middleware: [$afterHook]);
+
+    $events = [];
+    \fiber\run(function () use ($run, &$events) {
+        foreach ($run->turn(new Message(Role::User, [new Text('go')])) as $e) {
+            $events[] = $e;
+        }
+    });
+
+    $messageEnded = \array_filter($events, static fn ($e) => $e instanceof Harness\Event\MessageEnded);
+    expect($messageEnded)->toBe([])
+        ->and($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError)
+        ->and($run->ended()->usage->input)->toBe(0)
+        ->and($run->ended()->usage->output)->toBe(0)
+        ->and($run->messages())->toHaveCount(1); // only the user message; the reply never landed
+});

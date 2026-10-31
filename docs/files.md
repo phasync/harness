@@ -97,7 +97,9 @@ removed, and for an updated file, the edited region of each hunk as `edit_file` 
 `WriteFile`, `EditFile` and `ApplyPatch` take an optional `?Journal $journal`; when given, each
 records a changed or deleted path's content (or absence) before touching it, the first time that
 path is touched. `Journal::undo(): list<string>` restores every recorded path to that first state,
-in reverse order, and returns the paths; `Journal::changed(): list<string>` lists what has been
+in reverse order, and returns the paths; a path it cannot restore (made read-only since) does not
+stop the others, stays recorded for another `undo()`, and is named in the `RuntimeException` that
+follows; `Journal::changed(): list<string>` lists what has been
 touched so far; `Journal::clear()` drops the record without touching disk. The host decides the
 scope — a fresh `Journal` per turn undoes that turn's writes; one kept for a session undoes
 everything since it was created.

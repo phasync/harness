@@ -650,3 +650,26 @@ it('does not take a meta-charset-looking string inside an HTML comment as the re
     expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
         ->toBe('café');
 }); // #102: the prescan regex read the declaration out of the comment
+
+/*
+ * `toText()` hands a declared `charset=iso-8859-1` straight to `mb_convert_encoding()` as literal
+ * ISO-8859-1. But the WHATWG Encoding Standard -- which every browser follows, and which this
+ * module's own docblock already invokes for the BOM rule ("as in browsers") -- defines the labels
+ * "iso-8859-1", "latin1", "l1", "iso8859-1" and others as aliases for **windows-1252**, not true
+ * ISO 8859-1, precisely because real servers overwhelmingly declare "iso-8859-1" while actually
+ * sending Windows-1252 bytes (curly quotes, dashes, bullets, the trademark sign -- all living in
+ * the 0x80-0x9F range, which true ISO-8859-1 reserves for invisible C1 control codes). Converting
+ * those bytes as literal ISO-8859-1 does not merely pick the wrong visible character: a C1 control
+ * code is not valid for display, so the character disappears from the extracted text entirely --
+ * not "mojibake you could mentally correct", but silently deleted content.
+ */
+it('reads a declared iso-8859-1 charset as windows-1252, as browsers alias it', function () {
+    // 0x92 is cp1252's right single quotation mark ('); as literal ISO-8859-1 it is the C1
+    // control U+0092, which has no visible form and simply vanishes from the output.
+    $body      = "<html><body><p>It\x92s fine</p></body></html>";
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/html; charset=iso-8859-1'], [$body]));
+    $fetch     = new WebFetch($transport, 'agent');
+
+    expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
+        ->toBe("It\u{2019}s fine");
+}); // #104: converted as true Latin-1, 0x92 became a C1 control and vanished
