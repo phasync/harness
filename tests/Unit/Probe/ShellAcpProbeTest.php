@@ -90,3 +90,17 @@ it('preserves partial output when timeout kills command', function () {
 
     expect($r->content[0]->text)->toContain('line');
 });
+
+it('reports correct specification', function () {
+    $shell = new Shell(\sys_get_temp_dir(), timeout: 45.0);
+    $spec  = $shell->spec();
+
+    expect($spec->name)->toBe('shell')
+        ->and($spec->description)->toContain('Default timeout 45')
+        ->and($spec->schema['properties']['command']['type'])->toBe('string')
+        ->and($spec->schema['properties']['timeout']['type'])->toBe('number')
+        ->and($spec->schema['required'])->toBe(['command'])
+        ->and($spec->hints->destructive)->toBeTrue()
+        ->and($spec->hints->openWorld)->toBeTrue()
+        ->and($spec->hints->readOnly)->toBeFalse();
+});

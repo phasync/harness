@@ -142,7 +142,7 @@ final class StreamTransport implements Transport
                     if (false === $done) {
                         throw new TransportException("TLS handshake with $host failed");
                     }
-                    $this->wait(readable(...), $socket, \max(0.0, $deadline - \microtime(true)), "the TLS handshake with $host", $cancel);
+                    $this->wait(readable(...), $socket, \max(0.0, $deadline - \microtime(true)), "in the TLS handshake with $host", $cancel);
                 }
             }
         } catch (\Throwable $e) {

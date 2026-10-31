@@ -136,3 +136,32 @@ it('moves a file to a nested non-existent target directory, creating the path', 
         ->and(\file_get_contents($this->dir . '/deep/nested/subdir/target.txt'))->toBe("original\nmodified\n")
         ->and($result->content[0]->text)->toContain("Moved 'source.txt' to 'deep/nested/subdir/target.txt'");
 });
+
+it('fails the whole patch when an Update File references a missing file, leaving every file untouched', function () {
+    // Tests ApplyPatch.php line 114 (file does not exist check in planUpdate).
+    // Checked against ApplyPatchTest "fails the whole patch when a hunk context is not found,
+    // leaving every file untouched" which tests when a hunk's context cannot be found.
+    // Here we test when the file being updated doesn't exist at all.
+    // The patch must fail atomically: no other section's changes should be written.
+    \file_put_contents($this->dir . '/existing.txt', "keep me\n");
+
+    $patch = <<<'PATCH'
+    *** Begin Patch
+    *** Add File: new.txt
+    +hello
+    *** Update File: missing.txt
+    @@
+     original
+    -content
+    +changed
+    *** End Patch
+    PATCH;
+
+    $apply = new ApplyPatch($this->root);
+    expect(fn () => $apply->call(['patch' => $patch], callFor()))
+        ->toThrow(RuntimeException::class, "'missing.txt' does not exist");
+
+    // The patch must have failed atomically; no new file should have been created
+    expect(\is_file($this->dir . '/new.txt'))->toBeFalse()
+        ->and(\file_get_contents($this->dir . '/existing.txt'))->toBe("keep me\n");
+});

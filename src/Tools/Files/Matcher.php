@@ -6,24 +6,26 @@ namespace Harness\Tools\Files;
 
 /**
  * @internal the tolerant matching cascade shared by `EditFile` and `ApplyPatch`: exact, then
- * line-trimmed, whitespace-normalized, indentation-flexible and block-anchor, each accepted only
- * when it matches exactly once. A level that matches more than once stops the cascade there
- * (`Ambiguous`); one with no match at all falls through to the next. Exhausting every level up to
- * `$maxLevel` returns the closest region by similarity (`NoMatch`).
+ * indentation-flexible, line-trimmed, whitespace-normalized and block-anchor, each accepted only
+ * when it matches exactly once. Each level matches everything the one before it matches and more,
+ * so a level that matches more than once stops the cascade there (`Ambiguous`); one with no match
+ * at all falls through to the next. Exhausting every level up to `$maxLevel` returns the closest
+ * region by similarity (`NoMatch`). Every line-based match carries the common indent of `$old` and
+ * of the matched block, so the caller can re-indent its replacement by the delta.
  */
 final class Matcher
 {
     public const LEVEL_EXACT                 = 1;
-    public const LEVEL_LINE_TRIMMED          = 2;
-    public const LEVEL_WHITESPACE_NORMALIZED = 3;
-    public const LEVEL_INDENTATION_FLEXIBLE  = 4;
+    public const LEVEL_INDENTATION_FLEXIBLE  = 2;
+    public const LEVEL_LINE_TRIMMED          = 3;
+    public const LEVEL_WHITESPACE_NORMALIZED = 4;
     public const LEVEL_BLOCK_ANCHOR          = 5;
 
     /** Human text for "matched with ... on lines A-B", keyed by level; level 1 (exact) needs none. */
     public const DESCRIPTIONS = [
+        self::LEVEL_INDENTATION_FLEXIBLE  => 'different indentation',
         self::LEVEL_LINE_TRIMMED          => 'leading/trailing whitespace differences',
         self::LEVEL_WHITESPACE_NORMALIZED => 'whitespace differences',
-        self::LEVEL_INDENTATION_FLEXIBLE  => 'different indentation',
         self::LEVEL_BLOCK_ANCHOR          => 'a block anchor match (the middle lines differ)',
     ];
 
@@ -46,21 +48,13 @@ final class Matcher
         $oldLines  = \explode("\n", $old);
         $n         = \count($oldLines);
 
-        foreach ([self::LEVEL_LINE_TRIMMED, self::LEVEL_WHITESPACE_NORMALIZED, self::LEVEL_INDENTATION_FLEXIBLE, self::LEVEL_BLOCK_ANCHOR] as $level) {
+        foreach ([self::LEVEL_INDENTATION_FLEXIBLE, self::LEVEL_LINE_TRIMMED, self::LEVEL_WHITESPACE_NORMALIZED, self::LEVEL_BLOCK_ANCHOR] as $level) {
             if ($level > $maxLevel || (self::LEVEL_BLOCK_ANCHOR === $level && $n < 3)) {
                 continue;
             }
             $hits = self::search($fileLines, $oldLines, self::predicate($level));
             if (1 === \count($hits)) {
-                $located = self::window($content, $fileLines, $hits[0], $n, $level);
-                if (self::LEVEL_INDENTATION_FLEXIBLE === $level) {
-                    $window         = \array_slice($fileLines, $hits[0], $n);
-                    $from           = self::commonIndent($oldLines);
-                    $to             = self::commonIndent($window);
-                    $located        = new Located($level, $located->offset, $located->length, $located->startLine, $located->endLine, $located->text, $from, $to);
-                }
-
-                return $located;
+                return self::window($content, $fileLines, $hits[0], $n, $level, self::commonIndent($oldLines));
             }
             if ([] !== $hits) {
                 return new Ambiguous($level, \array_map(static fn (int $i) => $i + 1, $hits));
@@ -124,13 +118,14 @@ final class Matcher
     }
 
     /** A window of `$n` lines of `$fileLines` starting at `$i`, as a `Located` (byte range reconstructed by re-joining). */
-    private static function window(string $content, array $fileLines, int $i, int $n, int $level): Located
+    private static function window(string $content, array $fileLines, int $i, int $n, int $level, string $fromIndent): Located
     {
         $before = \implode("\n", \array_slice($fileLines, 0, $i));
         $offset = \strlen($before) + ($i > 0 ? 1 : 0);
-        $text   = \implode("\n", \array_slice($fileLines, $i, $n));
+        $window = \array_slice($fileLines, $i, $n);
+        $text   = \implode("\n", $window);
 
-        return new Located($level, $offset, \strlen($text), $i + 1, $i + $n, $text);
+        return new Located($level, $offset, \strlen($text), $i + 1, $i + $n, $text, $fromIndent, self::commonIndent($window));
     }
 
     /**

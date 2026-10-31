@@ -5,7 +5,9 @@ declare(strict_types=1);
 use Harness\Http\Response;
 use Harness\Message;
 use Harness\Options;
+use Harness\Part\Media;
 use Harness\Part\Reference;
+use Harness\Part\Text;
 use Harness\Part\ToolCall;
 use Harness\Part\ToolResult;
 use Harness\Prompt;
@@ -74,4 +76,40 @@ it('sends tool_choice with specific tool name when ToolChoice::Tool is set', fun
     // Verify request body contains tool_choice with specific tool name
     $body = \json_decode($t->requests[0]['body'], true);
     expect($body['tool_choice'])->toBe(['type' => 'function', 'name' => 'read']);
+});
+
+it('sends a user message with Media as input_image with data URL in request body', function () {
+    // Test Media in user message: image/png bytes → input_image with data: URL (line 245: $this->media($part))
+    // Checked against ResponsesTest line 96: "builds the request..." which tests Media in tool result
+    $t = new FakeTransport(sseEvents(
+        ['type' => 'response.created', 'response' => ['id' => 'resp_1']],
+        ['type' => 'response.output_item.added', 'output_index' => 0, 'item' => ['type' => 'message', 'id' => 'msg_1', 'role' => 'assistant', 'content' => []]],
+        ['type' => 'response.output_text.delta', 'item_id' => 'msg_1', 'delta' => 'Image received'],
+        ['type' => 'response.completed', 'response' => ['status' => 'completed', 'usage' => ['input_tokens' => 15, 'output_tokens' => 5, 'input_tokens_details' => ['cached_tokens' => 0]]]],
+    ));
+
+    $imageBytesText = 'PNG\x89\x50\x4E\x47';  // PNG image bytes
+    $messages       = [
+        new Message(Role::User, [
+            new Text('Check this image:'),
+            new Media('image/png', $imageBytesText),
+        ]),
+    ];
+
+    [...(new Responses($t, 'https://api.example/v1/', 'gpt-x', 'sk-1'))->stream(
+        TestPrompt::make(null, $messages)
+    )];
+
+    // Verify request body contains input_image with data: URL
+    $body  = \json_decode($t->requests[0]['body'], true);
+    $input = $body['input'];
+
+    // Find the user message with content array
+    $userMessage = \array_values(\array_filter($input, fn ($item) => isset($item['type'], $item['role']) && 'message' === $item['type'] && 'user' === $item['role']))[0] ?? null;
+
+    expect($userMessage)->not->toBeNull()
+        ->and($userMessage['content'])->toHaveCount(2)
+        ->and($userMessage['content'][0])->toBe(['type' => 'input_text', 'text' => 'Check this image:'])
+        ->and($userMessage['content'][1]['type'])->toBe('input_image')
+        ->and($userMessage['content'][1]['image_url'])->toStartWith('data:image/png;base64,');
 });

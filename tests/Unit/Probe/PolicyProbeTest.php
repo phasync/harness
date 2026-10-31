@@ -67,3 +67,26 @@ it('detects <> (read-write redirect) and asks about file writes', function () {
     // But 'ls <> /dev/null' is allowed because /dev/null is exempt from write checks
     expect(verdictOfProbe('ls <> /dev/null'))->toBe(Verdict::Allow);
 });
+
+it('judges bare wrappers with no wrapped command: env/sudo asked about, xargs defaults to echo', function () {
+    // Rules that allow echo but not env, allowing us to distinguish xargs (defaults to echo) from other wrappers
+    $rules = [
+        Shell::allow('echo'),
+        Shell::allow('ls'),
+        Shell::deny('rm'),
+    ];
+
+    // Bare env is judged as the program 'env' itself (no rule matches, so Ask)
+    [$verdict, $reason] = Shell::check('env', $rules);
+    expect($verdict)->toBe(Verdict::Ask)
+        ->and($reason)->toContain("'env' matches no allow rule");
+
+    // Bare sudo is judged as the program 'sudo' itself (no rule matches, so Ask)
+    [$verdict, $reason] = Shell::check('sudo', $rules);
+    expect($verdict)->toBe(Verdict::Ask)
+        ->and($reason)->toContain("'sudo' matches no allow rule");
+
+    // Bare xargs defaults to echo (line 231-232), which matches the allow rule
+    [$verdict] = Shell::check('xargs', $rules);
+    expect($verdict)->toBe(Verdict::Allow);
+});

@@ -87,3 +87,32 @@ it('throws McpException when server responds with a JSON-RPC error', function ()
     });
     expect($exception)->toEqual([-32602, true]);
 });
+
+it('throws McpException when server writes non-JSON to stdout', function () {
+    // Test that StdioConnection.dispatch() throws when the server sends a line that is not valid JSON.
+    // This exercises lines 199-200 in StdioConnection: catch JsonException and throw McpException.
+    // Checked against existing test: "speaks Streamable HTTP: headers per request, JSON and event-stream responses"
+    // which tests non-JSON responses from HTTP servers, not stdio servers.
+
+    // Create a tiny inline server that emits invalid JSON.
+    $tmpfile = \sys_get_temp_dir() . '/mcp-invalid-' . \bin2hex(\random_bytes(4)) . '.php';
+    \file_put_contents($tmpfile, '<?php \fwrite(\STDOUT, "not valid json\n");');
+
+    try {
+        $exception = \fiber\run(function () use ($tmpfile) {
+            $server = new McpServer(new StdioConnection([\PHP_BINARY, $tmpfile]));
+            try {
+                // The server will emit "not valid json\n" immediately.
+                // When StdioConnection tries to decode it, JsonException is thrown and caught.
+                $server->request('server/discover', [], new Cancel(fn () => false));
+            } catch (McpException $e) {
+                return \str_contains($e->getMessage(), 'not JSON-RPC');
+            }
+        });
+        expect($exception)->toBeTrue();
+    } finally {
+        if (\is_file($tmpfile)) {
+            \unlink($tmpfile);
+        }
+    }
+});

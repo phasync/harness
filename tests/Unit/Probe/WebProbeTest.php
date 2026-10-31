@@ -48,3 +48,8 @@ it('renders a nested list indented under its parent item', function () {
     expect(Html::extract('<ul><li>Outer<ul><li>Inner<ul><li>Deep</li></ul></li><li>Inner 2</li></ul> tail</li><li>Second</li></ul>'))
         ->toBe("- Outer\n  - Inner\n    - Deep\n  - Inner 2\ntail\n- Second");
 });
+
+it('recurses into unknown block elements like div and section', function () {
+    expect(Html::extract('<div><p>A</p><section><h2>B</h2></section></div>'))
+        ->toBe("A\n\n## B");
+});

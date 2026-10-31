@@ -73,14 +73,14 @@ it('is ambiguous at the line-trimmed level when exact matches zero times, listin
         ->toThrow(RuntimeException::class, 'lines 2, 5');
 });
 
-it('matches a block pasted at a different depth', function () {
-    // A pure, uniform indentation shift is also caught by the line-trimmed level (full trim erases
-    // any amount of leading whitespace); Matcher::reindent() below covers level 4's own delta math.
+it('matches a block pasted at a different depth and re-indents new by the delta', function () {
+    // #9: a uniform shift is caught by the indentation level before the line-trimmed one, so the
+    // match carries the delta and `new` lands at the block's depth, not at the model's
     write($this->dir, 'a.txt', "function f() {\n  if (x) {\n    one();\n    two();\n  }\n}\n");
     $e      = new EditFile($this->root);
     $result = $e->call(['path' => 'a.txt', 'old' => "if (x) {\n  one();\n  two();\n}", 'new' => "if (x) {\n  three();\n}"], callFor());
-    expect(edited($result))->toStartWith("Edited 'a.txt'")
-        ->and(\file_get_contents($this->dir . '/a.txt'))->toContain('three();');
+    expect(edited($result))->toContain('matched with different indentation on lines 2-5')
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("function f() {\n  if (x) {\n    three();\n  }\n}\n");
 });
 
 it('re-indents new lines by the delta between two blocks\' common indent', function () {

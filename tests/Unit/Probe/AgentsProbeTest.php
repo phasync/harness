@@ -11,7 +11,9 @@ use Harness\Result;
 use Harness\Run;
 use Harness\Testing\FakeModel;
 use Harness\Tools;
+use Harness\Tools\Files\ApplyPatch;
 use Harness\Tools\Files\PatchParser;
+use Harness\Tools\Files\Root;
 use Harness\Tools\Plan\Plan;
 use Harness\Tools\Plan\Reminder;
 
@@ -145,4 +147,42 @@ it('patch parser rejects Update File without hunk header', function () {
     // Update File section with content but no @@ hunk header (line 90)
     expect(fn () => PatchParser::parse("*** Begin Patch\n*** Update File: test.txt\n content\n*** End Patch"))
         ->toThrow(RuntimeException::class, "must start a hunk with '@@'");
+});
+
+it('patch parser handles empty lines in hunk context correctly (lines 113-116)', function () {
+    // Test that empty lines in a hunk are treated as context lines (preserved on both sides)
+    // This covers lines 113-116 in PatchParser.php: empty line handling
+
+    $tempDir = \sys_get_temp_dir() . '/harness-hunk-empty-' . \bin2hex(\random_bytes(4));
+    \mkdir($tempDir);
+
+    try {
+        // Create a file with a blank line in the middle
+        $originalContent = "line one\n\nline three\nline four\n";
+        \file_put_contents($tempDir . '/test.txt', $originalContent);
+
+        // Create a patch that modifies line one while preserving the blank line
+        $patch = <<<'PATCH'
+*** Begin Patch
+*** Update File: test.txt
+@@
+-line one
++LINE ONE
+ 
+ line three
+*** End Patch
+PATCH;
+
+        // Apply the patch
+        $root  = new Root($tempDir);
+        $apply = new ApplyPatch($root);
+        $apply->call(['patch' => $patch], callFor());
+
+        // Verify the result: line one changed, blank line preserved, line three unchanged
+        $result = \file_get_contents($tempDir . '/test.txt');
+        expect($result)->toBe("LINE ONE\n\nline three\nline four\n");
+    } finally {
+        // Clean up
+        \exec('rm -rf ' . \escapeshellarg($tempDir));
+    }
 });

@@ -27,11 +27,11 @@ symlinked directories; `grep` skips binary files and says how many.
 ## edit_file's matching cascade
 
 `old` is tried byte-exact first; only when that matches zero times does a tolerant cascade run,
-each level tried in order and accepted only when it alone matches exactly once: (2) line-trimmed
-(each line of `old` against the file's lines with leading and trailing whitespace ignored), (3)
-whitespace-normalized (runs of whitespace within a line collapsed), (4) indentation-flexible (the
-relative indentation between `old`'s own lines must match, but the common indent the whole block
-sits at may differ — `new` is re-indented by the same delta), and (5) block anchor (for `old` of
+each level tried in order and accepted only when it alone matches exactly once: (2)
+indentation-flexible (the relative indentation between `old`'s own lines must match, but the common
+indent the whole block sits at may differ), (3) line-trimmed (each line of `old` against the file's
+lines with leading and trailing whitespace ignored), (4) whitespace-normalized (runs of whitespace
+within a line collapsed), and (5) block anchor (for `old` of
 3+ lines: the first and last line match exactly and the lines between are at least 90% similar, for
 a block with one changed line in the middle). A level that matches more than once stops the cascade
 there: the ambiguous error names the level and lists every candidate's line; the cascade never falls
@@ -75,7 +75,7 @@ Applies a patch in the V4A format (the format OpenAI's `apply_patch` uses):
 hunk (optionally `@@ <context line>` naming what it is near, for a human reading the patch); its
 lines are context (` `), removed (`-`) or added (`+`); `*** End of File` after the last hunk is
 allowed. Hunks are located by their context and removed lines through `edit_file`'s cascade, levels
-1-3 only (exact, line-trimmed, whitespace-normalized — not the indentation or block-anchor levels),
+1-4 only (exact, indentation-flexible, line-trimmed, whitespace-normalized — not the block-anchor level),
 never by line numbers. The whole patch is built in memory first: a hunk whose context is not found,
 or matches more than once, fails the **whole patch** with an error naming the file, the hunk's
 index and the context, and no file is changed. The result lists each file with the lines added and

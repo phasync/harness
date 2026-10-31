@@ -15,19 +15,21 @@
   of the prompt it hands on, every `$every`-th model call, without touching `Run::messages()`.
   Placed after `Compact` in a `Run`'s middleware, it is never itself folded into a checkpoint.
   docs/plan.md, examples/plan.php.
-- **`EditFile` gets a tolerant matching cascade** beneath its exact match: line-trimmed,
-  whitespace-normalized, indentation-flexible (re-indents `new` by the matched block's delta) and
-  block-anchor, each accepted only when it alone matches exactly once; a level matching more than
-  once is the ambiguous error, naming every candidate line, and the cascade never falls through to
-  a looser level once that happens. A successful edit's result now shows the edited region with 3
-  lines of context, as `read_file` numbers them; the replacement always keeps the file's line
-  ending style. A failed edit quotes the closest region by similarity.
+- **`EditFile` gets a tolerant matching cascade** beneath its exact match: indentation-flexible
+  (the block sits at another depth), line-trimmed, whitespace-normalized and block-anchor, each
+  accepted only when it alone matches exactly once; a level matching more than once is the
+  ambiguous error, naming every candidate line, and the cascade never falls through to a looser
+  level once that happens. Every line-based match re-indents `new` by the delta between `old`'s
+  common indent and the matched block's (#9). A successful edit's result now shows the edited
+  region with 3 lines of context, as `read_file` numbers them; the replacement always keeps the
+  file's line ending style. A failed edit quotes the closest region by similarity.
 - **`EditFile` and `WriteFile` take an optional `?\Closure $check`**, run after a successful write;
   its message, if any, is appended to the result as `Check: <message>` (docs/files.md shows
   `php -l`).
 - **`Harness\Tools\Files\ApplyPatch`** (`apply_patch`): applies a patch in the V4A format (add,
   delete, update with `@@` hunks, move) in one call. Hunks are located by context through
-  `EditFile`'s cascade (exact, line-trimmed, whitespace-normalized); the whole patch is built in
+  `EditFile`'s cascade (exact, indentation-flexible, line-trimmed, whitespace-normalized), added
+  lines re-indented by the matched block's delta; the whole patch is built in
   memory first, so a hunk whose context is not found, or is ambiguous, fails every file in the
   patch and changes nothing.
 - **`Harness\Tools\Files\Journal`**: `WriteFile`, `EditFile` and `ApplyPatch` take an optional

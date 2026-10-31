@@ -126,3 +126,18 @@ it('rejects header without colon and malformed chunk size from server (lines 100
         }
     }))->toThrow(TransportException::class, 'Malformed chunk size');
 });
+
+it('204 No Content response skips body generator (line 201 early return)', function () {
+    $result = \fiber\run(function () {
+        [$port] = probeHttpServe(fn () => [
+            "HTTP/1.1 204 No Content\r\n\r\n",
+        ]);
+        $r      = (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
+        $chunks = [...$r->body()];
+
+        return [$r->status, $chunks];
+    });
+    [$status, $chunks] = $result;
+    expect($status)->toBe(204)
+        ->and($chunks)->toBe([]);
+});
