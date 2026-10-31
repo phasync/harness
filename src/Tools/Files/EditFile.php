@@ -55,6 +55,9 @@ final readonly class EditFile implements Tool
             throw new \RuntimeException("'$path' does not exist");
         }
         $content = \file_get_contents($abs);
+        if (\str_contains(\substr($content, 0, 8192), "\0")) { // as read_file: its bytes must not reach the model through an error either
+            throw new \RuntimeException("'$path' is a binary file (" . \strlen($content) . ' bytes)');
+        }
         if (false === $content) {
             throw new \RuntimeException("'$path' could not be read");
         }

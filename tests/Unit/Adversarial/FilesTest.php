@@ -140,3 +140,26 @@ it('produces valid UTF-8 when the long-line cut falls inside a multi-byte charac
     // which fails json_encode(..., JSON_THROW_ON_ERROR) exactly where every provider call uses it.
     expect(1 === \preg_match('//u', $text))->toBeTrue();
 }); // #30: the cut split the euro sign; lines are cut by characters now and scrubbed
+
+/*
+ * Round 6. `read_file` refuses a binary file outright ("'$path' is a binary file (N bytes)"), and
+ * `grep`/`glob` skip binary files and say how many -- docs/files.md documents binary handling only
+ * for those two. `edit_file` has no such check at all: when `old` doesn't match, `Matcher::locate`
+ * falls through to `closest()`, and the "not found" error embeds that closest region's raw bytes
+ * via `Lines::numbered`. For a binary file those bytes are typically invalid UTF-8, so the
+ * RuntimeException's message is invalid UTF-8 -- the very failure mode `read_file` and `grep` were
+ * just fixed against in #30, now reachable through `edit_file`'s error path on any binary file. The
+ * ReadFile precedent is the harness's own answer for what a Files tool does with a binary file: it
+ * refuses, clearly, before touching the content -- `edit_file` should do the same instead of
+ * dumping bytes into the model-facing error text.
+ */
+it('refuses a binary file instead of dumping its raw bytes into the not-found error', function () {
+    $binary = "PK\x03\x04\x00\x00\x00\x00binary\x00data\xFF\xFEmore\x80\x81stuff\n";
+    \file_put_contents($this->dir . '/bin.dat', $binary);
+    $e = new EditFile($this->root);
+
+    // BUG: today this throws with the closest region's raw bytes embedded in the message (invalid
+    // UTF-8, same crash class #30 fixed for read_file/grep), not a clear "binary file" refusal.
+    expect(fn () => $e->call(['path' => 'bin.dat', 'old' => 'nonexistent text xyz', 'new' => 'replacement'], callFor()))
+        ->toThrow(RuntimeException::class, 'binary file');
+}); // #33: the closest-region error was made of the file's raw bytes

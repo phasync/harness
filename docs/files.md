@@ -22,7 +22,8 @@ $tools = new Tools(new ReadFile($root), new ListDir($root), new Glob($root), new
 Output is cut with a tail that says how to go on (`[120 more lines; pass offset=2001 to read on]`),
 never silently. `read_file` returns PNG, JPEG, GIF and WebP files as Media and refuses other binaries;
 lines past `maxLineLength` are cut with a marker. `glob` and `grep` skip `.git` and do not follow
-symlinked directories; `grep` skips binary files and says how many.
+symlinked directories; `grep` skips binary files and says how many, and `read_file`, `edit_file` and
+`apply_patch` refuse one by name.
 
 ## edit_file's matching cascade
 

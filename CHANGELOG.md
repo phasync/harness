@@ -83,6 +83,8 @@
   says what to do, instead of sending a request the API rejects (#31).
 - `Tools\Shell\Shell`: `ToolProgress` chunks are valid UTF-8 too, a character split by a read
   carried over to the next chunk (#32).
+- `edit_file` and `apply_patch` refuse a binary file with `read_file`'s message instead of quoting its
+  bytes in a not-found error (#33).
 
 ### Changed (breaking)
 

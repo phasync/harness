@@ -124,6 +124,9 @@ final readonly class ApplyPatch implements Tool
             if (false === $content) {
                 throw new \RuntimeException("'{$section->path}' could not be read");
             }
+            if (\str_contains(\substr($content, 0, 8192), "\0")) {
+                throw new \RuntimeException("'{$section->path}' is a binary file (" . \strlen($content) . ' bytes)');
+            }
         }
 
         $added   = 0;
