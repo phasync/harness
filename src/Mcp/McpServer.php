@@ -46,10 +46,15 @@ final class McpServer implements ToolSource
             $tools  = [];
             $cursor = null;
             $ttl    = null;
+            $seen   = [];
             do {
                 $page   = $this->request('tools/list', null === $cursor ? [] : ['cursor' => $cursor], new Cancel(static fn () => false));
                 $ttl    = null === $ttl ? (int) ($page['ttlMs'] ?? 0) : \min($ttl, (int) ($page['ttlMs'] ?? 0));
                 $cursor = $page['nextCursor'] ?? null;
+                if (null !== $cursor && isset($seen[$cursor])) {
+                    throw new McpException("The MCP server's tools/list pagination does not advance: it returned the cursor '$cursor' again");
+                }
+                $seen[$cursor ?? ''] = true;
                 foreach ($page['tools'] ?? [] as $tool) {
                     $headers = self::headerPaths($tool['inputSchema'] ?? []);
                     if (null !== $headers) {

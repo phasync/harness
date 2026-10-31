@@ -208,3 +208,40 @@ it('reports progress chunks a host can actually json_encode(), not just the fina
         // and json_encode() on it -- the one documented way to put an Event on the wire -- fails.
         ->and(\json_encode($progress[0]))->not->toBeFalse();
 }); // #32: progress carried the raw pipe bytes
+
+/*
+ * `maxOutput`'s entire job, per its own constructor parameter name and docs/shell.md ("the
+ * output, the middle cut out past `maxOutput` bytes with a marker"), is to bound how much of a
+ * command's output the final `Result` keeps. `$take()` computes `$half =
+ * intdiv($this->maxOutput, 2)` once per chunk and keeps `$tail = substr($tail . $chunk,
+ * -$half)`.
+ *
+ * `substr()` is called here with only two arguments (string, start) -- no length. When `$half`
+ * is `0` (which `intdiv($maxOutput, 2)` gives for both `maxOutput: 0` and `maxOutput: 1`, the
+ * smallest values the constructor accepts -- there is no validation rejecting them),
+ * `substr($string, -0)` is `substr($string, 0)`, since PHP has no negative zero for an int:
+ * `-0 === 0`. With a bare `0` start and no length, `substr()` means "from the start to the end of
+ * the string" -- i.e. the *whole* string, not "keep the last 0 characters" as the formula
+ * intends. The same degenerate case means `$head` never grows either (`strlen($head) < $half` is
+ * `0 < 0`, always false), so every byte that would have gone to `$head` falls through to this
+ * same unbounded `$tail`.
+ *
+ * The result: at `maxOutput: 0` or `maxOutput: 1`, the cut mechanism is not merely off by one --
+ * it does not cut at all. `$tail` keeps growing with every chunk, with no marker ever emitted
+ * (the `$total > strlen($head) + strlen($tail)` check that would print "[N bytes cut]" is false
+ * because `$tail` ends up holding the *entire* output), so the one guarantee `maxOutput` exists
+ * to give -- a bounded amount of text reaching the model -- is silently absent at its own two
+ * smallest accepted values.
+ *
+ * Verified directly: `new Shell($cwd, maxOutput: 1)` running `seq 1 5000` (ordinarily cut to
+ * roughly 1 byte either side of a marker) returns the full, uncut ~24 KB of output with no
+ * "bytes cut" marker at all.
+ */
+it('still bounds the output when maxOutput is 0 or 1, not keeps everything', function (int $maxOutput) {
+    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: $maxOutput))->call(['command' => 'seq 1 5000'], callFor()));
+
+    // Today: substr($tail . $chunk, -0) returns the whole string (no length argument means "to
+    // the end"), not the empty string the "keep the last $half bytes" formula intends, so $tail
+    // grows without bound and the full ~24 KB of `seq 1 5000` output comes back uncut.
+    expect(\strlen($r->content[0]->text))->toBeLessThan(200);
+})->with([0, 1])->group('bug');

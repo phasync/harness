@@ -87,6 +87,8 @@
   bytes in a not-found error (#33).
 - `web_search`: a hit's title, URL and snippet are collapsed to one line each, so a newline a page
   put in its title cannot forge an extra numbered result (#34).
+- `Mcp\McpServer`: a `tools/list` pagination that returns a cursor it already returned is an
+  `McpException`, not an endless loop (#35).
 
 ### Changed (breaking)
 

@@ -9,6 +9,7 @@ use Harness\Delta\TextDelta;
 use Harness\FinishReason;
 use Harness\Http\Response;
 use Harness\Mcp\Connection;
+use Harness\Mcp\McpException;
 use Harness\Mcp\McpServer;
 use Harness\Message;
 use Harness\ModelException;
@@ -320,7 +321,7 @@ it('does not keep paging tools/list forever when the cursor never advances', fun
     };
     $server = new McpServer($conn);
 
-    // Today: tools() keeps requesting the identical cursor past any reasonable bound; there is no
-    // McpException raised about the server's pagination never advancing, and no cap on page count.
-    expect(fn () => $server->tools())->not->toThrow(RuntimeException::class, 'never noticed and never stopped');
-})->group('bug');
+    // #35: tools() requested the identical cursor past any bound; a repeated cursor is an McpException
+    expect(fn () => $server->tools())->toThrow(McpException::class, 'does not advance')
+        ->and($conn->calls)->toBe(2);
+});
