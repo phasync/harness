@@ -305,7 +305,8 @@ final class ApproveWrites implements ToolMiddleware
 Deny by returning `new Result([...], error: true)`; truncate by rewriting the `Result`; compact by
 rewriting the `Prompt` (`ModelMiddleware::stream($prompt, $next)`, passing `$prompt->cancel` on to
 the new one; `Harness\Compact` does it); trace by wrapping both. To observe without altering, read
-the events.
+the events. `Harness\Tools\Plan`'s `Reminder` rewrites the `Prompt` the same way, to append the goal
+and the open plan as a trailing message, without touching `Run::messages()`.
 
 Shape the tool list of a step the same way: hand `$next` a `Prompt` with other `tools`, fewer for a
 phase, or one the `ToolSource` holds but the middleware shows only for some steps. The run executes
@@ -483,6 +484,7 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Tools\Files` | `ReadFile`, `WriteFile`, `EditFile`, `ListDir`, `Glob`, `Grep` under a `Root` | [docs/files.md](docs/files.md) |
 | `Harness\Tools\Shell` | `Shell`: bash commands with streamed output | [docs/shell.md](docs/shell.md) |
 | `Harness\Tools\Web` | `WebSearch`, `WebFetch`; `Search`, `SearXng` | [docs/web.md](docs/web.md) |
+| `Harness\Tools\Plan` | `Plan`, `PlanSet`, `PlanUpdate`, `Reminder`: a plan the agent keeps, and a middleware that keeps the goal and the open plan in front of the model | [docs/plan.md](docs/plan.md) |
 | `Harness\Agents` | `AgentTool`: a sub-agent as a tool | [docs/agents.md](docs/agents.md) |
 | `Harness\Mcp` | `McpServer`: an MCP server's tools, over stdio or Streamable HTTP | [docs/mcp.md](docs/mcp.md) |
 | `Harness\Transcript` | `JsonlTranscript`, `JsonlEvents`: the conversation and the events in files | [docs/transcript.md](docs/transcript.md) |
@@ -525,6 +527,7 @@ php examples/subagent.php ./project "question"   # delegates reading to sub-agen
 php examples/mcp.php "task"                 # a chat with an MCP server's tools (the test server by default)
 php examples/search.php "question"          # web_search and web_fetch over a local SearXng instance
 php examples/web.php state.json say "hi"    # one turn per request, events as JSON lines, state in a file
+php examples/plan.php ./project "task"      # file tools plus a kept plan and a Reminder middleware
 php examples/compact.php [budget]           # a session that compacts to stay within a token budget
 php examples/policy.php ./project "task"    # the file tools under a Policy: reads run, writes ask
 php examples/acp.php [session dir]          # an ACP agent for an editor (it speaks JSON-RPC on stdio)

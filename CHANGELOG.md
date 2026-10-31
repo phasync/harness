@@ -9,6 +9,11 @@
   extractor. `WebFetch` guards against SSRF (private-network and non-http(s) URLs refused unless
   `allowPrivate`), caches a fetched page by `sha256(url)` when `cacheDir` is set, and cuts long
   text with the files tools' tail idiom. docs/web.md, examples/search.php.
+- **`Harness\Tools\Plan`**: `Plan` (a `Step` list the `plan_set` and `plan_update` tools change),
+  and `Reminder`, a `ModelMiddleware` that appends the goal and the open plan as a trailing message
+  of the prompt it hands on, every `$every`-th model call, without touching `Run::messages()`.
+  Placed after `Compact` in a `Run`'s middleware, it is never itself folded into a checkpoint.
+  docs/plan.md, examples/plan.php.
 
 ### Changed (breaking)
 
