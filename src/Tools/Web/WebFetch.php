@@ -89,7 +89,7 @@ final readonly class WebFetch implements Tool
 
     private static function isPrivateHost(string $host): bool
     {
-        $host = \strtolower($host);
+        $host = \trim(\strtolower($host), '[]'); // parse_url keeps the brackets of an IPv6 literal
         if ('localhost' === $host || '' === $host) {
             return true;
         }

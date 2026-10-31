@@ -35,8 +35,8 @@
     "prefer-stable": true,
     "scripts": {
         "test": [
-            "HARNESS_ADAPTER=phasync pest --exclude-group live,bug",
-            "HARNESS_ADAPTER=revolt pest --exclude-group live,bug"
+            "HARNESS_ADAPTER=phasync pest --exclude-group live --exclude-group bug",
+            "HARNESS_ADAPTER=revolt pest --exclude-group live --exclude-group bug"
         ],
         "test:live": "pest --group live",
         "cs": "php-cs-fixer fix"
