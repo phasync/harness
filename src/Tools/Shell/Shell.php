@@ -99,8 +99,9 @@ final readonly class Shell implements Tool
             $carry = Utf8::incompleteTail($text);
             $call->progress(Utf8::scrub(\substr($text, 0, \strlen($text) - \strlen($carry)))); // valid UTF-8, as the final text
             $half = \intdiv($this->maxOutput, 2);
-            if (\strlen($head) < $half) {
-                $piece = \substr($chunk, 0, $half - \strlen($head));
+            $room = $this->maxOutput - $half; // the head takes the odd byte, so head + tail hold exactly maxOutput
+            if (\strlen($head) < $room) {
+                $piece = \substr($chunk, 0, $room - \strlen($head));
                 $head .= $piece;
                 $chunk = \substr($chunk, \strlen($piece));
             }

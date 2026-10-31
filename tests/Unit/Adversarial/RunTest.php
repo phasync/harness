@@ -616,3 +616,68 @@ it('keeps the "left before TurnEnded is cancelled" ruling consistent across even
         ->and($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->error)->toBeInstanceOf(UnsupportedOptionException::class);
 }); // #63: the docblock promised Cancelled; the step failed first, and that is what ended() tells
+
+/*
+ * Round 12: `Agents\AgentTool::call()` promises "A failed child is an error result" (docs/agents.md),
+ * and its own code backs that up: `$ended = $run->ended(); if (Reason::Failed === $ended->reason) {
+ * throw new \RuntimeException("The agent '{name}' failed (...): ...", 0, $ended->error); }` --
+ * converting ANY failed child into a plain `\RuntimeException`, which `Run::runCall()` then turns
+ * into a normal error `Result` for the parent's model (a `\RuntimeException` is not a
+ * `\LogicException`, so it does not hit the `if ($e instanceof \LogicException) { throw $e; }`
+ * misuse rethrow in `runCall()`'s catch).
+ *
+ * But that conversion only happens if execution reaches it. `AgentTool::call()`'s own
+ * `foreach ($run->turn($turn, $call) as $event) { $call->emit($event); }` fully drains the
+ * child's turn with no `break` -- exactly the "exhausted normally" path that, since round 11/#58,
+ * calls `$this->rethrow()` on the CHILD Run once its generator is spent, throwing the child's own
+ * misuse `\LogicException` (if its turn failed with one) straight out of that `foreach`. That
+ * throw happens one line *before* `$ended = $run->ended();` is ever reached -- so the "failed
+ * child is an error result" conversion is skipped entirely. The child's raw `\LogicException`
+ * (not a `\RuntimeException`) then propagates out of `AgentTool::call()` into the parent's
+ * `toolChain()`/`runCall()`, which mark it 'tool' and then hit their OWN
+ * `if ($e instanceof \LogicException) { throw $e; }` -- failing the WHOLE PARENT TURN
+ * (`Reason::Failed`, `ErrorKind::ToolError`) and re-throwing the child's exception from the
+ * parent's own `turn()`, instead of giving the parent's model a contained error result it could
+ * see and work around.
+ *
+ * Verified directly against the real code with both adapters: a child `Run` whose model throws
+ * `UnsupportedOptionException` (a misuse `\LogicException`) makes the PARENT's `turn()` itself
+ * throw that same exception, with `$parent->ended()->reason` `Failed` and
+ * `$parent->ended()->error` the raw, unwrapped child exception -- not the
+ * `"The agent '...' failed (...): ..."` `\RuntimeException` the docs and `AgentTool`'s own code
+ * promise, and not the parent turn continuing with an error result as it does for every other
+ * kind of child failure (verified elsewhere with a plain `RuntimeException`).
+ */
+it('ends the parent turn Failed with a child\'s misuse exception, which is the host\'s bug', function () {
+    $child  = new Harness\Run(new FakeModel(static function () {
+        throw new UnsupportedOptionException('child cannot do that');
+    }), new Tools());
+    $agent  = new Harness\Agents\AgentTool($child, 'sub', 'Sub');
+    $model  = new FakeModel(
+        [
+            new ToolCallStart('p', 'sub'),
+            new ToolInputDelta('p', \json_encode(['prompt' => 'x'])),
+            new ToolCallEnd('p'),
+            new Usage(10, 5),
+            new Finish(FinishReason::ToolCalls),
+        ],
+        [new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)],
+    );
+    $parent = new Harness\Run($model, new Tools($agent));
+    $threw  = null;
+
+    try {
+        \fiber\run(function () use ($parent) {
+            foreach ($parent->turn(new Message(Role::User, [new Text('go')])) as $e) {
+            }
+        });
+    } catch (Throwable $ex) {
+        $threw = $ex;
+    }
+
+    // The child's misuse is the host's bug: it ends the parent turn Failed with that exception, as
+    // the parent's own would; only the child's runtime failures are error results.
+    expect($threw)->toBeInstanceOf(UnsupportedOptionException::class)
+        ->and($parent->ended()->reason)->toBe(Reason::Failed)
+        ->and($parent->ended()->error)->toBe($threw);
+}); // #68: docs/agents.md promised an error result for every child failure

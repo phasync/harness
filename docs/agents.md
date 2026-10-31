@@ -17,7 +17,8 @@ $parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Read
 - The model gets the child's final assistant text. A reply cut by the token limit or refused gets a
   trailing line saying so; `meta['finish']` is the child's `FinishReason`, `meta['usage']` and
   `meta['reason']` the rest, and `Result::$value` the child's `Ended`. A failed child is an error
-  result.
+  result, except for a misuse `\LogicException` in the child (an option its provider cannot honour,
+  say): that is the host's bug, as in the parent, and ends the parent turn `Failed` with it.
 - `AgentTool::spec()` derives the hints from the child's tools each time it is called: `readOnly`
   when every child tool is read-only (so several sub-agents run concurrently), `destructive` and
   `openWorld` when any child tool is; `idempotent` is false.

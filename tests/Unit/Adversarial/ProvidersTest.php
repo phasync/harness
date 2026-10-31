@@ -604,3 +604,64 @@ it('reads Retry-After for an in-stream error event, not only a non-200 response'
             ->and($e->retryAfter)->toBe(30.0);
     }
 }); // #59: the in-stream error path passed null
+
+/*
+ * Round 12's sweep of error paths across providers:
+ *
+ * - Retry-After as an HTTP-date, not seconds: all three providers share the same
+ *   `is_numeric($retryAfter) ? (float) $retryAfter : null` guard; an HTTP-date string is not
+ *   numeric, so `retryAfter` is just `null` -- a safe, silent "no retry hint", not a crash or a
+ *   wrong number. A real gap (the HTTP-date form is valid per RFC 9110 and never parsed), but not
+ *   a wrong *result* the way a bad value would be; lower priority than what follows.
+ * - Chat Completions / Responses 429 with Retry-After: both already read it on their non-200 path
+ *   (`$response->headers['retry-after'] ?? null`, same as Anthropic's fixed #59 path). Not a gap.
+ * - Chat Completions data line that is not JSON: `json_decode($data, true, 512,
+ *   \JSON_THROW_ON_ERROR)` is unguarded in all three providers alike (not an asymmetry), so a raw
+ *   `\JsonException` reaches the caller instead of a `ModelException`. Through `Run`, the main
+ *   loop's catch-all still classifies it `ErrorKind::ModelError` (the sensible default), so
+ *   orchestrated turns degrade gracefully; a caller using a provider directly and catching
+ *   `ModelException` specifically would be surprised, but this is consistent across the module and
+ *   weaker than the next finding, which also runs through `Run` and gets the WRONG classification.
+ * - A Responses stream with an `error` event mid-stream: hardcodes `retryAfter` to `null` exactly
+ *   like Anthropic did before #59 (`case 'error': throw self::error(..., null, null);`) -- the
+ *   same unfixed class of bug, just in the sibling provider; noted, not pinned as this round's one
+ *   test since the next finding is a cleaner, more severe case through the very same code path.
+ * - SSE ending without `[DONE]`/without a `finish_reason`: both already verified correct (`[DONE]`
+ *   is only an optional early exit; `null` finish_reason at EOF already throws the documented error).
+ *
+ * - The one that reproduces: Anthropic's `stream()` never checks the response's `content-type`
+ *   before handing its body straight to `Sse::parse()`, unlike `Mcp\HttpConnection`, which does
+ *   check (`$type = strtolower($response->headers['content-type'] ?? '')`) before deciding whether
+ *   to treat a body as SSE or JSON. A `200` response whose body is a plain JSON error object (no
+ *   `data:`/blank-line framing at all) -- exactly what a buggy proxy or load balancer in front of
+ *   the real API sends when it swallows the upstream failure -- yields nothing from `Sse::parse()`
+ *   (no line in the body ever matches the SSE grammar), so the loop body never runs, and execution
+ *   falls through to the generic `throw new ModelException(ErrorKind::TransportError, 'The stream
+ *   ended before message_stop')`. The real error the server sent (here: an `overloaded_error`,
+ *   which docs/anthropic.md says maps to `RateLimited`) is discarded entirely, and what reaches the
+ *   host is both a worse message AND the wrong `ErrorKind` -- `TransportError` instead of
+ *   `RateLimited` -- which would make a host's retry/backoff decision wrong, not just its logging.
+ *
+ * Verified directly against the real code (both adapters): a 200 response with
+ * `content-type: application/json` whose body is `{"type":"error","error":{"type":
+ * "overloaded_error","message":"The server is temporarily overloaded, please try again later"}}`
+ * throws `ModelException(TransportError, 'The stream ended before message_stop')` -- not
+ * `RateLimited` with the real message.
+ */
+it('reads a non-SSE JSON error body on a 200 response, not just non-200 statuses', function () {
+    $body = \json_encode(['type' => 'error', 'error' => [
+        'type'    => 'overloaded_error',
+        'message' => 'The server is temporarily overloaded, please try again later',
+    ]]);
+    $model = new Messages(new FakeTransport(new Response(200, ['content-type' => 'application/json'], [$body])), 'k', 'claude-x');
+
+    try {
+        [...$model->stream(new Prompt(null, [], [], new Options(), live()))];
+        $this->fail('no exception');
+    } catch (ModelException $e) {
+        // Today: TransportError / "The stream ended before message_stop" -- the real
+        // overloaded_error and its message are discarded because content-type is never checked.
+        expect($e->kind)->toBe(ErrorKind::RateLimited)
+            ->and($e->getMessage())->toContain('temporarily overloaded');
+    }
+}); // #65: Sse::parse() saw no events and the stream 'ended before message_stop'

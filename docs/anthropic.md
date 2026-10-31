@@ -31,7 +31,9 @@ $model = new Messages(
 - `Options::$provider['anthropic']` (the key is the module's lowercase name) is merged into the request body last: `thinking`,
   `output_config`, `cache_control` (top-level automatic caching) and the rest go there.
 - HTTP 429 and 529, `rate_limit_error` and `overloaded_error` → `RateLimited`; "prompt is too long" →
-  `ContextTooLong`; a stream that ends before `message_stop` → `TransportError`.
+  `ContextTooLong`; a stream that ends before `message_stop` → `TransportError`. A 200 whose
+  `Content-Type` is not `text/event-stream` (a JSON error body from a proxy) is read as an error
+  body and mapped the same way; a stream line that is not JSON → `ModelError`.
 - A `Prompt::$continue` (a `Resume`) is sent as a prefill: the assistant message goes last,
   without its reasoning and with the trailing whitespace of its last text cut, as the API requires,
   and the reply continues it. With `thinking` on the API takes no prefill: it throws

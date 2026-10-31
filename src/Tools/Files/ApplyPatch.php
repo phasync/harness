@@ -58,7 +58,10 @@ final readonly class ApplyPatch implements Tool
             $deletes = [...$deletes, ...$fileDeletes];
         }
 
-        foreach ($writes as $abs => $content) { // still planning: a path blocked by a file fails the patch before anything is written
+        foreach ($writes as $abs => $content) { // still planning: a path blocked by a file or a directory fails the patch before anything is written
+            if (\is_dir($abs)) {
+                throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' is a directory; a file cannot be written there");
+            }
             for ($dir = \dirname($abs); !\file_exists($dir); $dir = \dirname($dir)) {
             }
             if (!\is_dir($dir)) {

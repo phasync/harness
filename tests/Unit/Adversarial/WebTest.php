@@ -414,3 +414,23 @@ it('percent-encodes a redirect Location containing a space before sending the ne
     // server would reject it with 400 Bad Request instead of serving the redirect's target.
     expect($hop2Line)->toBe('GET /a%20b.html HTTP/1.1');
 }); // #61: 'GET /a b.html HTTP/1.1' went out raw
+
+/*
+ * `Response::redirectTarget()` checks `\str_starts_with($location, '/')` to decide a `Location`
+ * is path-absolute (same host) rather than relative to the current directory. A scheme-relative
+ * reference such as `//other.example.com/page` -- RFC 3986 ss4.2's "network-path reference",
+ * meaning "same scheme, but a different authority taken from what follows the `//`" -- also
+ * starts with a single `/` as far as `str_starts_with()` is concerned, so it takes the SAME
+ * branch as a true path-absolute Location and is concatenated onto the ORIGINAL host instead of
+ * being resolved to the host it actually names. This is not an exotic case: scheme-relative
+ * redirects are a common, standards-compliant pattern (CDNs and sites that want a redirect to
+ * work under either http or https).
+ */
+it('resolves a scheme-relative Location to the host it names, not the original host', function () {
+    $response = new Response(302, ['location' => '//other.example.com/page'], []);
+
+    // Today: this is 'https://original.example.com//other.example.com/page' -- the redirect's
+    // real target (other.example.com) ends up buried inside a bogus path on the original host.
+    expect($response->redirectTarget('https://original.example.com/start/here'))
+        ->toBe('https://other.example.com/page');
+}); // #64: joined onto the original host as a path

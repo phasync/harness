@@ -277,3 +277,34 @@ it('matches a file whose path holds a newline with the all-files pattern "**"', 
     // catch-all pattern, since Glob::regex('**')'s '.*' cannot cross a '\n' without the 's' modifier.
     expect($result->content[0]->text)->not->toContain('No files match');
 }); // #62: .* without the s modifier stopped at the newline
+
+/*
+ * Round 12. Attacked the #62 fix briefly first (grep's glob filter, `**` then a slash then
+ * `*.txt`, against a newline-named file, and glob's `[!a]` class and `{a,b}` alternation against newline-named
+ * entries) -- all round-tripped correctly; `Glob::regex()`'s shared `s` modifier fixes grep's
+ * filter too, and character classes/alternation were never affected by dotall in the first place.
+ *
+ * Of the three carried-over items, "Move onto an existing target" turned up something sharper than
+ * the silent-overwrite gap flagged in earlier rounds: it is not just silent, it can destroy the
+ * source file with the content recoverable nowhere. #26's planning-phase guard (`call()`'s loop
+ * before any delete or write) checks that every write target's *nearest existing ancestor* is a
+ * directory -- but never checks whether the target itself already IS a directory. A `Move to:` an
+ * existing directory passes that guard (its parent is a real directory), so the Delete-then-write
+ * execution loop proceeds: the source file is unlinked first (Deletes always run before Writes),
+ * and only then does `file_put_contents()` discover the target is a directory and throw. Without a
+ * `Journal`, the source file's content is gone -- `apply_patch`'s whole "build it in memory first,
+ * fail before touching anything" promise (docs/files.md, the #26 fix itself) is broken by the one
+ * case that same fix didn't cover.
+ */
+it('leaves the source file untouched when a Move target is an existing directory', function () {
+    \file_put_contents($this->dir . '/a.txt', "line1\nline2\n");
+    \mkdir($this->dir . '/b.txt');
+    $patch = new ApplyPatch($this->root);
+    $p     = "*** Begin Patch\n*** Update File: a.txt\n*** Move to: b.txt\n@@\n line1\n line2\n*** End Patch";
+
+    expect(fn () => $patch->call(['patch' => $p], callFor()))->toThrow(RuntimeException::class);
+
+    // BUG: today 'a.txt' is already deleted by the time the write to the directory fails -- the
+    // source file is permanently lost (with no Journal) even though the whole call reports failure.
+    expect(\is_file($this->dir . '/a.txt'))->toBeTrue();
+}); // #69: the source was unlinked before the target was found to be a directory

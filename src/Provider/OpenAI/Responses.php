@@ -72,7 +72,7 @@ final readonly class Responses implements Model
         [$request, $whole] = $this->request($prompt);
         $body              = \json_encode($request, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
         $response          = $this->transport->post(\rtrim($this->baseUrl, '/') . '/responses', $headers, $body, $prompt->cancel);
-        if (200 !== $response->status) {
+        if (200 !== $response->status || !Sse::isEventStream($response)) {
             $text  = \implode('', [...$response->body()]);
             $error = \json_decode($text, true)['error'] ?? null;
             throw self::error(\is_array($error) ? (string) ($error['code'] ?? $error['type'] ?? '') : '', "The Responses API returned HTTP {$response->status}: " . \substr($text, 0, 2000), $response->status, $response->headers['retry-after'] ?? null);
@@ -84,7 +84,7 @@ final readonly class Responses implements Model
         $called    = false;
         $refused   = false;
         foreach (Sse::parse($response->body()) as $data) {
-            $e = \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
+            $e = self::json($data);
             switch ($e['type'] ?? null) {
                 case 'response.output_item.added':
                     $item = $e['item'];
@@ -154,9 +154,9 @@ final readonly class Responses implements Model
                     return;
                 case 'response.failed':
                     $err = $e['response']['error'] ?? [];
-                    throw self::error((string) ($err['code'] ?? ''), 'The response failed: ' . \json_encode($err, \JSON_UNESCAPED_SLASHES), null, null);
+                    throw self::error((string) ($err['code'] ?? ''), 'The response failed: ' . \json_encode($err, \JSON_UNESCAPED_SLASHES), null, $response->headers['retry-after'] ?? null);
                 case 'error':
-                    throw self::error((string) ($e['code'] ?? ''), 'The Responses stream failed: ' . ($e['message'] ?? \json_encode($e, \JSON_UNESCAPED_SLASHES)), null, null);
+                    throw self::error((string) ($e['code'] ?? ''), 'The Responses stream failed: ' . ($e['message'] ?? \json_encode($e, \JSON_UNESCAPED_SLASHES)), null, $response->headers['retry-after'] ?? null);
             }
         }
         throw new ModelException(ErrorKind::ModelError, 'The Responses stream ended without response.completed');
@@ -431,6 +431,16 @@ final readonly class Responses implements Model
         }
 
         return $value;
+    }
+
+    /** @return array<string, mixed> */
+    private static function json(string $data): array
+    {
+        try {
+            return \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new ModelException(ErrorKind::ModelError, 'The stream carried a line that is not JSON: ' . \substr($data, 0, 200), previous: $e);
+        }
     }
 
     private static function error(string $code, string $message, ?int $status, ?string $retryAfter): ModelException

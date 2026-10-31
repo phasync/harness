@@ -417,3 +417,36 @@ it('returns an error result, not an uncaught exception, when the command is too 
     expect($r)->toBeInstanceOf(Harness\Result::class)
         ->and($r->error)->toBeTrue();
 }); // #60: RuntimeException('Could not start bash') plus a PHP warning
+
+/*
+ * docs/shell.md: "the output, the middle cut out past `maxOutput` bytes with a marker" -- a cut,
+ * and its marker, should happen only once output goes *past* the budget. `$take()` computes
+ * `$half = \intdiv($this->maxOutput, 2)` and keeps up to `$half` bytes in `$head` and the last
+ * `$half` bytes in `$tail`, so the combined capacity of head-plus-tail is `2 * $half`. When
+ * `maxOutput` is odd, integer division floors, so `2 * \intdiv($maxOutput, 2) ==  $maxOutput - 1`
+ * -- one byte short of what was configured. `maxOutput` itself was never required to be even (and
+ * nothing documents that it should be).
+ *
+ * The result: for an odd `maxOutput`, output of exactly `maxOutput` bytes -- not "past" the
+ * budget by docs/shell.md's own wording, output that should come back whole with no marker at
+ * all -- instead gets a `"[1 bytes cut]"` marker spliced into the middle, and the one byte that
+ * marker claims was cut is not a decoding artifact (no UTF-8 is involved at all, here) -- it is a
+ * real byte of the command's real output, gone, with no trace of it anywhere in the `Result` or
+ * in any `ToolProgress` event. The same one-byte shortfall silently applies to every larger
+ * output too (an odd `maxOutput` always holds one fewer total byte than it says it does), but the
+ * exactly-at-the-budget case is the clearest demonstration, since it is the one case where the
+ * tool's own documented contract says no cut should happen at all.
+ *
+ * Verified directly: `maxOutput: 11` running `printf 0123456789A` (exactly 11 bytes, pure ASCII,
+ * no multi-byte characters anywhere near the cut) returns `"01234\n[1 bytes cut]\n6789A"` -- the
+ * character `"5"` is gone, for output that never exceeded the configured budget.
+ */
+it('does not cut output that is only exactly maxOutput bytes, for an odd maxOutput', function () {
+    // Today: half = intdiv(11, 2) = 5, so head+tail only ever hold 10 of the 11 bytes this budget
+    // was supposed to allow; the byte at the exact midpoint ("5") is dropped and a spurious
+    // "[1 bytes cut]" marker appears, even though 11 bytes of output never went past an 11-byte budget.
+    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: 11))->call(['command' => 'printf 0123456789A'], callFor()));
+
+    expect($r->content[0]->text)->toBe("Exit code 0\n0123456789A")
+        ->and($r->content[0]->text)->not->toContain('bytes cut');
+}); // #70: intdiv floored both halves, one byte short of maxOutput

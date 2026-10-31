@@ -59,7 +59,7 @@ final readonly class ChatCompletions implements Model
         }
         $body     = \json_encode($this->request($prompt), \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
         $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/chat/completions', $headers, $body, $prompt->cancel);
-        if (200 !== $response->status) {
+        if (200 !== $response->status || !Sse::isEventStream($response)) {
             throw self::error($response->status, \implode('', [...$response->body()]), $response->headers['retry-after'] ?? null);
         }
 
@@ -71,7 +71,7 @@ final readonly class ChatCompletions implements Model
             if ('[DONE]' === $data) {
                 break;
             }
-            $chunk = \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
+            $chunk = self::json($data);
             if (isset($chunk['error'])) {
                 throw new ModelException(ErrorKind::ModelError, 'The model stream failed: ' . \json_encode($chunk['error'], \JSON_UNESCAPED_SLASHES));
             }
@@ -274,6 +274,16 @@ final readonly class ChatCompletions implements Model
     private function reference(Reference $r): string
     {
         return null === $r->title ? $r->uri : "[{$r->title}]({$r->uri})";
+    }
+
+    /** @return array<string, mixed> */
+    private static function json(string $data): array
+    {
+        try {
+            return \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new ModelException(ErrorKind::ModelError, 'The stream carried a line that is not JSON: ' . \substr($data, 0, 200), previous: $e);
+        }
     }
 
     private static function error(int $status, string $body, ?string $retryAfter): ModelException

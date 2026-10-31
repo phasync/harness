@@ -136,6 +136,17 @@
 - A redirect `Location` holding a space or a non-ASCII byte is percent-encoded before the next
   request, instead of sent raw in the request line (#61).
 - `glob`'s `**` matches a path holding a newline (#62).
+- A scheme-relative redirect `Location` (`//host/path`) goes to the host it names, and `..` segments
+  in a relative one are resolved (#64).
+- A 200 response that is not an event stream (a JSON error body from a proxy) is read as an error
+  body and mapped like a non-200 one, in all three providers (#65); a Responses `error` or
+  `response.failed` event carries the response's `Retry-After` (#66); a stream line that is not
+  JSON is a `ModelException` naming it, not a raw `JsonException` (#67).
+- docs/agents.md: a child's misuse `\LogicException` ends the parent turn `Failed`, as the parent's
+  own would; only runtime failures of the child are error results (#68, docs only).
+- `apply_patch` refuses, before writing anything, a `Move to` or `Add File` whose target is an
+  existing directory; the source was deleted first and the content lost (#69).
+- `shell` keeps exactly `maxOutput` bytes when it is odd; one byte was cut too many (#70).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

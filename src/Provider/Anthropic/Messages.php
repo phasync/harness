@@ -68,7 +68,7 @@ final readonly class Messages implements Model
         ] + $this->headers;
         $body     = \json_encode($this->request($prompt), \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
         $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/messages', $headers, $body, $prompt->cancel);
-        if (200 !== $response->status) {
+        if (200 !== $response->status || !Sse::isEventStream($response)) {
             $raw   = \implode('', [...$response->body()]);
             $error = \json_decode($raw, true)['error'] ?? ['type' => 'http_' . $response->status, 'message' => \substr($raw, 0, 2000)];
             throw self::error($error, $response->status, $response->headers['retry-after'] ?? null);
@@ -81,7 +81,7 @@ final readonly class Messages implements Model
         $stop      = null;
         $called    = false;
         foreach (Sse::parse($response->body()) as $event => $data) {
-            $e = \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
+            $e = self::json($data);
             switch ($event) {
                 case 'message_start':
                     $usage = self::usage($e['message']['usage'] ?? [], $usage);
@@ -177,7 +177,16 @@ final readonly class Messages implements Model
         return new Usage($input, (int) ($u['output_tokens'] ?? $was->output), $read, $write);
     }
 
-    /** @param array<string, mixed> $error */
+    /** @return array<string, mixed> */
+    private static function json(string $data): array
+    {
+        try {
+            return \json_decode($data, true, 512, \JSON_THROW_ON_ERROR);
+        } catch (\JsonException $e) {
+            throw new ModelException(ErrorKind::ModelError, 'The stream carried a line that is not JSON: ' . \substr($data, 0, 200), previous: $e);
+        }
+    }
+
     private static function error(array $error, int $status, ?string $retryAfter): ModelException
     {
         $type    = (string) ($error['type'] ?? '');

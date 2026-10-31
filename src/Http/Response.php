@@ -53,12 +53,35 @@ final class Response
         if (1 === \preg_match('#^https?://#i', $location)) {
             return $location;
         }
-        $parts = \parse_url($from);
-        $base  = ($parts['scheme'] ?? 'http') . '://' . ($parts['host'] ?? '') . (isset($parts['port']) ? ':' . $parts['port'] : '');
-        if (\str_starts_with($location, '/')) {
-            return $base . $location;
+        $parts  = \parse_url($from);
+        $scheme = $parts['scheme'] ?? 'http';
+        if (\str_starts_with($location, '//')) { // a network-path reference: the scheme stays, the authority is the new one
+            return $scheme . ':' . $location;
         }
+        $base = $scheme . '://' . ($parts['host'] ?? '') . (isset($parts['port']) ? ':' . $parts['port'] : '');
+        $path = \str_starts_with($location, '/') ? $location : \rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location;
 
-        return $base . \rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location;
+        return $base . self::removeDotSegments($path);
+    }
+
+    /** RFC 3986 §5.2.4: `/a/b/../c` is `/a/c`; the query and fragment are left as they are. */
+    private static function removeDotSegments(string $path): string
+    {
+        $rest = \strpbrk($path, '?#');
+        $path = false === $rest ? $path : \substr($path, 0, -\strlen($rest));
+        $out  = [];
+        foreach (\explode('/', $path) as $i => $segment) {
+            if ('.' === $segment && $i > 0) {
+                continue;
+            }
+            if ('..' === $segment && $i > 0) {
+                \array_pop($out);
+                continue;
+            }
+            $out[] = $segment;
+        }
+        $path = \implode('/', $out);
+
+        return ('' === $path || '/' !== $path[0] ? '/' : '') . $path . ($rest ?: '');
     }
 }

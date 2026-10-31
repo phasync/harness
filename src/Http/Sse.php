@@ -12,6 +12,14 @@ namespace Harness\Http;
  */
 final class Sse
 {
+    /** False when the response says it is something other than an event stream (a JSON body on a 200, say). */
+    public static function isEventStream(Response $response): bool
+    {
+        $type = \strtolower(\trim(\explode(';', $response->headers['content-type'] ?? 'text/event-stream')[0]));
+
+        return 'text/event-stream' === $type;
+    }
+
     /**
      * @param iterable<string> $chunks
      *
