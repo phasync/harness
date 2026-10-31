@@ -78,7 +78,16 @@ everything started inside it has finished. The turn runs in its own coroutine, a
 and its own `fiber\run()`, so it ends with everything it started finished. A `\LogicException` (misuse, such as
 an option the provider cannot honour), from the model, a middleware or a tool, ends the turn
 `Failed` and is rethrown from the iteration after `TurnEnded`; runtime failures end the turn
-`Failed` and are in `ended()`.
+`Failed` and are in `ended()`. The rethrow happens inside the consumer's `foreach`, so wrap the
+loop in `try`, not the code after it:
+
+```php
+try {
+    foreach ($run->turn($message) as $event) { /* render */ }
+} catch (\LogicException $e) {     // misuse to fix; $run->ended() is set: Failed, with the error
+    report($e);
+}
+```
 
 A failed turn discards the step in progress, as a cancelled one does: its partial assistant
 message, and the results of its calls that finished. `Ended::$appended` and `messages()` hold only
@@ -103,6 +112,11 @@ Latency: a turn waiting on the model ends within 250 ms of `cancel()` (the `Stre
 at once when a delta arrives first). A turn in a tool call ends when the tool returns: within
 250 ms for `Shell` (which then kills the process group) and for `Mcp` over stdio, and for your own
 tools as soon as they check `Call::isCancelled()`.
+
+`cancel()` and `interrupt()` act on the `Run` object of the process that runs the turn. A web host
+that wants to stop a turn from another request keeps the run in the worker that runs it (Swerve
+keeps it across requests, so the stop request reaches it there), or ends the turn by closing the
+client's stream: the route stops iterating, which cancels the turn as above.
 
 ### Interrupt, edit, resume
 
@@ -135,12 +149,21 @@ continue: the partial holds the complete calls only.
 
 ### Steering a running turn
 
-`$run->interject($userMessage)` queues a user message for the running turn. It lands at the next
-step boundary, after the step's tool results and before the next model call, with an
-`Interjected(message)` event, so a long turn is redirected without losing the step in flight.
-Several land in order. A reply without tool calls does not end the turn while one waits: the model
-answers it. Those that cannot land before the turn ends (it stopped, paused, failed or was
-cancelled) are in `Ended::$queued`. With no turn running it throws: use `turn()`.
+`$run->interject($userMessage, Delivery::Steer)` gives the running turn a user message, delivered
+one of two ways, each landing with an `Interjected(message, delivery)` event:
+
+- `Delivery::Steer` (the default) redirects the turn. The message lands at the next step boundary,
+  after the step's tool results and before the next model call; the step's tool calls that have
+  not started yet are skipped, each with the error result `Skipped: the user sent a message`, so
+  the transcript stays paired, while running calls finish. A reply without tool calls does not end
+  the turn while one waits: the model answers it.
+- `Delivery::Queue` is a follow-up. The message waits until the turn would otherwise end `Done`,
+  then starts another step with it; several queue in order, one step each.
+
+Those that cannot land before the turn ends (it stopped, paused, failed or was cancelled) are in
+`Ended::$queued`, the steering ones first. With no turn running it throws: use `turn()`.
+[`examples/chat.php`](examples/chat.php) steers with a line typed while a reply streams and queues
+one that starts with `/queue`.
 
 ### The context window
 
@@ -208,7 +231,7 @@ fields, so an SSE route writes one line per event; `Events::fromArray()` rebuild
 ```
 TurnStarted(turn)                       TurnEnded(turn, reason, usage, ?error, ?finish)
 StepStarted(turn, n)                    StepEnded(turn, n)                    n = 0: resumed calls
-MessageStarted(id)                      MessageResumed(id)                    Interjected(message)
+MessageStarted(id)                      MessageResumed(id)                    Interjected(message, delivery)
 TextDelta(id, text)                     ReasoningDelta(id, text)
 ToolCallStarted(id, name)               ToolInputDelta(id, json)   ToolCallReady(id, name, input)
 ToolDecided(id, needId, decision)       ToolProgress(id, value)    ToolEnded(id, Result|Throwable)
@@ -278,6 +301,26 @@ Deny by returning `new Result([...], error: true)`; truncate by rewriting the `R
 rewriting the `Prompt` (`ModelMiddleware::stream($prompt, $next)`, passing `$prompt->cancel` on to
 the new one; `Harness\Compact` does it); trace by wrapping both. To observe without altering, read
 the events.
+
+Shape the tool list of a step the same way: hand `$next` a `Prompt` with other `tools`, fewer for a
+phase, or one the `ToolSource` holds but the middleware shows only for some steps. The run executes
+a call only against the tools the model was offered, by name: a call to a tool the middleware left
+out is the unknown-tool error result, as for any name the model invents. A tool renamed in the
+prompt runs only when the `ToolSource` has a tool of the new name.
+
+```php
+// No writes until the model has read something.
+final class ReadFirst implements ModelMiddleware
+{
+    public function stream(Prompt $prompt, Closure $next): iterable
+    {
+        $read  = count($prompt->messages) > 1;
+        $tools = $read ? $prompt->tools : array_values(array_filter($prompt->tools, fn (ToolSpec $t) => $t->hints->readOnly));
+
+        return $next(new Prompt($prompt->system, $prompt->messages, $tools, $prompt->options, $prompt->cancel, $prompt->continue));
+    }
+}
+```
 
 Retry by wrapping `$next`, but only before the first delta went on: the run's accumulator folds each
 delta as it is yielded, so a stream restarted after that would add its text a second time. Past the
@@ -437,12 +480,23 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Agents` | `AgentTool`: a sub-agent as a tool | [docs/agents.md](docs/agents.md) |
 | `Harness\Mcp` | `McpServer`: an MCP server's tools, over stdio or Streamable HTTP | [docs/mcp.md](docs/mcp.md) |
 | `Harness\Transcript` | `JsonlTranscript`, `JsonlEvents`: the conversation and the events in files | [docs/transcript.md](docs/transcript.md) |
-| `Harness\Compact` | `Compact`: keeps the prompt within a token budget with a summary | [docs/compact.md](docs/compact.md) |
-| `Harness\Policy` | `Policy`, `Rule`, `Verdict`: allow, deny or ask by tool name and hints | [docs/policy.md](docs/policy.md) |
+| `Harness\Compact` | `Compact`, `State`: keeps the prompt within a token budget with a checkpoint | [docs/compact.md](docs/compact.md) |
+| `Harness\Policy` | `Policy`, `Rule`, `Shell`, `Verdict`: allow, deny or ask by tool name, hints and parsed shell commands | [docs/policy.md](docs/policy.md) |
 | `Harness\Testing` | `FakeModel`, `FakeTransport`, `TestCall`, `TestPrompt` | [docs/testing.md](docs/testing.md) |
 
 `Options::$provider` is keyed by the provider module's lowercase name (`openai`, `anthropic`); a
-third-party provider documents its own key. `Sse` parses `text/event-stream` only; a backend that
+third-party provider documents its own key.
+
+Porting a hand-written `Model` from an earlier beta, check:
+
+- `Transport::post(string $url, array $headers, string $body, Cancel $cancel): Response` takes the
+  turn's signal: pass `$prompt->cancel`, so `cancel()` reaches the request.
+- `Prompt::$continue` is true when the last message is an assistant message to continue (a
+  `Resume`): send it as one the model extends, or throw `UnsupportedOptionException` naming the
+  fallback.
+- The built-in providers merge `Options::$provider[<key>]` into the request shallowly, last
+  (`array_replace`): a request that nests its knobs under one key must merge that key itself, as
+  Ollama's native `options` would need. `Sse` parses `text/event-stream` only; a backend that
 streams NDJSON splits `body()` on newlines itself ([docs/http.md](docs/http.md)).
 
 ## Examples
@@ -451,7 +505,7 @@ Each is one file, runnable against any Chat Completions endpoint:
 
 ```bash
 export HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert
-php examples/chat.php                       # streamed conversation; Ctrl-C interrupts a reply to edit it, a line typed meanwhile steers it
+php examples/chat.php                       # streamed conversation; Ctrl-C interrupts a reply to edit it, a line typed meanwhile steers it, /queue queues it
 php examples/files.php ./project "task"     # file tools; writes need approval on the terminal
 php examples/shell.php ./project "task"     # a shell; every command needs approval
 php examples/subagent.php ./project "question"   # delegates reading to sub-agents, rendered per line

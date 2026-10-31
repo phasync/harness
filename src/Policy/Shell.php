@@ -273,7 +273,7 @@ final readonly class Shell
             if ([] === $argv) {
                 return [] !== $writes ? 'a redirect without a command' : ($required || $dangling ? 'an operator without a command on each side' : null);
             }
-            $commands[]               = [$argv, $globbed, $writes];
+            $commands[]                = [$argv, $globbed, $writes];
             [$argv, $globbed, $writes] = [[], [], []];
 
             return null;

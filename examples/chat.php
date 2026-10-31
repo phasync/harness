@@ -5,13 +5,16 @@ declare(strict_types=1);
 /*
  * A streamed conversation on the terminal. Ctrl-C during a reply interrupts it: you may retype its
  * last line (Enter keeps it) and the model goes on from there. A line typed while a reply streams
- * is an interjection: the model reads it at the next step. Ctrl-C at the prompt quits.
+ * steers it: the model reads it at the next step, and tool calls not yet started are skipped. A
+ * line ended with Alt+Enter, or starting with /queue (terminals differ), is queued instead: the
+ * model answers it after the current reply. Ctrl-C at the prompt quits.
  *
  *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/chat.php
  */
 
 require __DIR__ . '/../vendor/autoload.php';
 
+use Harness\Delivery;
 use Harness\Event;
 use Harness\Http\StreamTransport;
 use Harness\Message;
@@ -41,14 +44,17 @@ $run   = new Run($model, new Tools(), system: 'You are a helpful assistant. Be c
 });
 
 fiber\run(function () use ($run) {
-    // One reader owns STDIN: while a reply streams, a line is an interjection; otherwise it is
-    // the next line the prompt asks for.
+    // One reader owns STDIN: while a reply streams, a line steers or queues; otherwise it is the
+    // next line the prompt asks for.
     $lines   = new SplQueue();
     $arrived = null;
     fiber\go(function () use ($run, $lines, &$arrived) {
         while (false !== ($line = \fgets(fiber\readable(\STDIN)))) {
             if ($run->isRunning() && '' !== \trim($line)) {
-                $run->interject(new Message(Role::User, [new Text(\trim($line))]));
+                // Alt+Enter arrives as ESC before the newline.
+                $queue = \str_starts_with(\trim($line), '/queue') || \str_ends_with(\rtrim($line, "\r\n"), "\e");
+                $text  = \trim(\preg_replace('{^\s*/queue\b}', '', \rtrim(\rtrim($line, "\r\n"), "\e")));
+                $run->interject(new Message(Role::User, [new Text($text)]), $queue ? Delivery::Queue : Delivery::Steer);
                 continue;
             }
             $lines->enqueue($line);
@@ -85,7 +91,7 @@ fiber\run(function () use ($run) {
                     echo ($reasoning ? "\n\n" : '') . $event->text;
                     $reasoning = false;
                 } elseif ($event instanceof Event\Interjected) {
-                    echo "\n\e[2m[you, during the reply: " . textOf($event->message) . "]\e[0m\n";
+                    echo "\n\e[2m[you, " . (Delivery::Queue === $event->delivery ? 'queued' : 'steering') . ': ' . textOf($event->message) . "]\e[0m\n";
                 }
             }
             $ended = $run->ended();

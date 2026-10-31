@@ -23,9 +23,50 @@ The first rule that matches decides; with none, `$default` (`Verdict::Ask` unles
 | `Rule::hints(Verdict, ?bool $readOnly, ?bool $destructive, ?bool $idempotent, ?bool $openWorld)` | tools whose `Hints` have every value given |
 | `Rule::when(Closure(ToolCall, Call): bool, Verdict, string $text)` | anything else; `$text` names the rule |
 
+| `Rule::shell(list<Shell> $rules, string $tool = 'shell', Verdict $otherwise = Verdict::Ask)` | calls to the shell tool, decided by the parsed command (below) |
+
 Bind rules to the tool's name and hints. A test over the arguments (a pattern over a shell command)
 is bypassable: a model that is refused `rm -rf` writes `find -delete`. `when()` exists for what
-names and hints cannot say (the host's `context`, a time of day), not for argument filters.
+names and hints cannot say (the host's `context`, a time of day), not for argument filters. The
+shell tool is the one place where arguments decide, and `Rule::shell()` matches them parsed.
+
+## Shell commands
+
+```php
+$policy = new Policy([
+    Rule::shell([
+        Shell::allow('git', ['status', 'diff', 'log'], flags: ['--stat', '-p']),
+        Shell::allow('ls'),
+        Shell::deny('rm'),
+        Shell::allow('composer', ['test', 'install']),
+    ]),
+    Rule::hints(Verdict::Allow, readOnly: true),
+]);
+```
+
+The `command` input is parsed by a small POSIX-shell tokenizer (words, single and double quotes,
+backslashes, `&&`, `||`, `;`, `|`, `&`, newlines, redirects, comments) into simple commands, and
+each is matched, the first matching `Shell` rule deciding it:
+
+- `Shell::allow($program, ?array $subcommands = null, ?array $flags = null)` matches the program by
+  its exact name (`ls`, never `/tmp/x/ls`), its first argument against `$subcommands`, and every
+  option before `--` (`-p`, `--stat`, the name of `--name=value`) against `$flags`, when given.
+  Other arguments are free; a word with an unquoted glob never matches a list of flags, since it
+  could expand to any option.
+- `Shell::deny($program)` matches the program by its base name (`rm`, `/bin/rm`, `'r'm`, `r\m`),
+  whatever its arguments.
+- The wrappers `env`, `nice`, `timeout`, `sudo`, `nohup` and `xargs` are peeled with their options,
+  and the wrapped command is matched (`env rm`, `sudo -u root rm`, `ls | xargs rm` are `rm`).
+
+The line is denied when any command matches a deny rule, allowed when every command matches an
+allow rule, and otherwise gets `$otherwise` (`Ask`, or `Deny`). It is asked about, whatever
+`$otherwise`, when it cannot be checked: a `$` expansion, `$(...)`, backticks, a here-document,
+parentheses, braces, an unknown wrapper option, `sudo -s`/`-i`, `env -S`; an environment
+assignment (`PATH=... ls`, `env LD_PRELOAD=... ls`); output redirected to a file (`/dev/null` and
+`2>&1` are fine). So `git status; rm -rf /` is denied, `ls | sh` and `ls $(rm -rf /)` are asked
+about. The approval reason and the denial name the command that decided (`the shell command 'sh'
+matches no allow rule`). Allowing an interpreter (`bash`, `sh`, `python`, `find` with `-exec`)
+allows what it runs; give such programs a list of flags or leave them to `Ask`.
 
 ## Verdicts
 

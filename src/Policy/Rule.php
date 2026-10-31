@@ -18,7 +18,7 @@ use Harness\Part\ToolCall;
 final readonly class Rule
 {
     /**
-     * @param \Closure(ToolCall, Call): bool                    $test
+     * @param \Closure(ToolCall, Call): bool                                $test
      * @param (\Closure(ToolCall, Call): array{0: Verdict, 1: string})|null $decide the verdict and text for a matched call, when they depend on it
      */
     private function __construct(public string $text, public Verdict $verdict, private \Closure $test, private ?\Closure $decide = null)
@@ -97,6 +97,7 @@ final readonly class Rule
             if (!\is_string($command)) {
                 return [Verdict::Deny, 'shell calls need a string "command"'];
             }
+
             return Shell::check($command, $rules, $otherwise);
         });
     }

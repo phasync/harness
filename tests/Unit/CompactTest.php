@@ -504,7 +504,8 @@ it('takes a checkpoint cut at the output token limit as a collapse: asked once m
     expect($summarizer->prompts)->toHaveCount(2)
         ->and($prompt->messages[1]->parts[0]->text)->toEndWith('a whole checkpoint')
         ->and($compact->last()->finish)->toBe(FinishReason::Stop)
-        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer was cut at its output token limit after 15 bytes (finish: length); asking once more']);
+        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer was cut at its output token limit after 15 bytes (finish: length); asking once more, for a shorter checkpoint'])
+        ->and($summarizer->prompts[1]->messages[0]->parts[0]->text)->toBe($summarizer->prompts[0]->messages[0]->parts[0]->text . "\n\nAn earlier answer was cut at the output limit after 15 bytes: write the checkpoint shorter, under 210 words.");
 
     $twice = new Compact(new FakeModel($cut, $cut), 2000, bytesOf(...));
     expect(fn () => step($twice, agentic(5)))->toThrow(RuntimeException::class, 'the summarizer was cut at its output token limit after 15 bytes (finish: length), twice');

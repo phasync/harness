@@ -73,9 +73,10 @@ $explorer = new Run($model, new Tools(new ReadFile($root), new Grep($root)), mid
 $parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Reads the project')));
 ```
 
-One instance may serve every child, concurrent ones included: it keeps the last 8 summaries, each
-under the messages it summarized, so each child gets and reuses its own. The cost: beyond 8 children
-compacting at once a summary is evicted and recomputed when its child needs it again, and `last()`,
+One instance may serve every child, concurrent ones included: it keeps the last 8 checkpoints, each
+keyed by a content hash of the messages it covers, so each child gets, reuses and updates its own.
+The cost: beyond 8 children compacting at once a checkpoint is evicted and written again when its
+child needs it, and `last()`,
 the counter's calibration and the budget floor are the instance's, shared by all children. Give each
 template its own `Compact` for `last()` per child ([compact.md](compact.md)).
 

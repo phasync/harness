@@ -198,7 +198,7 @@ final class Compact implements ModelMiddleware
             $reported                                         = 0;
             $started                                          = false;
             try {
-                if (null === $sent || $compacted->messages != $sent) {
+                if (null === $sent || !self::same($compacted->messages, $sent)) {
                     $sent = $compacted->messages;
                     foreach ($next($compacted) as $delta) {
                         $started = true;
@@ -356,12 +356,12 @@ final class Compact implements ModelMiddleware
                 ? $this->unchanged($prompt, $cal)
                 : $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
         }
-        $previous       = null === $checkpoint ? null : \strlen($checkpoint->text);
+        $previous        = null === $checkpoint ? null : \strlen($checkpoint->text);
         [$text, $finish] = $this->summarize($prompt->system, \array_slice($messages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel, $budget);
-        $lifted         = null !== $latest && $latest >= $kept && $latest < $cut ? $latest : null;
-        $new            = new Checkpoint($hashes[$cut], $cut, $kept, $lifted, $text, $previous, $finish);
-        $next           = self::view($messages, $new);
-        $nextCount      = ($this->count)(self::with($prompt, $next));
+        $lifted          = null !== $latest && $latest >= $kept && $latest < $cut ? $latest : null;
+        $new             = new Checkpoint($hashes[$cut], $cut, $kept, $lifted, $text, $previous, $finish);
+        $next            = self::view($messages, $new);
+        $nextCount       = ($this->count)(self::with($prompt, $next));
         if ($nextCount >= $counted) {
             // Two small messages replaced by a larger checkpoint: keep them, and spend no side
             // call on a part this small again.
@@ -446,8 +446,8 @@ final class Compact implements ModelMiddleware
      * with it. The agent's instructions and the `$kept` first messages go along as context (the
      * task, in the terms the instructions use). It is asked to stay under a quarter of the budget
      * and three quarters of the summarizer's output tokens, in words. A collapsed one (empty, cut at
-     * the token limit, or under a quarter of `$previous`) is asked for once more, and fails the step
-     * the second time.
+     * the token limit, or under a quarter of `$previous`) is asked for once more, one cut at the limit
+     * for fewer words, and fails the step the second time.
      *
      * @param list<Message> $kept
      * @param list<Message> $segment
@@ -461,7 +461,7 @@ final class Compact implements ModelMiddleware
         if (null !== $this->summarizerOptions->maxOutputTokens) {
             $tokens = \min($tokens, \intdiv(3 * $this->summarizerOptions->maxOutputTokens, 4));
         }
-        $words  = \max(50, (int) (0.7 * $tokens));
+        $words   = \max(50, (int) (0.7 * $tokens));
         $context = '';
         foreach ($kept as $message) {
             $context .= self::render($message);
@@ -504,7 +504,12 @@ final class Compact implements ModelMiddleware
             if (2 === $attempt) {
                 throw new \RuntimeException("Compact: the summarizer $what, twice; a collapsed checkpoint loses what the agent knew. Give it more output tokens or turn its thinking off in summarizerOptions, or use another summarizer");
             }
-            $this->log->warning("Compact: the summarizer $what; asking once more", ['bytes' => \strlen($text), 'previous' => $bytes]);
+            if (FinishReason::Length === $finish && '' !== $text) {
+                // The same ask would be cut the same way: ask for less.
+                $shorter = (int) (0.6 * $words);
+                $prompt  = new Prompt(self::PROMPT, [new Message(Role::User, [new Text($ask . "\n\nAn earlier answer was cut at the output limit after " . \number_format(\strlen($text)) . " bytes: write the checkpoint shorter, under $shorter words.")])], [], $this->summarizerOptions, $cancel);
+            }
+            $this->log->warning("Compact: the summarizer $what; asking once more" . (FinishReason::Length === $finish && '' !== $text ? ', for a shorter checkpoint' : ''), ['bytes' => \strlen($text), 'previous' => $bytes]);
         }
     }
 
@@ -567,6 +572,26 @@ final class Compact implements ModelMiddleware
         }
 
         return $bytes;
+    }
+
+    /**
+     * Whether two message lists have the same content.
+     *
+     * @param list<Message> $a
+     * @param list<Message> $b
+     */
+    private static function same(array $a, array $b): bool
+    {
+        if (\count($a) !== \count($b)) {
+            return false;
+        }
+        foreach ($a as $i => $message) {
+            if ($message !== $b[$i] && $message->toArray() !== $b[$i]->toArray()) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /** @param list<Message> $messages */

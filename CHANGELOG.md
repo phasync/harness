@@ -1,5 +1,93 @@
 # Changelog
 
+## 0.0.1-beta6
+
+Implements SPEC.md revision 6: Compact's summary becomes a checkpoint that is updated rather than
+re-summarized, steering gets two delivery modes, the shell tool gets a policy over parsed argv.
+Round 5's research reader looped after many compaction rounds; with these changes the live readers
+finish (see "Compact" below).
+
+### Changed (breaking)
+
+- **`Compact` writes a sectioned checkpoint** (Goal; Progress: Done, In progress, Blocked;
+  Decisions; Known; Next; Context) instead of a prose summary under four headings, and lists every
+  file or resource already read under Done. The agent gets it headed "[A checkpoint of the earlier
+  conversation ... What is under Done is finished: do not do it again.]" with the acknowledgement
+  "Understood. I continue from the checkpoint." Round 5's reader re-read files and re-delegated
+  because the summary said what was asked, not what was finished. The side call's ask, the log
+  lines and the collapse messages name a checkpoint.
+- **A later round updates the checkpoint**: the side call gets the current checkpoint and the
+  messages since it, with the instruction to keep every fact it holds. Beta5 summarized the earlier
+  summary again with the oldest half of what followed, round after round, and facts thinned out.
+  One round per step now.
+- **The most recent `keepRecentTokens` stay verbatim** (new last constructor parameter, default a
+  quarter of the budget; over half the budget throws at first use) instead of the oldest half of
+  the messages being cut. The step in flight (the last assistant message and its results) always
+  stays, and the latest user message stays verbatim after the checkpoint when the cut falls after
+  it: in round 5 a tight budget summarized the current question away and the agent answered an old
+  one. `Compaction::$kept` counts the lifted message.
+- **`Compact::state(): Compact\State` and the `state:` constructor parameter replace
+  `calibration()` and `calibration:`.** `State` holds the `Calibration` and the latest checkpoints
+  (at most 8), with `toArray()`/`fromArray()`, so a host that builds a Compact per request persists
+  one value and never writes a checkpoint it already has (beta5 persisted only the calibration and
+  re-summarized on every request over the budget). `Calibration` stays as the value inside it.
+  Upgrade: `calibration: Calibration::fromArray($c)` becomes `state: State::fromArray($s)`, and
+  `$compact->calibration()?->toArray()` becomes `$compact->state()->toArray()`.
+- **Checkpoints are keyed by a content hash** of the messages they cover, not by the same `Message`
+  objects: a conversation rebuilt from arrays finds its checkpoint.
+- **`Run::interject(Message $user, Delivery $delivery = Delivery::Steer)`.** A steer now skips the
+  step's tool calls that have not started, each with the error result "Skipped: the user sent a
+  message"; running calls finish. Beta5 ran them all and then landed the message, so a user who
+  said "stop, not that file" watched the remaining writes happen (pi skips them). A message that
+  should wait instead is `Delivery::Queue` (below).
+- **`Event\Interjected` carries `delivery`**: a new constructor argument, `toArray()` gives it, and
+  `Events::fromArray()` requires it (a beta5 events file with an `interjected` line does not replay).
+- **A call runs only against the tools the model was offered**, after middleware: a
+  `ModelMiddleware` that hands `$next` fewer tools makes a call to a left-out tool the unknown-tool
+  error result. Beta5 ran it from the `ToolSource` anyway, so a phase without write tools could
+  still write. A resumed call (step 0) and a step whose middleware answered without calling the
+  model are checked against the whole `ToolSource`, as before.
+- The budget floor's message says "room above it for the checkpoint and the recent messages".
+
+### Added
+
+- **`Harness\Delivery`** (`Steer`, `Queue`). `Queue` waits until the turn would otherwise end
+  `Done`, then starts another step with the message, one per step, in order (pi's follow-up,
+  OpenCode's queue). Leftovers are in `Ended::$queued`, the steering ones first.
+- **`Compact` retries a prompt the provider rejects as too long** (`ErrorKind::ContextTooLong`,
+  before the first delta) at 85, 70, 50 and 35 % of the budget, each retry logged, then rethrows
+  (OpenCode's overflow trigger). Any other error, or one after the first delta, is rethrown at once.
+- **Each checkpoint is logged in full at `debug`**, after the `info` line with its sizes.
+- **`Compact` bounds the checkpoint**: the ask says to stay under a quarter of the budget and three
+  quarters of `summarizerOptions`' output tokens, in words, and a checkpoint cut at the output limit
+  is asked for again in 60 % of the words. Live on black, 4 of 10 reader checkpoints were cut at
+  the research tool's 800 output tokens before this.
+- **`Compact\Checkpoint`**, a checkpoint as a value (`hash`, `covered`, `kept`, `lifted`, `text`,
+  `previousBytes`, `finish`; `removed()`, `toArray()`, `fromArray()`).
+- **`Policy\Shell` and `Rule::shell(list<Shell>, string $tool = 'shell', Verdict $otherwise =
+  Verdict::Ask)`**: a rule for the shell tool that matches parsed argv (Crush's rule). A small
+  POSIX-shell tokenizer splits the command into simple commands over `&&`, `||`, `;`, `|`, `&`;
+  `env`, `nice`, `timeout`, `sudo`, `nohup` and `xargs` are peeled; a line is denied when any
+  command matches `Shell::deny()`, allowed when every one matches `Shell::allow($program,
+  $subcommands, flags:)`, and asked about when it cannot be parsed (`$`, substitution, backticks,
+  here-documents, subshells, braces), sets the environment or redirects output to a file. Tested
+  with `env rm`, `git status; rm -rf`, `ls | sh`, `$(rm)` and more.
+- **`Rule::decide(ToolCall, Call): ?Rule`**: the rule that decides a call, for `shell()` one whose
+  verdict and text are that command's; `Policy` uses it.
+
+### Docs
+
+- README: a tool's or middleware's `\LogicException` is rethrown inside the consumer's `foreach`:
+  wrap the loop in `try`; `cancel()`/`interrupt()` act on the `Run` of the process that runs the
+  turn (keep it in the worker, or close the client's stream); the porting checklist for a
+  hand-written `Model` (`Transport::post()` with `$prompt->cancel`, `Prompt::$continue`, the shallow
+  `Options::$provider` merge); the two delivery modes; shaping the tool list in a `ModelMiddleware`,
+  with a test.
+- docs/compact.md rewritten around the checkpoint; docs/policy.md has a Shell commands section;
+  docs/agents.md says checkpoints.
+- `examples/chat.php`: a line typed while a reply streams steers it, one ended with Alt+Enter or
+  starting with `/queue` is queued. `examples/web.php` persists `Compact\State`.
+
 ## 0.0.1-beta5
 
 Implements SPEC.md revision 5: interrupt, edit and resume a reply; steer a running turn; a known
