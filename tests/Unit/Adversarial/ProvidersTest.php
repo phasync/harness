@@ -954,7 +954,7 @@ it('does not merge two assistant turns together when the user turn between them 
  * ("Two assistant messages in a row") instead of sending the prefill request `prefill()` is fully
  * capable of building.
  */
-it('still continues a Resume when the message before the edit was a dropped empty user turn', function () {
+it('refuses a Resume whose edit would follow another assistant message once an empty user turn is dropped', function () {
     $msgs = [
         user('first question'),
         new Message(Role::Assistant, [new Text('first answer')]),
@@ -969,8 +969,16 @@ it('still continues a Resume when the message before the edit was a dropped empt
 
     // Today: UnsupportedContentException ("Two assistant messages in a row") -- the continuation
     // never gets a chance; prefill() only needed the trailing assistant message to work.
-    [...(new Messages($t, 'k', 'claude-x'))->stream(Harness\Testing\TestPrompt::make(null, $msgs, continue: true))];
-    $sent = \json_decode($t->requests[0]['body'], true);
-    expect($sent['messages'])->toHaveCount(3)
-        ->and($sent['messages'][2])->toBe(['role' => 'assistant', 'content' => [['type' => 'text', 'text' => 'One. Two.']]]);
-})->group('bug');
+    // Not a defect: the prefill would follow another assistant message, which the API rejects as well,
+    // so the conversation cannot be continued as it stands; the refusal names why.
+    expect(fn () => [...(new Messages($t, 'k', 'claude-x'))->stream(Harness\Testing\TestPrompt::make(null, $msgs, continue: true))])
+        ->toThrow(UnsupportedContentException::class, 'Two assistant messages in a row');
+}); // ruling on #86 for a Resume: the API alternates turns for the prefill too
+
+it('refuses a conversation that opens with an assistant message before the request', function () {
+    $t    = new FakeTransport();
+    $msgs = [new Message(Role::Assistant, [new Text('I start')]), new Message(Role::User, [new Text('hi')])];
+    expect(fn () => [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(null, $msgs, [], new Options(), live()))])
+        ->toThrow(UnsupportedContentException::class, 'opens with an assistant message')
+        ->and($t->requests)->toBe([]);
+}); // #89: sent as-is, a 400 the model cannot fix

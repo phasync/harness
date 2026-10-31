@@ -45,7 +45,7 @@ final readonly class Grep implements Tool
         $path    = Input::string($input, 'path', '.');
         $glob    = isset($input['glob']) ? Glob::regex(Input::string($input, 'glob')) : null;
         $offset  = Input::int($input, 'offset', 0, 0);
-        $regex   = '#' . \str_replace('#', '\#', $pattern) . '#' . (Input::bool($input, 'ignore_case', false) ? 'i' : '');
+        $regex   = '#' . \str_replace('#', '\#', $pattern) . '#u' . (Input::bool($input, 'ignore_case', false) ? 'i' : ''); // u: case folding and . reach beyond ASCII
         \set_error_handler(static fn () => true);
         try {
             $valid = false !== \preg_match($regex, '');

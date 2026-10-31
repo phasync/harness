@@ -288,6 +288,9 @@ final readonly class Messages implements Model
                 continue;
             }
             $last = \array_key_last($out);
+            if (null === $last && 'assistant' === $role) {
+                throw new UnsupportedContentException('The conversation opens with an assistant message; the Messages API needs a user message first');
+            }
             if (null !== $last && $out[$last]['role'] === $role) {
                 if ('assistant' === $role) { // two replies in a row are not one reply: the host's prompt, or the user turn between them, is empty
                     throw new UnsupportedContentException('Two assistant messages in a row; the Messages API alternates user and assistant turns, and nothing of the user message between them was sendable');

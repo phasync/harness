@@ -463,4 +463,4 @@ it('matches case-insensitively on a non-ASCII letter, not just ASCII ones', func
     // BUG: today this is "No lines match 'CAFÉ'" -- the 'i' modifier alone never case-folds 'É'
     // against 'é' because the regex is missing PCRE's 'u' (UTF-8) modifier.
     expect($result->content[0]->text)->toContain('café content here');
-})->group('bug');
+}); // #88: the i modifier without u folds ASCII only
