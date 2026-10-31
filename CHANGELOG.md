@@ -202,7 +202,8 @@
 - `web_fetch` converts the body to UTF-8 from the `charset` of `Content-Type`, else from a `<meta
   charset>` in an HTML page's first 1024 bytes, instead of letting libxml guess (a Latin-1 page's
   bytes were taken as UTF-8); a charset mbstring does not know is an error result (#98). A leading
-  byte-order mark names the encoding and is stripped, outranking a wrong header (#100).
+  byte-order mark names the encoding and is stripped, outranking a wrong header (#100); the meta
+  prescan skips HTML comments (#102).
 - `shell` widens the cut past `maxOutput` to the line boundaries the kept parts have, so the
   `[N bytes cut]` marker sits between real lines and one unbroken line gets it inline, instead of
   wrapping the marker in two line breaks the output never had (#99).

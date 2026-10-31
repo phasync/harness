@@ -219,8 +219,12 @@ final readonly class WebFetch implements Tool
                 break;
             }
         }
-        if ('' === $charset && $html && 1 === \preg_match('/<meta[^>]*charset\s*=\s*["\']?\s*([a-z0-9._:-]+)/i', \substr($body, 0, 1024), $m)) {
-            $charset = \strtolower($m[1]); // the page's own declaration, where the HTML prescan looks for it
+        if ('' === $charset && $html) {
+            // the page's own declaration, where the HTML prescan looks for it: the first 1024 bytes, comments skipped
+            $window = (string) \preg_replace('/<!--.*?(-->|$)/s', '', \substr($body, 0, 1024));
+            if (1 === \preg_match('/<meta[^>]*charset\s*=\s*["\']?\s*([a-z0-9._:-]+)/i', $window, $m)) {
+                $charset = \strtolower($m[1]);
+            }
         }
         if ('' !== $charset && 'utf-8' !== $charset && 'utf8' !== $charset) {
             try {

@@ -1113,3 +1113,57 @@ it('reports a name collision when two tools sanitize to the same name', function
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class, "'search.web' and 'search_web' both become 'search_web'");
 }); // #96: two McpTools came back, both named search_web; a name-keyed map kept one
+
+/*
+ * Round 21, the last item on the MCP list: a tool whose `inputSchema` has no top-level `"type":
+ * "object"` -- the exact shape `$ref` and `oneOf` schemas take. `McpServer::spec()`
+ * (src/Mcp/McpServer.php:127) hands the server's `inputSchema` straight to `new ToolSpec(...)`
+ * unchanged (only a missing schema gets the `['type' => 'object']` fallback), and `ToolSpec`'s own
+ * constructor (src/ToolSpec.php:33-35) is what actually enforces the requirement:
+ *   if (($schema['type'] ?? null) !== 'object') {
+ *       throw new \InvalidArgumentException("The input schema of tool '$name' must have ...");
+ *   }
+ * A schema composed with `oneOf` (a perfectly ordinary way to describe "accepts shape A or shape
+ * B", each branch itself `"type": "object"`) or with a bare `$ref` has no top-level `type` key at
+ * all, so this throws every time -- but it throws a global `\InvalidArgumentException`, not
+ * `Harness\Mcp\McpException`. Nothing between the server's connection and this constructor call
+ * catches it: `tools()`'s `foreach` has no try/catch around `$this->spec($tool)`, unlike the
+ * `x-mcp-header` case a few lines above it, which excludes just the one bad tool and keeps going.
+ * Here, one tool with a composed schema aborts `tools()` entirely -- every other, well-formed tool
+ * the server offers is lost too -- and whatever catches `McpException` elsewhere in this module
+ * (the one exception type this module's own API promises, per its docblock: "two server tools
+ * whose names become the same are an `McpException`") does not catch this at all: a generic SPL
+ * exception, naming no server and carrying no indication this came from MCP tool discovery,
+ * crosses straight out of `Harness\Mcp` into the caller.
+ *
+ * Verified directly against the real code (both adapters): an MCP server listing one tool whose
+ * `inputSchema` is `['oneOf' => [...]]` (two alternative object shapes, no top-level `type`) makes
+ * `McpServer::tools()` throw `InvalidArgumentException('The input schema of tool \'pick\' must
+ * have "type": "object", got null')` -- not `McpException`, and a `$ref`-only schema reproduces
+ * the identical failure for the same reason.
+ */
+it('reports a non-object input schema (oneOf/$ref) as an McpException, not a raw InvalidArgumentException', function () {
+    $conn = new class implements Connection {
+        public function request(string $method, array $params, Cancel $cancel, ?Closure $notify = null, array $headers = []): array
+        {
+            if ('server/discover' === $method) {
+                return ['supportedVersions' => [McpServer::VERSION]];
+            }
+
+            return ['tools' => [
+                ['name' => 'pick', 'description' => 'Pick one of two shapes', 'inputSchema' => [
+                    'oneOf' => [
+                        ['type' => 'object', 'properties' => ['a' => ['type' => 'string']]],
+                        ['type' => 'object', 'properties' => ['b' => ['type' => 'string']]],
+                    ],
+                ]],
+            ], 'ttlMs' => 60000];
+        }
+    };
+    $server = new McpServer($conn);
+
+    // Today: a raw InvalidArgumentException from ToolSpec's constructor, naming no server and not
+    // an instance of McpException -- this module's own documented exception type.
+    expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
+        ->toThrow(McpException::class);
+})->group('bug'); // a oneOf/$ref inputSchema kills tools() with the wrong exception type, taking every other tool down with it

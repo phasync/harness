@@ -628,3 +628,25 @@ it('decodes a UTF-16 body from its byte-order mark', function () {
 
     expect((new WebFetch($transport, 'agent'))->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)->toBe('café');
 }); // #100
+
+/*
+ * When the Content-Type header carries no charset, `toText()` falls back to a prescan regex --
+ * `/<meta[^>]*charset\s*=\s*["\']?\s*([a-z0-9._:-]+)/i` -- run on the first 1024 raw bytes of the
+ * body, BEFORE the DOM parser ever sees it. The regex is a plain substring search, not a
+ * structural check: it does not know or care whether the "<meta ... charset=" text it matched is
+ * an actual tag in the document head, or just literal bytes that happen to look like one -- inside
+ * an HTML comment, a <script> string, a <pre>/<code> sample, or anywhere else a server might
+ * legitimately echo example markup near the top of a page (a tutorial about HTML, a templating
+ * artifact, documentation). Whichever such occurrence comes first within the first 1024 bytes is
+ * taken as the page's authoritative charset declaration, even when it is not a real meta tag and
+ * even when a genuine <meta charset> (or no meta tag at all, with real UTF-8 content) follows.
+ */
+it('does not take a meta-charset-looking string inside an HTML comment as the real declaration', function () {
+    $body      = '<html><head><!-- Example: <meta charset="iso-8859-1"> is how old pages declared encoding -->'
+        . "</head><body><p>caf\xC3\xA9</p></body></html>"; // genuine UTF-8 'é' (0xC3 0xA9); no real <meta charset> anywhere
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/html'], [$body]));
+    $fetch     = new WebFetch($transport, 'agent');
+
+    expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
+        ->toBe('café');
+}); // #102: the prescan regex read the declaration out of the comment
