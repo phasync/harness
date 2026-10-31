@@ -42,30 +42,21 @@ final readonly class ApplyPatch implements Tool
         $patch    = Input::string($input, 'patch');
         $sections = PatchParser::parse($patch);
 
-        $writes  = [];   // abs => final content
-        $writers = [];   // abs => the section path that produced it
-        $deletes = [];   // list<abs>
+        $plan    = [];   // abs => the content this patch leaves there, or null for a path it deletes: the planned state
+        $writers = [];   // abs => the section path that planned its content
         $reports = [];
         foreach ($sections as $section) {
-            [$report, $fileWrites, $fileDeletes] = match ($section->kind) {
-                SectionKind::Add    => $this->planAdd($section),
-                SectionKind::Delete => $this->planDelete($section),
-                SectionKind::Update => $this->planUpdate($section, $writes),
+            $reports[] = match ($section->kind) {
+                SectionKind::Add    => $this->planAdd($section, $plan, $writers),
+                SectionKind::Delete => $this->planDelete($section, $plan),
+                SectionKind::Update => $this->planUpdate($section, $plan, $writers),
             };
-            $reports[] = $report;
-            foreach ($fileWrites as $abs => $content) {
-                // a later section for the same file continues from the earlier one's result; two sections
-                // landing different files on one target would keep only the last, so that fails the patch
-                if (isset($writers[$abs]) && $writers[$abs] !== $section->path && $this->root->resolve($section->path) !== $abs) {
-                    throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' is written by two sections, from '{$writers[$abs]}' and from '{$section->path}'");
-                }
-                $writes[$abs]  = $content;
-                $writers[$abs] = $section->path;
-            }
-            $deletes = [...$deletes, ...$fileDeletes];
         }
 
-        foreach ($writes as $abs => $content) { // still planning: a path blocked by a file or a directory fails the patch before anything is written
+        foreach ($plan as $abs => $content) { // still planning: a path blocked by a file or a directory fails the patch before anything is written
+            if (null === $content) {
+                continue;
+            }
             if (\is_dir($abs)) {
                 throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' is a directory; a file cannot be written there");
             }
@@ -75,11 +66,18 @@ final readonly class ApplyPatch implements Tool
                 throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' cannot be created: '" . $this->root->relative($dir) . "' is a file, not a directory");
             }
         }
-        foreach ($deletes as $abs) {
-            $this->journal?->record($abs);
-            \unlink($abs);
+        foreach ($plan as $abs => $content) {
+            if (null === $content && (\is_file($abs) || \is_link($abs))) { // a path only ever planned, never on disk, has nothing to delete
+                $this->journal?->record($abs);
+                if (!\unlink($abs)) {
+                    throw new \RuntimeException("Could not delete '$abs'");
+                }
+            }
         }
-        foreach ($writes as $abs => $content) {
+        foreach ($plan as $abs => $content) {
+            if (null === $content) {
+                continue;
+            }
             $this->journal?->record($abs);
             $dir = \dirname($abs);
             if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
@@ -93,42 +91,66 @@ final readonly class ApplyPatch implements Tool
         return Result::text(\implode("\n\n", $reports));
     }
 
-    /** @return array{0: string, 1: array<string, string>, 2: list<string>} */
-    private function planAdd(Section $section): array
+    /**
+     * Plans `$content` for `$abs` from `$section`: a path another section already landed a different
+     * file on (an add, or a move from elsewhere) would keep only the last, so that fails the patch.
+     *
+     * @param array<string, ?string> $plan
+     * @param array<string, string>  $writers
+     */
+    private function land(string $abs, string $content, Section $section, array &$plan, array &$writers): void
+    {
+        if (isset($plan[$abs]) && $writers[$abs] !== $section->path && $this->root->resolve($section->path) !== $abs) {
+            throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' is written by two sections, from '{$writers[$abs]}' and from '{$section->path}'");
+        }
+        $plan[$abs]    = $content;
+        $writers[$abs] = $section->path;
+    }
+
+    /**
+     * @param array<string, ?string> $plan
+     * @param array<string, string>  $writers
+     */
+    private function planAdd(Section $section, array &$plan, array &$writers): string
     {
         $abs = $this->root->resolve($section->path);
         if (\is_dir($abs)) {
             throw new \RuntimeException("'{$section->path}' is a directory");
         }
-        if (\is_file($abs)) {
+        if (!\array_key_exists($abs, $plan) && \is_file($abs)) { // deleted earlier in this patch is fine
             throw new \RuntimeException("'{$section->path}' exists; change it with *** Update File, or delete it first");
         }
         $content = (string) $section->content;
-        $lines   = Lines::count($content);
+        $this->land($abs, $content, $section, $plan, $writers);
 
-        return ["Added '{$section->path}' ($lines lines)", [$abs => $content], []];
+        return "Added '{$section->path}' (" . Lines::count($content) . ' lines)';
     }
 
-    /** @return array{0: string, 1: array<string, string>, 2: list<string>} */
-    private function planDelete(Section $section): array
+    /** @param array<string, ?string> $plan */
+    private function planDelete(Section $section, array &$plan): string
     {
         $abs = $this->root->resolve($section->path);
-        if (!\is_file($abs)) {
+        if (\array_key_exists($abs, $plan)) {
+            $content = $plan[$abs] ?? throw new \RuntimeException("'{$section->path}' was already deleted earlier in this patch");
+        } elseif (\is_file($abs)) {
+            $content = (string) \file_get_contents($abs);
+        } else {
             throw new \RuntimeException("'{$section->path}' does not exist; apply_patch cannot delete it");
         }
-        $content = (string) \file_get_contents($abs);
-        $lines   = Lines::count($content);
+        $plan[$abs] = null;
 
-        return ["Deleted '{$section->path}' ($lines lines)", [], [$abs]];
+        return "Deleted '{$section->path}' (" . Lines::count($content) . ' lines)';
     }
 
-    /** @return array{0: string, 1: array<string, string>, 2: list<string>} */
-    /** @param array<string, string> $pending content already planned for a path by an earlier section */
-    private function planUpdate(Section $section, array $pending): array
+    /**
+     * @param array<string, ?string> $plan    the content an earlier section planned for a path, or null once deleted
+     * @param array<string, string>  $writers
+     */
+    private function planUpdate(Section $section, array &$plan, array &$writers): string
     {
         $abs = $this->root->resolve($section->path);
-        if (isset($pending[$abs])) {
-            $content = $pending[$abs];
+        if (\array_key_exists($abs, $plan)) {
+            $content = $plan[$abs] ?? throw new \RuntimeException("'{$section->path}' was deleted earlier in this patch; it cannot be updated");
         } else {
             if (!\is_file($abs)) {
                 throw new \RuntimeException("'{$section->path}' does not exist");
@@ -165,14 +187,18 @@ final readonly class ApplyPatch implements Tool
         }
 
         $target = $this->root->resolve($section->moveTo ?? $section->path);
-        if ($target !== $abs && \is_file($target)) {
-            throw new \RuntimeException("cannot move '{$section->path}' to '{$section->moveTo}': it exists; delete it first, or update it instead");
+        if ($target !== $abs) {
+            if (!\array_key_exists($target, $plan) && \is_file($target)) { // deleted earlier in this patch is fine
+                throw new \RuntimeException("cannot move '{$section->path}' to '{$section->moveTo}': it exists; delete it first, or update it instead");
+            }
+            $plan[$abs] = null; // the source goes, whether on disk or only planned by an earlier section
         }
+        $this->land($target, $content, $section, $plan, $writers);
         $summary = null === $section->moveTo
             ? "Updated '{$section->path}' (+$added -$removed):"
             : "Moved '{$section->path}' to '{$section->moveTo}' (+$added -$removed):";
 
-        return [$summary . "\n" . \implode("\n", $regions), [$target => $content], null === $section->moveTo ? [] : [$abs]];
+        return $summary . "\n" . \implode("\n", $regions);
     }
 
     private function ambiguousMessage(string $path, int $hunkIndex, Ambiguous $ambiguous): string

@@ -26,8 +26,9 @@ $model = new ChatCompletions(
   other media throw `UnsupportedContentException`.
 - `Options`: `maxOutputTokens` → `max_tokens`, `temperature`, `toolChoice` → `tool_choice`.
   `Options::$provider['openai']` (the key is the module's lowercase name) is merged into the request body last, so it sets anything else
-  (`max_completion_tokens`, `top_p`, `chat_template_kwargs`, ...). `Required` or `Tool` with no tools
-  throws `UnsupportedOptionException`.
+  (`max_completion_tokens`, `top_p`, `chat_template_kwargs`, ...). `Required` or `Tool` with no tools,
+  `Tool` naming a tool not in the prompt, and a `temperature` outside 0..2 throw
+  `UnsupportedOptionException` before any request.
 - HTTP 429 or an error code `rate_limit_exceeded`/`insufficient_quota` (whatever the status) →
   `RateLimited` (with `retryAfter`), a context-length error → `ContextTooLong`, anything else →
   `ModelError`; an `error` object inside the stream → `ModelError`.

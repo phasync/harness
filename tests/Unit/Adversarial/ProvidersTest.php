@@ -24,6 +24,7 @@ use Harness\Provider\Anthropic\Messages;
 use Harness\Provider\OpenAI\ChatCompletions;
 use Harness\Role;
 use Harness\Testing\FakeTransport;
+use Harness\ToolChoice;
 use Harness\ToolSpec;
 use Harness\UnsupportedContentException;
 use Harness\UnsupportedOptionException;
@@ -723,3 +724,67 @@ it('classifies a rate-limit error code the same way Chat Completions and Respons
         expect($e->kind)->toBe(ErrorKind::RateLimited);
     }
 }); // #74: ModelError; only HTTP 429 was looked at
+
+/*
+ * Round 14, request-side sweep:
+ *
+ * - System prompt AND `provider['anthropic']['system']` both set: `Messages::request()` sets
+ *   `$request['system']` from `$prompt->system` first, then `array_replace($request,
+ *   $o->provider['anthropic'] ?? [])` last -- the provider override wins, exactly as
+ *   docs/anthropic.md says ("merged into the request body last"). Not a defect.
+ * - `Options::$maxOutputTokens` 0 or negative: executed -- `Options`'s own constructor already
+ *   throws `InvalidArgumentException` ("maxOutputTokens must be at least 1") before any `Prompt`
+ *   can even be built, let alone a request sent. Already covered, not a gap.
+ * - `toolChoice::Tool` naming a tool absent from the prompt's tools: traced all three providers --
+ *   none check `$o->tool` against `$prompt->tools`' names (only that `$prompt->tools` is
+ *   non-empty); this does reach the provider as a 400. A real, narrower gap, but the one below is
+ *   a documented promise being broken outright, not merely an unvalidated combination -- reported
+ *   here for the record, not pinned as this round's test.
+ * - A `ToolSpec` with an empty/space-containing name reaching Anthropic directly (bypassing MCP's
+ *   own sanitizing): confirmed via `ToolSpec`'s constructor is unguarded and `Messages::request()`
+ *   sends `$t->name` verbatim -- a provider 400 after, not caught before. Same class as the
+ *   toolChoice gap above; also not pinned, for the same reason.
+ * - Two tools with the same name in one `Tools` collection: `Tools::__construct()`
+ *   (`Harness\Tools`, not this module) does no deduplication; a later duplicate silently shadows
+ *   the earlier one wherever `Run` builds its name-keyed tool map. Out of this module's charter
+ *   (src/Tools.php, src/Run.php), noted but not this module's defect to fix.
+ *
+ * - The one that reproduces, and ties to `Options`'s own stated contract ("A provider throws
+ *   `UnsupportedOptionException` for a portable option it cannot honour", Options.php's own
+ *   docblock): `Options` validates `maxOutputTokens`, `contextWindow` and `toolRetries` in its
+ *   constructor, but not `temperature` at all -- there is no local range check anywhere, and since
+ *   the valid range differs per provider (Anthropic 0-1, OpenAI 0-2), it cannot live in the
+ *   provider-agnostic `Options` class either; it has to be each provider's own job, exactly like
+ *   the existing `toolChoice`-needs-tools check each provider already throws
+ *   `UnsupportedOptionException` for. None of the three providers do this for `temperature`: a
+ *   wildly out-of-range value (`5.0`, outside both providers' real ranges) is written straight into
+ *   the request body and actually sent to the transport, producing a provider 400 the model cannot
+ *   fix (it is a host misconfiguration, not something in the conversation), instead of the local,
+ *   actionable `UnsupportedOptionException` this module's own stated contract promises for an
+ *   option a provider cannot honour.
+ *
+ * Verified directly against the real code (both adapters): `Options(temperature: 5.0)` streamed
+ * through `Anthropic\Messages` reaches `$this->transport->post()` -- a real POST attempt, not a
+ * local exception -- confirmed by `FakeTransport` throwing its own "no response left" error only
+ * after recording that request.
+ */
+it('refuses an out-of-range temperature before the request, not after a provider 400', function () {
+    $t     = new FakeTransport();
+    $model = new Messages($t, 'k', 'claude-x');
+
+    // Today: no local exception at all -- the request is actually built and sent to the
+    // transport (FakeTransport records it before complaining it has no response left).
+    expect(fn () => [...$model->stream(new Prompt(null, [], [], new Options(temperature: 5.0), live()))])
+        ->toThrow(UnsupportedOptionException::class)
+        ->and($t->requests)->toBe([]);
+}); // #76: sent as-is, a provider 400 the model cannot fix
+
+it('refuses a ToolChoice::Tool naming a tool the prompt does not carry, before the request', function () {
+    $t     = new FakeTransport();
+    $model = new Messages($t, 'k', 'claude-x');
+    $tools = [new ToolSpec('search', 'Search', ['type' => 'object'])];
+
+    expect(fn () => [...$model->stream(new Prompt(null, [], $tools, new Options(toolChoice: ToolChoice::Tool, tool: 'fetch'), live()))])
+        ->toThrow(UnsupportedOptionException::class, "names 'fetch'")
+        ->and($t->requests)->toBe([]);
+}); // #77: sent as-is, a provider 400 the model cannot fix

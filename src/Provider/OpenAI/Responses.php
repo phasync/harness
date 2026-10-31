@@ -26,6 +26,7 @@ use Harness\Part\ToolResult;
 use Harness\Prompt;
 use Harness\Role;
 use Harness\ToolChoice;
+use Harness\ToolSpec;
 use Harness\UnsupportedContentException;
 use Harness\UnsupportedOptionException;
 use Harness\Usage;
@@ -200,6 +201,12 @@ final readonly class Responses implements Model
             };
         } elseif (ToolChoice::Required === $o->toolChoice || ToolChoice::Tool === $o->toolChoice) {
             throw new UnsupportedOptionException("toolChoice {$o->toolChoice->name} needs at least one tool in the prompt");
+        }
+        if (ToolChoice::Tool === $o->toolChoice && !\in_array($o->tool, \array_map(static fn (ToolSpec $t): string => $t->name, $prompt->tools), true)) {
+            throw new UnsupportedOptionException("toolChoice Tool names '{$o->tool}', which is not among the prompt's tools");
+        }
+        if (null !== $o->temperature && ($o->temperature < 0.0 || $o->temperature > 2.0)) {
+            throw new UnsupportedOptionException("temperature {$o->temperature} is outside this API's range 0..2.0");
         }
         if (null !== $o->maxOutputTokens) {
             $request['max_output_tokens'] = $o->maxOutputTokens;

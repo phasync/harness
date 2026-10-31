@@ -454,3 +454,29 @@ it('keeps the base path when a Location is only a query string', function () {
     expect($response->redirectTarget('https://example.com/products/list'))
         ->toBe('https://example.com/products/list?sort=desc');
 }); // #73: merged onto the directory, dropping 'list'
+
+/*
+ * One more pass over redirect resolution before moving on, as asked: userinfo in a network-path
+ * Location, a Location query combining with a base query, and an absolute Location with an
+ * uppercase scheme all traced/tested -- the first two are fine (`//user:pw@host/` keeps the
+ * authority as given; a Location's own `?query` already replaces the base's, in every branch,
+ * since none of them ever read the base's query back in). The uppercase scheme is not fine, and
+ * it is not really a redirect-specific bug: `WebFetch::guard()` itself -- the very first thing
+ * `call()` runs, before any transport call -- checks the scheme with
+ * `\in_array($scheme, ['http', 'https'], true)`, a case-SENSITIVE comparison. RFC 3986 §3.1
+ * defines URI scheme names as case-insensitive ("HTTP" and "http" name the same scheme), so this
+ * check wrongly treats a perfectly ordinary, fully public URL as if it were the dangerous kind
+ * the guard exists to catch, purely because of letter case -- a redirect echoing back a cased
+ * scheme, or simply a model/user writing `Http://` or `HTTPS://`, trips the SSRF refusal on a
+ * URL that was never remotely private.
+ */
+it('does not refuse an ordinary public URL as an SSRF risk just because its scheme is uppercase', function () {
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/plain'], ['hi']));
+    $fetch     = new WebFetch($transport, 'agent');
+
+    // Today: this throws "'HTTP://example.com/page' is a private-network or non-http(s)
+    // address" -- a public URL, rejected only because its scheme isn't lower-case -- instead of
+    // fetching it like any other http:// URL.
+    expect($fetch->call(['url' => 'HTTP://example.com/page'], TestCall::make())->content[0]->text)
+        ->toBe('hi');
+}); // #80: the scheme was compared case-sensitively

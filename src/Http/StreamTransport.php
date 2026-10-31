@@ -48,6 +48,9 @@ final class StreamTransport implements Transport
     private function send(string $method, string $url, array $headers, ?string $body, Cancel $cancel): Response
     {
         $parts = \parse_url($url);
+        if (\is_array($parts) && isset($parts['scheme'])) {
+            $parts['scheme'] = \strtolower($parts['scheme']); // scheme names are case-insensitive (RFC 3986 §3.1)
+        }
         if (false === $parts || !isset($parts['scheme'], $parts['host']) || !\in_array($parts['scheme'], ['http', 'https'], true)) {
             throw new \InvalidArgumentException("StreamTransport needs an absolute http:// or https:// URL, got '$url'");
         }

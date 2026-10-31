@@ -83,7 +83,7 @@ final readonly class WebFetch implements Tool
             return;
         }
         $parts  = \parse_url($url);
-        $scheme = \is_array($parts) ? ($parts['scheme'] ?? '') : '';
+        $scheme = \strtolower(\is_array($parts) ? ($parts['scheme'] ?? '') : ''); // scheme names are case-insensitive (RFC 3986 §3.1)
         $host   = \is_array($parts) ? ($parts['host'] ?? '') : '';
         if (!\in_array($scheme, ['http', 'https'], true) || self::isPrivateHost($host)) {
             throw new \RuntimeException("'$url' is a private-network or non-http(s) address; web_fetch refuses it as its SSRF guard (pass allowPrivate: true to the constructor to fetch it anyway)");

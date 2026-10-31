@@ -155,6 +155,13 @@
   whatever the HTTP status, as Responses does (#74).
 - A summarizer's own `ContextTooLong` is a `RuntimeException` naming the summarizer, a
   `MiddlewareError` of the turn, instead of the conversation's `ContextTooLong` (#75).
+- Every provider refuses, before the request, a `temperature` outside its range (0..1 for Anthropic,
+  0..2 for OpenAI) (#76) and a `ToolChoice::Tool` naming a tool not in the prompt (#77).
+- `apply_patch` plans one state per path across sections: a chain of moves (`a` to `b`, `b` to `c`)
+  leaves no `b` behind (#78), a section updating or deleting a file an earlier section deleted is
+  refused instead of re-reading it from disk (#79), an add or move onto a path deleted earlier in
+  the same patch works, and a failed delete is an error.
+- `web_fetch` and `StreamTransport` take the URL scheme case-insensitively (`HTTP://`) (#80).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

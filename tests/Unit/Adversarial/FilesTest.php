@@ -336,3 +336,55 @@ it('does not silently discard one file when two sections move different sources 
     // is permanently gone (only b.txt's content survives at target.txt).
     expect(fn () => $patch->call(['patch' => $p], callFor()))->toThrow(RuntimeException::class);
 }); // #71: the later write replaced the earlier; both sources deleted, both moves reported
+
+/*
+ * Round 14, attacking the #71/#72 fixes and their siblings. Four scenarios tried:
+ *
+ * - "Delete b then Move a to b" in one patch: the Move section's existing-target check
+ *   (`is_file($target)`) runs during planning, before any delete has actually happened, so it
+ *   sees b.txt still on disk and refuses -- even though the model did exactly what the refusal's
+ *   own wording says to do ("delete it first"). Judged this an acceptable, narrow-first refusal
+ *   for now (a model can always split it into two calls, delete then move) rather than pinning it.
+ * - "Add File then Update File of the same new path": confirmed this already works correctly
+ *   (the writers' same-section-path exception lets a section continue its own earlier result).
+ * - "Update of a file an earlier section deleted": also wrong (the Update re-reads the file from
+ *   disk during planning, before the Delete has actually run, so the deleted content comes right
+ *   back -- reported as "Deleted ... Updated ..." while the file is untouched) -- a real defect,
+ *   left for a future round since only one fits this round's test.
+ * - "Move a to b, then Move b to c" in one patch: THE defect pinned below. The second section's
+ *   `Move to:` deletes its own source (b.txt) via `$deletes`, but b.txt was never actually written
+ *   to disk -- it only exists as a pending in-memory entry from the first section's `$writes`,
+ *   which nothing removes once the second section consumes it as its *source*. Deletes run before
+ *   writes, so `unlink()` on the never-created b.txt fails (silently: its return value is never
+ *   checked, unlike every other disk operation in this file), and then the leftover `$writes` entry
+ *   for b.txt (still queued from the first section) recreates it right after c.txt is written --
+ *   leaving a stale duplicate of the moved file's content under its old name.
+ */
+it('leaves no stale file behind when a patch chains two moves (a to b, then b to c)', function () {
+    \file_put_contents($this->dir . '/a.txt', "chain content\n");
+    $patch = new ApplyPatch($this->root);
+    $p     = "*** Begin Patch\n"
+        . "*** Update File: a.txt\n*** Move to: b.txt\n@@\n chain content\n"
+        . "*** Update File: b.txt\n*** Move to: c.txt\n@@\n chain content\n"
+        . '*** End Patch';
+    $patch->call(['patch' => $p], callFor());
+
+    // BUG: today b.txt is left behind holding the same content as c.txt -- the chained move's
+    // intermediate file was never deleted, just silently recreated after a failed unlink().
+    expect(\is_file($this->dir . '/b.txt'))->toBeFalse();
+}); // #78: the delete of b ran before b was written; the pending write then recreated it
+
+it('refuses to update a file an earlier section of the same patch deleted, and lets a later section reuse its path', function () {
+    \file_put_contents($this->dir . '/a.txt', "old\n");
+    \file_put_contents($this->dir . '/b.txt', "b\n");
+    $patch = new ApplyPatch($this->root);
+
+    $p = "*** Begin Patch\n*** Delete File: a.txt\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
+    expect(fn () => $patch->call(['patch' => $p], callFor()))->toThrow(RuntimeException::class, 'deleted earlier in this patch')
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("old\n");
+
+    $p = "*** Begin Patch\n*** Delete File: a.txt\n*** Update File: b.txt\n*** Move to: a.txt\n@@\n b\n*** End Patch\n";
+    $patch->call(['patch' => $p], callFor());
+    expect(\file_get_contents($this->dir . '/a.txt'))->toBe("b\n")
+        ->and(\is_file($this->dir . '/b.txt'))->toBeFalse();
+}); // #79: planUpdate re-read the deleted file from disk; the delete-then-move case was refused

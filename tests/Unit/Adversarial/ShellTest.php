@@ -450,3 +450,52 @@ it('does not cut output that is only exactly maxOutput bytes, for an odd maxOutp
     expect($r->content[0]->text)->toBe("Exit code 0\n0123456789A")
         ->and($r->content[0]->text)->not->toContain('bytes cut');
 }); // #70: intdiv floored both halves, one byte short of maxOutput
+
+/*
+ * Round 13 attacked the cut/progress contract from the host's side: does the sum of
+ * `ToolProgress` chunks reconstruct the complete, uncut output, and does the `"[N bytes cut]"`
+ * marker that `$take()` splices into `$head`/`$tail` for the final `Result` ever leak into a
+ * `ToolProgress` event too? docs/shell.md promises "Output is reported as it arrives through
+ * Call::progress()" and separately that the final text has "the middle cut out ... with a
+ * marker" -- two different views of the same stream, and nothing in `$take()` ties them
+ * together: progress is emitted from `$text` (the raw chunk plus any carried partial
+ * character) *before* the head/tail/marker bookkeeping runs, so the two should be independent
+ * by construction, but that is exactly the kind of claim worth pinning with a direct check
+ * rather than trusting the reading of the code.
+ *
+ * Also attacked, per the round's suggestions, and found already safe (not reported as this
+ * round's defect, since none is wrong in the dangerous direction):
+ *  - Policy\Shell::check() against `$(rm -rf /)`, `` `rm` `` inside double quotes and inside
+ *    single quotes, `eval 'rm -rf /'` / `eval rm -rf /`, `. script.sh` / `source script.sh`,
+ *    `find . -exec rm {} \;` / `-exec rm {} +` / `-delete`, `xargs -I{} rm {}` and
+ *    `xargs -I XYZ rm XYZ` (a non-brace placeholder) and bare `xargs -n 1 rm`: every one of
+ *    these is an unmatched program word (`$`, `` ` ``, `eval`, `.`, `source`, `find`, `xargs`
+ *    are not in Shell::WRAPPERS and are not peeled), so Shell::check() falls through to
+ *    `otherwise` (Ask) rather than being misread as the allowed program -- the inner `rm` never
+ *    becomes reachable through an Allow rule for something else.
+ *  - `Shell::allow('git', ['status'])` against `git -C /elsewhere status`: `matches()` checks
+ *    `$argv[1]` against `$subcommands`, and `$argv[1]` here is `-C`, not `status`, so this
+ *    correctly falls through to Ask (over-blocking a legitimate invocation, not a security
+ *    hole: `docs/policy.md` only ever promises matching "its first argument against
+ *    $subcommands", which is exactly what happens).
+ *
+ * Verified directly: a command that `printf`s 2000 ASCII digit bytes against `maxOutput: 97`
+ * (so the final `Result` text really does contain a `"[1903 bytes cut]"` marker) produces 25
+ * `ToolProgress` events whose `value`s, concatenated in order, are exactly the original
+ * 2000-byte string -- nothing lost, nothing duplicated, and `"bytes cut"` appears in none of
+ * them.
+ */
+it('reports every byte of output as progress even when the final text is cut, and never leaks the cut marker into progress', function () {
+    $events  = [];
+    $call    = callFor('c1', $events);
+    $digits  = \implode('', \array_map(static fn ($i) => (string) ($i % 10), \range(0, 1999)));
+    $command = 'php -r \'for ($i = 0; $i < 2000; $i++) { echo $i % 10; }\'';
+    $r       = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: 97))->call(['command' => $command], $call));
+
+    $progress = \array_values(\array_filter($events, static fn ($e) => $e instanceof ToolProgress));
+    $sum      = \implode('', \array_map(static fn ($e) => $e->value, $progress));
+
+    expect($r->content[0]->text)->toContain('bytes cut]') // the final Result really is cut
+        ->and($sum)->toBe($digits) // but progress alone reconstructs the whole, uncut output
+        ->and($sum)->not->toContain('bytes cut'); // and the marker text is a Result-only artifact
+}); // regression: round 13 found no new defect; this pins the progress/cut independence it checked
