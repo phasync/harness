@@ -180,8 +180,8 @@ final readonly class WebFetch implements Tool
             // transport chunk could decode to tens of MB before maxBytes is looked at
             foreach (null === $inflate ? [$chunk] : \str_split($chunk, 256) as $piece) {
                 $body .= null === $inflate ? $piece : self::inflate($inflate, $piece, $url);
-                if (\strlen($body) >= $this->maxBytes) {
-                    break 2;
+                if (\strlen($body) >= $this->maxBytes || (null !== $inflate && \ZLIB_STREAM_END === \inflate_get_status($inflate))) {
+                    break 2; // enough, or the compressed member is complete: bytes after it are not fed to the decoder
                 }
             }
         }

@@ -471,8 +471,8 @@ it('does not deadlock fiber\run() when the generator is held open past TurnEnded
         echo "DONE\n";
         PHP);
 
-    $adapter = \getenv('HARNESS_ADAPTER') ?: 'phasync';
-    $proc    = \proc_open(['php', $script, \dirname(__DIR__, 3), $adapter], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $adapter  = \getenv('HARNESS_ADAPTER') ?: 'phasync';
+    $proc     = \proc_open(['php', $script, \dirname(__DIR__, 3), $adapter], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
     $deadline = \microtime(true) + 5.0;
     do {
         $status = \proc_get_status($proc);
@@ -499,4 +499,4 @@ it('does not deadlock fiber\run() when the generator is held open past TurnEnded
     // wedges fiber\run()'s own bookkeeping instead of letting it return normally.
     expect($timedOut)->toBeFalse()
         ->and(\trim($out))->toBe('DONE');
-})->group('bug');
+}); // #53: TurnEnded was pushed synchronously; the task waited for a next() that never came

@@ -287,13 +287,13 @@ it('does not decode a single compressed chunk far past maxBytes before checking 
  * on incidental byte alignment with that constant.
  */
 it('does not fail a perfectly decodable gzip body because of trailing bytes after the member', function () {
-    // Deterministic "incompressible" plaintext (repeated sha256 digests) so the gzip member's
-    // exact size -- and therefore where it falls relative to the 256-byte slicing -- never
-    // depends on randomness between runs.
+    // Deterministic, poorly compressible, valid UTF-8 plaintext (hex sha256 digests) so the gzip
+    // member's exact size -- and so where it falls relative to the 256-byte slicing -- never
+    // depends on randomness between runs, and the text survives the UTF-8 scrub unchanged.
     $plain = '';
     $seed  = 'web-fetch-adversarial-trailing-garbage-seed';
     while (\strlen($plain) < 1000) {
-        $seed  = \hash('sha256', $seed, true);
+        $seed  = \hash('sha256', $seed);
         $plain .= $seed;
     }
     $plain = \substr($plain, 0, 1000);
@@ -323,4 +323,4 @@ it('does not fail a perfectly decodable gzip body because of trailing bytes afte
     // inflate_add(): data error" -- even though the real content decoded perfectly; the error
     // comes only from the 300 trailing 'G' bytes landing in their own 256-byte slice.
     expect($text)->toBe($plain);
-})->group('bug');
+}); // #52: trailing bytes alone in a slice were a 'data error'

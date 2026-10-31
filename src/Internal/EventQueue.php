@@ -30,8 +30,12 @@ final class EventQueue
         $this->events = new \SplQueue();
     }
 
-    /** Hands `$event` to the consumer and returns once the consumer handled it; at once when it stopped. */
-    public function push(Event $event): void
+    /**
+     * Hands `$event` to the consumer and returns once the consumer handled it; at once when it
+     * stopped. With `$wait` false it returns at once: for the last event, after which the producer
+     * has nothing left to do and must not depend on the consumer ever asking again.
+     */
+    public function push(Event $event, bool $wait = true): void
     {
         if ($this->closed) {
             throw new \LogicException('Event ' . $event::class . ' pushed after the turn ended');
@@ -42,7 +46,9 @@ final class EventQueue
         $handled = new Deferred();
         $this->events->enqueue([$event, $handled]);
         $this->wake();
-        await($handled);
+        if ($wait) {
+            await($handled);
+        }
     }
 
     /** No more events; the consumer's `next()` returns null once the queue is drained. */

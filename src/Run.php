@@ -6,6 +6,7 @@ namespace Harness;
 
 use function fiber\await;
 use function fiber\await_all;
+use function fiber\current;
 use function fiber\go;
 use function fiber\run;
 use Harness\Event\InputRequested;
@@ -151,8 +152,9 @@ final class Run
      * inside `fiber\run()`. Delivery is synchronous: the turn goes on after an event only once the
      * consumer asks for the next one. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`,
-     * or from the `break` that leaves the loop there. The next turn may start once this generator has finished or been released: not from inside
-     * the `TurnEnded` handler.
+     * or from the `break` that leaves the loop there. Once `TurnEnded` is out the turn's work is done:
+     * the generator may be kept and finished later. The next turn may start once it has finished or
+     * been released: not from inside the `TurnEnded` handler.
      *
      * @param Message|Resume|list<Answer> $input
      *
@@ -209,7 +211,7 @@ final class Run
                 $this->cancel();
             }
             $queue->detach();
-            if ($event instanceof TurnEnded) {
+            if ($event instanceof TurnEnded && null !== current()) {
                 await($task); // the host left the loop at TurnEnded: a misuse exception still surfaces here, not from fiber\run()
             }
         }
@@ -527,7 +529,7 @@ final class Run
             $emit(new InputRequested($turn, $parent, $pending));
         }
         $this->running = false; // over before the host sees TurnEnded: ended() works in its handler, interject() throws
-        $emit(new TurnEnded($turn, $parent, $reason, $usage, $kind, $finish));
+        $queue->push(new TurnEnded($turn, $parent, $reason, $usage, $kind, $finish), wait: false); // the host may keep the generator: nothing waits on it
         if ($error instanceof \LogicException) {
             throw $error;
         }

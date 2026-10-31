@@ -116,6 +116,10 @@
 - A file name wrapped in double quotes is listed as a JSON string literal too, so `Root::resolve()`'s
   decoding of listed names is its exact inverse (#50).
 - `shell` accepts `timeout` as a numeric string, through the new `Input::number()` (#51).
+- `web_fetch` stops feeding the decoder once the gzip member is complete, so trailing bytes after
+  it no longer fail the fetch (#52).
+- `TurnEnded` is delivered without waiting for the host to ask for a next event, so a generator kept
+  open past it no longer deadlocks `fiber\run()` (#53).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 
