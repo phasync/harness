@@ -22,3 +22,12 @@ it('refuses decimal IP notation for 127.0.0.1 as an SSRF guard', function () {
     expect(fn () => $fetch->call(['url' => 'http://2130706433/secret'], callFor()))
         ->toThrow(RuntimeException::class, 'SSRF guard');
 });
+
+it('refuses host localhost. (trailing dot) as SSRF guard', function () {
+    // guard() is the same call for the initial URL and every redirect hop (WebFetchTest's "follows
+    // a redirect, guarding every hop" already proves the per-hop part); the only thing left to
+    // probe here is this one host value, so skip the redirect indirection and call it directly.
+    $fetch = new WebFetch(new FakeTransport(), 'agent');
+    expect(fn () => $fetch->call(['url' => 'http://localhost./internal'], callFor()))
+        ->toThrow(RuntimeException::class, 'SSRF guard');
+});

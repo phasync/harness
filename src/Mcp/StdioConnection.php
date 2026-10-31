@@ -92,7 +92,14 @@ final class StdioConnection implements Connection
         if (null !== $this->process) {
             return;
         }
-        $process = \proc_open($this->command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes, $this->cwd, $this->env);
+        \set_error_handler(function (int $no, string $message): never {
+            throw new McpException('Could not start the MCP server: ' . \implode(' ', $this->command) . ": $message");
+        });
+        try {
+            $process = \proc_open($this->command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w']], $pipes, $this->cwd, $this->env);
+        } finally {
+            \restore_error_handler();
+        }
         if (false === $process) {
             throw new McpException('Could not start the MCP server: ' . \implode(' ', $this->command));
         }

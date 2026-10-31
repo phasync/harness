@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Harness\Accumulator;
+use Harness\Delta;
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
 use Harness\Delta\ToolCallEnd;
@@ -15,6 +16,11 @@ use Harness\Part\Reference;
 use Harness\Part\Text;
 use Harness\Part\ToolCall;
 use Harness\Role;
+
+// Test fixture: unknown delta type for testing line 123 error path
+final class ProbePartsUnknownDelta implements Delta
+{
+}
 
 it('seeds Accumulator with assistant message and rejects non-assistant', function () {
     $seed = new Message(Role::Assistant, [new Text('previous')]);
@@ -50,4 +56,9 @@ it('preserves seeded Media and Reference parts through delta accumulation with t
         ->and($msg->parts[3])->toEqual(new Text('Continued from deltas'))
         ->and($msg->parts[4])->toEqual(new ToolCall('c1', 'read', ['path' => 'file.txt']))
         ->and($acc->finish())->toBe(FinishReason::ToolCalls);
+});
+
+it('rejects unknown delta types as a provider bug', function () {
+    $acc = new Accumulator();
+    expect(fn () => $acc->add(new ProbePartsUnknownDelta()))->toThrow(LogicException::class, 'Unknown delta');
 });

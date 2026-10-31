@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Harness\Tools\Files\ApplyPatch;
 use Harness\Tools\Files\EditFile;
 use Harness\Tools\Files\ReadFile;
 use Harness\Tools\Files\Root;
@@ -31,4 +32,17 @@ it('deletes text through indentation-flexible matching with reindent on empty ne
     $result = $e->call(['path' => 'code.txt', 'old' => "  if (x) {\n    block();\n  }", 'new' => ''], callFor());
     expect($result->content[0]->text)->toContain("Edited 'code.txt'")
         ->and(\file_get_contents($this->dir . '/code.txt'))->toBe("function f() {\n\n}\n");
+});
+
+it('fails to delete a file that does not exist in a patch', function () {
+    // This covers ApplyPatch.php line 95 (planDelete check for non-existent file).
+    // The patch references a file that doesn't exist; the whole patch must fail atomically.
+    $patch = <<<'PATCH'
+    *** Begin Patch
+    *** Delete File: missing.txt
+    *** End Patch
+    PATCH;
+    $apply = new ApplyPatch($this->root);
+    expect(fn () => $apply->call(['patch' => $patch], callFor()))
+        ->toThrow(RuntimeException::class, "'missing.txt' does not exist");
 });

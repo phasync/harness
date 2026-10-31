@@ -14,8 +14,10 @@ shares the name, so a file that uses both aliases one (`use Harness\Policy\Shell
   `Call::progress()` (`ToolProgress` events), and the model gets `Exit code N` and the output, the
   middle cut out past `maxOutput` bytes with a marker.
 - A non-zero exit, a timeout or a cancellation is an error result; `value` is the exit code.
-- On timeout or when the run is cancelled, the command's whole process group is killed (on Linux it
-  runs under `setsid`; elsewhere only bash is terminated).
+- The call ends when the shell exits, times out or the run is cancelled; the command's whole process
+  group is then killed (on Linux it runs under `setsid`; elsewhere only bash is terminated), so a
+  background child (`server &`) does not outlive the call. A host that wants long-running processes
+  gives the agent a tool for them.
 - Hints: `destructive` and `openWorld`, never `readOnly`, so the scheduler runs shell calls one at a
   time, and these hints are what a policy middleware keys on. The one-line policy, inside a
   `ToolMiddleware::call()`:

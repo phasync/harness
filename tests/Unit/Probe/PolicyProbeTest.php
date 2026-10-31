@@ -34,3 +34,9 @@ it('peels env - (empty environment flag) to expose the wrapped command', functio
     expect(verdictOfProbe('env - rm'))->toBe(Verdict::Deny)
         ->and(verdictOfProbe('env - ls'))->toBe(Verdict::Allow);
 });
+
+it('detects double semicolon (case statement) as unparseable', function () {
+    [$verdict, $reason] = Shell::check('ls ;; ls', shellRulesForProbe());
+    expect($verdict)->toBe(Verdict::Ask)
+        ->and($reason)->toContain(';;');
+});

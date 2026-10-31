@@ -17,8 +17,9 @@ use Harness\ToolSpec;
 /**
  * `shell`: runs a command with `bash -c` in `cwd`, stdout and stderr merged, stdin empty. Output is
  * read with `fiber\readable()` and reported as `ToolProgress`; the model gets the exit code and the
- * output, the middle cut out past `maxOutput` bytes. On timeout or cancellation the command's whole
- * process group is killed (on Linux it runs under `setsid`). A non-zero exit is an error result.
+ * output, the middle cut out past `maxOutput` bytes. The call ends when the shell exits, times out or
+ * is cancelled, and the command's whole process group is then killed (on Linux it runs under `setsid`):
+ * a background child does not outlive the call. A non-zero exit is an error result.
  * Which commands may run is a policy for middleware.
  */
 final readonly class Shell implements Tool
@@ -68,6 +69,18 @@ final readonly class Shell implements Tool
         $tail     = '';
         $total    = 0;
         $killed   = null;
+        $exited   = null;
+        $take     = function (string $chunk) use (&$head, &$tail, &$total, $call): void {
+            $total += \strlen($chunk);
+            $call->progress($chunk);
+            $half = \intdiv($this->maxOutput, 2);
+            if (\strlen($head) < $half) {
+                $piece = \substr($chunk, 0, $half - \strlen($head));
+                $head .= $piece;
+                $chunk = \substr($chunk, \strlen($piece));
+            }
+            $tail = \substr($tail . $chunk, -$half);
+        };
         while (true) {
             $left = $deadline - \microtime(true);
             if ($left <= 0 || $call->isCancelled()) {
@@ -77,29 +90,31 @@ final readonly class Shell implements Tool
             try {
                 readable($out, \min($left, 0.25));
             } catch (\fiber\TimeoutException) {
+                // The pipe stays open while a background child holds it: the shell's own exit ends the call.
+                $status = \proc_get_status($process);
+                if (!$status['running']) {
+                    $exited = $status;
+                    while ('' !== ($rest = (string) \fread($out, 65536))) {
+                        $take($rest);
+                    }
+                    break;
+                }
                 continue;
             }
             $chunk = \fread($out, 65536);
             if (false === $chunk || ('' === $chunk && \feof($out))) {
                 break;
             }
-            if ('' === $chunk) {
-                continue;
+            if ('' !== $chunk) {
+                $take($chunk);
             }
-            $total += \strlen($chunk);
-            $call->progress($chunk);
-            $half = \intdiv($this->maxOutput, 2);
-            if (\strlen($head) < $half) {
-                $take = \substr($chunk, 0, $half - \strlen($head));
-                $head .= $take;
-                $chunk = \substr($chunk, \strlen($take));
-            }
-            $tail = \substr($tail . $chunk, -$half);
         }
         \fclose($out);
-        $status = \proc_get_status($process);
-        if (null !== $killed && $status['running']) {
-            $group ? \posix_kill(-$status['pid'], 9) : \proc_terminate($process, 9);
+        $status = $exited ?? \proc_get_status($process);
+        if ($group) {
+            \posix_kill(-$status['pid'], 9); // the whole group, however the command ended: a background child does not outlive the call
+        } elseif ($status['running']) {
+            \proc_terminate($process, 9);
         }
         while ($status['running']) {
             sleep(0.01);
