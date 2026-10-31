@@ -55,6 +55,9 @@ $model = new Responses(new StreamTransport(), 'https://api.openai.com/v1', 'gpt-
 - Reasoning: summary and reasoning text become reasoning, and each `reasoning` item is kept in
   `raw` with the model id. With `store: false` (the default) the request asks for
   `reasoning.encrypted_content` and replays items by it; with `store: true` by id. Only to the same model.
+  A reasoning item without `encrypted_content` cannot be replayed with `store: false`; a tool call that
+  followed it is an `UnsupportedContentException` naming the tool (the API rejects a `function_call`
+  without its reasoning item).
 - Events: `response.output_text.delta` → text, `response.function_call_arguments.delta/.done` →
   tool input (the call starts at `response.output_item.added`), `response.completed` → usage and
   Stop or ToolCalls, `response.incomplete` → Length (`max_output_tokens`) or Refusal

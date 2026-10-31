@@ -205,6 +205,10 @@
   `InvalidArgumentException` (#103); an `inputSchema` that is not a JSON object the same, not a
   `TypeError` from inside the client (#106); a tools/list entry that is not an object, or a tool
   without a string name, the same (#108).
+- Responses: a reasoning item without `encrypted_content` left out of a `store: false` replay makes a
+  tool call that followed it an `UnsupportedContentException` naming the tool, as Anthropic's
+  unsigned-thinking guard does (#31), instead of sending the `function_call` alone for the API to
+  reject (#111).
 - `Run`: the turn's state is set at the `turn()` call, so `isRunning()` is true, `cancel()` and
   `interrupt()` take effect and `interject()` lands before the generator's first iteration, as the
   docblock says; a generator dropped before its first iteration frees the Run (#97).

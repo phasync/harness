@@ -24,6 +24,7 @@ use Harness\Part\ToolResult;
 use Harness\Prompt;
 use Harness\Provider\Anthropic\Messages;
 use Harness\Provider\OpenAI\ChatCompletions;
+use Harness\Provider\OpenAI\Responses;
 use Harness\Role;
 use Harness\Testing\FakeTransport;
 use Harness\ToolChoice;
@@ -1252,3 +1253,49 @@ it('reports a tool with no name as an McpException, not a raw InvalidArgumentExc
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class);
 }); // #108: ToolSpec's InvalidArgumentException for the empty name left Harness\Mcp
+
+/*
+ * Round 24, back to the providers: reasoning/thinking blocks round-tripped with their signature or
+ * encrypted content kept, this time on the Responses API's sibling of #24/#31 (Anthropic).
+ *
+ * Anthropic's `Messages::assistant()` (src/Provider/Anthropic/Messages.php:336-351) drops a
+ * `thinking` block whose `signature` never arrived, because the API rejects it unsigned on replay
+ * -- and #31 then added a guard right after: a `ToolCall` in the SAME reply throws
+ * `UnsupportedContentException` naming the tool, because with thinking on, a `tool_use` must
+ * follow its thinking block, and that one is gone; sending the call alone would be a 400 the host
+ * cannot fix, or worse, an API that silently accepts it and reasons worse without knowing why.
+ *
+ * `Responses::assistant()` (src/Provider/OpenAI/Responses.php:264-289) has the exact same
+ * replay-or-drop shape for a `reasoning` item -- with `store: false` (the default), a reasoning
+ * item with no `encrypted_content` is silently left out of `$items` entirely:
+ *   } elseif (isset($item['encrypted_content'])) {
+ *       $items[] = $replay + ['encrypted_content' => $item['encrypted_content']];
+ *   }
+ *   // (no else: the item is just gone)
+ * But unlike Anthropic, nothing here checks whether a `ToolCall` in the same message depended on
+ * that now-missing reasoning item. The function_call item is built and sent completely
+ * unconditionally, right where the (dropped) reasoning item should have preceded it -- the same
+ * "the call ends up alone" shape #31 was fixed for in the sibling provider, unguarded here.
+ *
+ * Verified directly against the real code (both adapters): an assistant message with a
+ * `Reasoning` part whose `raw['items']` holds one item with no `encrypted_content` key, followed
+ * by a `ToolCall` in the same message, makes `Responses::stream()` send a request whose `input`
+ * array has the `function_call` item on its own -- no `reasoning` item anywhere near it, no
+ * exception, nothing to tell the host (or the model on the other end) that half the turn it is
+ * replaying is missing.
+ */
+it('refuses to replay a tool call whose reasoning item could not be replayed (Responses, no encrypted_content)', function () {
+    $msgs = [
+        new Message(Role::User, [new Text('hi')]),
+        new Message(Role::Assistant, [
+            new Reasoning('thinking...', ['model' => 'gpt-5-mini', 'items' => [['id' => 'rs_1', 'summary' => []]]]), // no encrypted_content
+            new ToolCall('call_1', 'lookup', ['q' => 'x']),
+        ]),
+        new Message(Role::User, [new ToolResult('call_1', [new Text('42')], false), new Text('continue')]),
+    ];
+    $sse = "event: response.completed\ndata: " . \json_encode(['type' => 'response.completed', 'response' => ['usage' => ['input_tokens' => 1, 'output_tokens' => 1]]]) . "\n\n";
+    $t   = new FakeTransport(new Response(200, ['content-type' => 'text/event-stream'], [$sse]));
+
+    expect(fn () => \fiber\run(fn () => [...(new Responses($t, 'https://api.openai.com/v1', 'gpt-5-mini', 'k'))->stream(new Prompt(null, $msgs, [], new Options(), live()))]))
+        ->toThrow(UnsupportedContentException::class, "The reply calling 'lookup' has reasoning without encrypted_content");
+}); // #111: the function_call was sent alone, its reasoning item silently dropped

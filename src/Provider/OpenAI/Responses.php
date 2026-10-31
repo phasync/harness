@@ -265,8 +265,9 @@ final readonly class Responses implements Model
     /** @return list<array<string, mixed>> */
     private function assistant(Message $message): array
     {
-        $items = [];
-        $text  = null;
+        $items   = [];
+        $text    = null;
+        $dropped = false; // a reasoning item left out of the replay: a tool call after it cannot be sent
         foreach ($message->parts as $part) {
             if ($part instanceof Text || $part instanceof Reference) {
                 $text ??= \count($items);
@@ -282,10 +283,15 @@ final readonly class Responses implements Model
                             $items[] = $replay;
                         } elseif (isset($item['encrypted_content'])) {
                             $items[] = $replay + ['encrypted_content' => $item['encrypted_content']];
+                        } else {
+                            $dropped = true; // nothing to replay it by, and the API rejects a function_call whose reasoning item is missing
                         }
                     }
                 }
                 continue;
+            }
+            if ($dropped && $part instanceof ToolCall) {
+                throw new UnsupportedContentException("The reply calling '{$part->name}' has reasoning without encrypted_content (made with store true, or without include reasoning.encrypted_content) and cannot be replayed with store false; drop that reply and its tool results");
             }
             $items[] = match (true) {
                 $part instanceof ToolCall => ['type' => 'function_call', 'call_id' => $part->id, 'name' => $part->name, 'arguments' => [] === $part->input ? '{}' : \json_encode($part->input, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE)],
