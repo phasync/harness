@@ -74,9 +74,12 @@ final readonly class Shell implements Tool
         $total    = 0;
         $killed   = null;
         $exited   = null;
-        $take     = function (string $chunk) use (&$head, &$tail, &$total, $call): void {
+        $carry    = ''; // bytes of a character the next read completes
+        $take     = function (string $chunk) use (&$head, &$tail, &$total, &$carry, $call): void {
             $total += \strlen($chunk);
-            $call->progress($chunk);
+            $text  = $carry . $chunk;
+            $carry = Utf8::incompleteTail($text);
+            $call->progress(Utf8::scrub(\substr($text, 0, \strlen($text) - \strlen($carry)))); // valid UTF-8, as the final text
             $half = \intdiv($this->maxOutput, 2);
             if (\strlen($head) < $half) {
                 $piece = \substr($chunk, 0, $half - \strlen($head));
@@ -132,6 +135,9 @@ final readonly class Shell implements Tool
             }
         }
         \proc_close($process);
+        if ('' !== $carry) {
+            $call->progress(Utf8::scrub($carry));
+        }
         $exit   = $status['exitcode'];
         $output = $head . ($total > \strlen($head) + \strlen($tail) ? "\n[" . ($total - \strlen($head) - \strlen($tail)) . " bytes cut]\n" : '') . $tail;
         $output = Utf8::scrub($output); // binary output and a character split by the cut become U+FFFD

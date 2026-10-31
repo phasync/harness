@@ -207,4 +207,4 @@ it('reports progress chunks a host can actually json_encode(), not just the fina
         // Today: the raw chunk never went through Utf8::scrub(), so this event is not valid UTF-8
         // and json_encode() on it -- the one documented way to put an Event on the wire -- fails.
         ->and(\json_encode($progress[0]))->not->toBeFalse();
-})->group('bug');
+}); // #32: progress carried the raw pipe bytes

@@ -21,6 +21,25 @@ final class Utf8
         return \html_entity_decode(\htmlspecialchars($text, \ENT_SUBSTITUTE | \ENT_NOQUOTES, 'UTF-8'), \ENT_NOQUOTES | \ENT_HTML5, 'UTF-8');
     }
 
+    /** The last 1-3 bytes of `$bytes` when they begin a multibyte character the next read completes; else ''. */
+    public static function incompleteTail(string $bytes): string
+    {
+        $n = \strlen($bytes);
+        for ($i = 1; $i <= 3 && $i <= $n; ++$i) {
+            $b = \ord($bytes[$n - $i]);
+            if ($b < 0x80) {
+                return '';
+            }
+            if ($b >= 0xC0) { // the lead byte says how long its sequence is
+                $need = $b >= 0xF0 ? 4 : ($b >= 0xE0 ? 3 : 2);
+
+                return $need > $i ? \substr($bytes, -$i) : '';
+            }
+        }
+
+        return '';
+    }
+
     /** The number of characters in valid UTF-8 `$text`. */
     public static function length(string $text): int
     {

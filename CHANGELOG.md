@@ -81,6 +81,8 @@
 - `Provider\Anthropic\Messages`: a reply whose thinking was cut off unsigned but that still called a
   tool cannot be replayed with thinking enabled; it fails with an `UnsupportedContentException` that
   says what to do, instead of sending a request the API rejects (#31).
+- `Tools\Shell\Shell`: `ToolProgress` chunks are valid UTF-8 too, a character split by a read
+  carried over to the next chunk (#32).
 
 ### Changed (breaking)
 
