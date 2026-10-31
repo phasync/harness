@@ -83,7 +83,7 @@ final class Compact implements ModelMiddleware
 
     private const UPDATE = 'Update the checkpoint: keep every fact, source and decision it holds in the same detail, record what the new messages finished as done, and add what they establish. Write the whole updated checkpoint.';
 
-    private const HEADER = "[A checkpoint of the earlier conversation, compacted to save context. Its facts are your own observations from the sources it names, as good as the source itself; what it records as done is done. Do not do or read again what it holds.]\n\n";
+    private const HEADER = "[A checkpoint of the earlier conversation, compacted to save context. Its facts are your own observations from the sources it names. What it records as done is done, and the world already reflects it. Continue from here without repeating it.]\n\n";
     private const ACK    = 'Understood. I continue from the checkpoint.';
 
     /** How many checkpoints are kept, one per conversation the instance serves. */

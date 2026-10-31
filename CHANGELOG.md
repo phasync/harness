@@ -239,7 +239,9 @@
   what is under way and what remains) and chooses the form itself, instead of writing under fixed
   Goal/Progress/Decisions/Known/Next/Context headings that forced a software-task shape on research,
   accounting or any other work. The checkpoint's header tells the agent its facts are its own
-  observations, as good as the source, so it does not read a source again for a fact it holds.
+  observations and (after Hermes Agent's wrapper) that the world already
+  reflects the work it records as done, so a file it edited, a record it posted or a request it
+  sent is not repeated.
 
 ### Changed (breaking)
 

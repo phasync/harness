@@ -43,8 +43,8 @@ form itself (the headings a researcher, an accountant or a programmer would use 
 The prompt asks for completeness about facts and terseness in wording, and for at most a quarter of
 the budget and three quarters of `summarizerOptions`' output tokens, in words, so the checkpoint
 fits beside the rest and is not cut. The agent gets it as one user message headed "A checkpoint of
-the earlier conversation ... Its facts are your own observations from the sources it names, as good as
-the source itself; what it records as done is done", followed by an
+the earlier conversation ... Its facts are your own observations from the sources it names. What it
+records as done is done, and the world already reflects it", followed by an
 assistant acknowledgement when the next message is a user message, so roles alternate.
 
 ## What it does
