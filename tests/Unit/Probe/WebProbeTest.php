@@ -53,3 +53,14 @@ it('recurses into unknown block elements like div and section', function () {
     expect(Html::extract('<div><p>A</p><section><h2>B</h2></section></div>'))
         ->toBe("A\n\n## B");
 });
+
+it('refuses IPv4-mapped IPv6 localhost address as SSRF guard', function () {
+    // IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) embed the IPv4 address;
+    // isPrivateAddress() unpacks the last 4 bytes and checks them as IPv4.
+    // The address ::ffff:127.0.0.1 maps to loopback and must be refused.
+    $transport = new FakeTransport();
+    $fetch     = new WebFetch($transport, 'agent');
+    expect(fn () => $fetch->call(['url' => 'http://[::ffff:127.0.0.1]/internal'], callFor()))
+        ->toThrow(RuntimeException::class, 'SSRF guard')
+        ->and($transport->requests)->toHaveCount(0); // guard blocks before making request
+});

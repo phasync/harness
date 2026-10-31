@@ -113,3 +113,40 @@ it('sends a user message with Media as input_image with data URL in request body
         ->and($userMessage['content'][1]['type'])->toBe('input_image')
         ->and($userMessage['content'][1]['image_url'])->toStartWith('data:image/png;base64,');
 });
+
+it('sends a user message with PDF Media as input_file with data URL in request body', function () {
+    // Test PDF Media with bytes in user message: application/pdf → input_file with filename + file_data (line 299-300: $m->uri null case)
+    // Checked against ResponsesTest line 96: "builds the request..." (no PDF tests exist there)
+    $t = new FakeTransport(sseEvents(
+        ['type' => 'response.created', 'response' => ['id' => 'resp_1']],
+        ['type' => 'response.output_item.added', 'output_index' => 0, 'item' => ['type' => 'message', 'id' => 'msg_1', 'role' => 'assistant', 'content' => []]],
+        ['type' => 'response.output_text.delta', 'item_id' => 'msg_1', 'delta' => 'PDF processed'],
+        ['type' => 'response.completed', 'response' => ['status' => 'completed', 'usage' => ['input_tokens' => 20, 'output_tokens' => 5, 'input_tokens_details' => ['cached_tokens' => 0]]]],
+    ));
+
+    $pdfBytesText = '%PDF-1.4' . "\x0A" . '1 0 obj';  // PDF file bytes
+    $messages     = [
+        new Message(Role::User, [
+            new Text('Please analyze this PDF:'),
+            new Media('application/pdf', $pdfBytesText),
+        ]),
+    ];
+
+    [...(new Responses($t, 'https://api.example/v1/', 'gpt-x', 'sk-1'))->stream(
+        TestPrompt::make(null, $messages)
+    )];
+
+    // Verify request body contains input_file with filename and file_data (base64 data URL)
+    $body  = \json_decode($t->requests[0]['body'], true);
+    $input = $body['input'];
+
+    // Find the user message with content array
+    $userMessage = \array_values(\array_filter($input, fn ($item) => isset($item['type'], $item['role']) && 'message' === $item['type'] && 'user' === $item['role']))[0] ?? null;
+
+    expect($userMessage)->not->toBeNull()
+        ->and($userMessage['content'])->toHaveCount(2)
+        ->and($userMessage['content'][0])->toBe(['type' => 'input_text', 'text' => 'Please analyze this PDF:'])
+        ->and($userMessage['content'][1]['type'])->toBe('input_file')
+        ->and($userMessage['content'][1]['filename'])->toBe('document.pdf')
+        ->and($userMessage['content'][1]['file_data'])->toStartWith('data:application/pdf;base64,');
+});

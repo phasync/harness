@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Harness\Retry;
 use Harness\Testing\FakeModel;
 use Harness\Testing\TestPrompt;
 use Harness\Tools\Shell\Shell;
@@ -103,4 +104,21 @@ it('reports correct specification', function () {
         ->and($spec->hints->destructive)->toBeTrue()
         ->and($spec->hints->openWorld)->toBeTrue()
         ->and($spec->hints->readOnly)->toBeFalse();
+});
+
+it('rejects invalid timeout values with Retry', function () {
+    expect(fn () => \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
+        ['command' => 'true', 'timeout' => -1],
+        callFor()
+    )))->toThrow(Retry::class, 'must be a positive number');
+
+    expect(fn () => \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
+        ['command' => 'true', 'timeout' => 0],
+        callFor()
+    )))->toThrow(Retry::class, 'must be a positive number');
+
+    expect(fn () => \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
+        ['command' => 'true', 'timeout' => 'abc'],
+        callFor()
+    )))->toThrow(Retry::class, 'must be a positive number');
 });

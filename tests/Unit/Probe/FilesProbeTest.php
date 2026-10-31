@@ -165,3 +165,24 @@ it('fails the whole patch when an Update File references a missing file, leaving
     expect(\is_file($this->dir . '/new.txt'))->toBeFalse()
         ->and(\file_get_contents($this->dir . '/existing.txt'))->toBe("keep me\n");
 });
+
+it('specifies apply_patch with patch property required and destructive hints', function () {
+    // Tests ApplyPatch::spec() (lines 31-37), which was not previously asserted.
+    // Checked against FilesTest "marks the read-only tools read-only and the others destructive"
+    // which tests spec() hints for ReadFile/ListDir/Glob/Grep and WriteFile/EditFile, but not ApplyPatch.
+    // This test verifies the specification that apply_patch requires:
+    // - Tool name: 'apply_patch'
+    // - Required property 'patch' of type string
+    // - Destructive hints: true
+    // - Description mentioning "*** Begin Patch"
+    $apply = new ApplyPatch($this->root);
+    $spec  = $apply->spec();
+
+    expect($spec->name)->toBe('apply_patch')
+        ->and($spec->hints->destructive)->toBeTrue()
+        ->and($spec->hints->readOnly)->toBeFalse()
+        ->and($spec->schema['type'])->toBe('object')
+        ->and($spec->schema['required'])->toBe(['patch'])
+        ->and($spec->schema['properties']['patch']['type'])->toBe('string')
+        ->and($spec->description)->toContain('*** Begin Patch');
+});

@@ -116,3 +116,33 @@ it('throws McpException when server writes non-JSON to stdout', function () {
         }
     }
 });
+
+it('throws McpException when tool result contains unknown content type', function () {
+    // Test that McpTool.result() throws when the server returns a content item with an unknown type.
+    // This exercises line 184 in McpTool: default => throw new McpException('...unknown type...')
+    // The result() method handles 'text', 'image', 'audio', 'resource', 'resource_link', but
+    // any other type causes an exception. This is the most user-visible uncovered line in McpTool.
+    // Checked against existing test: "maps content, structured content and errors to results"
+    // which tests known content types (text, resource_link, resource, image, audio), not unknown ones.
+
+    $json      = fn (array $result) => fn ($url, $headers, $body) => new Response(200, ['content-type' => 'application/json'], [\json_encode(['jsonrpc' => '2.0', 'id' => \json_decode($body, true)['id'], 'result' => $result])]);
+    $transport = new FakeTransport(
+        $json(['resultType' => 'complete', 'supportedVersions' => ['2026-07-28'], 'capabilities' => ['tools' => []]]),
+        $json(['tools' => [['name' => 'test', 'inputSchema' => ['type' => 'object']]]]),
+        $json(['resultType' => 'complete', 'content' => [['type' => 'unknown_type', 'data' => 'some data']]])
+    );
+    $server = new McpServer(new HttpConnection($transport, 'https://example.com/mcp'));
+
+    $exception = \fiber\run(function () use ($server) {
+        $tools = [];
+        foreach ($server->tools() as $tool) {
+            $tools[$tool->spec()->name] = $tool;
+        }
+        try {
+            $tools['test']->call([], callFor());
+        } catch (McpException $e) {
+            return \str_contains($e->getMessage(), 'unknown type');
+        }
+    });
+    expect($exception)->toBeTrue();
+});

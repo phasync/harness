@@ -141,3 +141,23 @@ it('204 No Content response skips body generator (line 201 early return)', funct
     expect($status)->toBe(204)
         ->and($chunks)->toBe([]);
 });
+
+it('TLS handshake fails when server closes immediately (line 143)', function () {
+    // A raw TCP server that accepts and closes immediately, causing TLS handshake to fail
+    expect(fn () => \fiber\run(function () {
+        $server = \stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+        $task   = go(function () use ($server) {
+            $conn = \stream_socket_accept(readable($server), 0);
+            if (false !== $conn) {
+                \fclose($conn);
+            }
+            \fclose($server);
+        });
+        try {
+            (new StreamTransport(connectTimeout: 2.0))->get("https://127.0.0.1:$port/", [], live());
+        } finally {
+            \fiber\await($task);
+        }
+    }))->toThrow(TransportException::class, 'TLS handshake with 127.0.0.1');
+});

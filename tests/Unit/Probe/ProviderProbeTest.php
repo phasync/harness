@@ -121,3 +121,18 @@ it('formats a Reference in an Anthropic user message as a markdown link', functi
         ['type' => 'text', 'text' => 'thanks'],
     ]);
 });
+
+it('sends Anthropic PDF document in user message with base64 encoding in request body', function () {
+    $streamResp = "event: message_start\ndata: " . \json_encode(['message' => ['id' => 'm', 'usage' => ['input_tokens' => 5, 'output_tokens' => 1]]]) . "\n\n"
+        . "event: message_delta\ndata: " . \json_encode(['delta' => ['stop_reason' => 'end_turn']]) . "\n\n"
+        . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n";
+    $t          = new FakeTransport(new Response(200, [], \str_split($streamResp, 23)));
+    $pdfContent = 'PDF_BINARY_DATA_HERE';
+    $msgs       = [new Message(Role::User, [new Media('application/pdf', $pdfContent), new Text('please analyze')])];
+    [...(new AnthropicMessages($t, 'key', 'claude-x'))->stream(new Prompt(null, $msgs, [], new Options(), live()))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body['messages'][0]['content'])->toBe([
+        ['type' => 'document', 'source' => ['type' => 'base64', 'media_type' => 'application/pdf', 'data' => \base64_encode($pdfContent)]],
+        ['type' => 'text', 'text' => 'please analyze'],
+    ]);
+});

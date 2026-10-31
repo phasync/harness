@@ -90,3 +90,27 @@ it('judges bare wrappers with no wrapped command: env/sudo asked about, xargs de
     [$verdict] = Shell::check('xargs', $rules);
     expect($verdict)->toBe(Verdict::Allow);
 });
+
+it('parses backslash escapes inside double quotes correctly', function () {
+    // Backslash escapes special characters inside double quotes: \", \\, \$, \`, \newline
+    // Verify that the tokenizer produces the correct argument for policy matching
+
+    $rules = [
+        Shell::allow('echo'),
+        Shell::allow('ls'),
+        Shell::deny('rm'),
+    ];
+
+    // Escaped quote inside double quotes: "a\"b" produces argument a"b
+    [$verdict] = Shell::check('echo "a\"b"', $rules);
+    expect($verdict)->toBe(Verdict::Allow);
+
+    // Escaped dollar sign inside double quotes: "x\$y" produces argument x$y
+    // The rm command is still denied even though the argument contains a literal $
+    [$verdict] = Shell::check('rm "x\$y"', $rules);
+    expect($verdict)->toBe(Verdict::Deny);
+
+    // Escaped backslash inside double quotes: "a\\b" produces argument a\b
+    [$verdict] = Shell::check('echo "a\\b"', $rules);
+    expect($verdict)->toBe(Verdict::Allow);
+});

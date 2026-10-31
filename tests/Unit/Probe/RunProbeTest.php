@@ -51,3 +51,18 @@ it('reindents text from tab to space indentation with blank lines', function () 
     // Tabs should be converted to 4 spaces; blank line should be preserved as-is
     expect($result)->toBe("if (x) {\n    code();\n\n    another();\n}");
 });
+
+it('rejects non-Message objects in messages parameter', function () {
+    // Run.php lines 105-108: validate that all messages are Message objects
+    // When a non-Message is passed in messages array, throw InvalidArgumentException naming the type
+
+    // Checked against tests/ - no existing test for this specific validation
+    try {
+        new Run(new FakeModel(), new Tools(), messages: [new stdClass()]);
+        // Should not reach here
+        expect(true)->toBe(false);
+    } catch (InvalidArgumentException $e) {
+        // Expected: exception thrown with type name in message
+        expect($e->getMessage())->toContain('messages must be Message objects, got stdClass');
+    }
+});

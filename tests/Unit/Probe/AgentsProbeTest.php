@@ -149,9 +149,8 @@ it('patch parser rejects Update File without hunk header', function () {
         ->toThrow(RuntimeException::class, "must start a hunk with '@@'");
 });
 
-it('patch parser handles empty lines in hunk context correctly (lines 113-116)', function () {
-    // Test that empty lines in a hunk are treated as context lines (preserved on both sides)
-    // This covers lines 113-116 in PatchParser.php: empty line handling
+it('patch parser keeps a blank context line in a hunk', function () {
+    // Test that blank lines in a hunk are treated as context lines (preserved on both sides)
 
     $tempDir = \sys_get_temp_dir() . '/harness-hunk-empty-' . \bin2hex(\random_bytes(4));
     \mkdir($tempDir);
@@ -181,6 +180,38 @@ PATCH;
         // Verify the result: line one changed, blank line preserved, line three unchanged
         $result = \file_get_contents($tempDir . '/test.txt');
         expect($result)->toBe("LINE ONE\n\nline three\nline four\n");
+    } finally {
+        // Clean up
+        \exec('rm -rf ' . \escapeshellarg($tempDir));
+    }
+});
+
+it('patch parser preserves zero-character empty lines in hunks (lines 113-116)', function () {
+    // Test that a line with zero characters (no prefix) in a hunk is treated as context
+    // This covers lines 113-116 in PatchParser.php: the `'' === $line` branch.
+    // The hunk also changes the line before the blank one, so the patch is not a no-op:
+    // it proves the blank context line was correctly located and kept out of the diff.
+
+    $tempDir = \sys_get_temp_dir() . '/harness-zero-line-' . \bin2hex(\random_bytes(4));
+    \mkdir($tempDir);
+
+    try {
+        // Create a file with a blank line (truly empty, no spaces) between code lines
+        $originalContent = "before\n\nafter\n";
+        \file_put_contents($tempDir . '/test.txt', $originalContent);
+
+        // Create a patch with a zero-character line in the hunk (between two context lines);
+        // "before" is changed to "BEFORE" so applying the patch actually changes the file.
+        $patch = "*** Begin Patch\n*** Update File: test.txt\n@@\n-before\n+BEFORE\n\n after\n*** End Patch";
+
+        // Apply the patch
+        $root  = new Root($tempDir);
+        $apply = new ApplyPatch($root);
+        $apply->call(['patch' => $patch], callFor());
+
+        // Verify the result: blank line is preserved, and the changed line was updated
+        $result = \file_get_contents($tempDir . '/test.txt');
+        expect($result)->toBe("BEFORE\n\nafter\n");
     } finally {
         // Clean up
         \exec('rm -rf ' . \escapeshellarg($tempDir));
