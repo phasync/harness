@@ -137,7 +137,7 @@ final class Compact implements ModelMiddleware
         ?\Closure $count = null,
         private readonly int $keepFirst = 1,
         ?LoggerInterface $log = null,
-        private readonly Options $summarizerOptions = new Options(maxOutputTokens: 1024),
+        private readonly Options $summarizerOptions = new Options(maxOutputTokens: 2048),
         ?State $state = null,
         private readonly ?int $keepRecentTokens = null,
     ) {
