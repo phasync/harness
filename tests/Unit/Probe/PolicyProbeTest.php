@@ -27,3 +27,10 @@ it('peels short options with attached values (like sudo -uroot)', function () {
     expect(verdictOfProbe('sudo -uroot ls'))->toBe(Verdict::Allow)
         ->and(verdictOfProbe('sudo -uroot rm'))->toBe(Verdict::Deny);
 });
+
+it('peels env - (empty environment flag) to expose the wrapped command', function () {
+    // env - clears the environment and runs the wrapped command
+    // Testing that 'env - rm' is peeled to 'rm' and correctly denied
+    expect(verdictOfProbe('env - rm'))->toBe(Verdict::Deny)
+        ->and(verdictOfProbe('env - ls'))->toBe(Verdict::Allow);
+});

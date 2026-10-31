@@ -35,9 +35,9 @@ new StreamTransport(connectTimeout: 10.0, idleTimeout: 300.0, ssl: ['cafile' => 
 keeps sending is never cut off. Each wait is cut into slices of at most 250 ms with a check of the
 `Cancel` signal between them, so a cancelled turn ends within 250 ms even while the server sends
 nothing. DNS resolution is blocking (PHP has no non-blocking resolver). No proxies or compression: a
-model endpoint needs none. `get()` follows up to 5 redirects (301, 302, 303, 307, 308), draining and
-closing each hop's connection before the next request, as a browser would for a GET; a non-redirect
-status, or a redirect past 5 hops, comes back as the response as is.
+model endpoint needs none. A redirect comes back as the response it is: `Response::redirectTarget($url)`
+gives the absolute target of a 301/302/303/307/308 with a `Location`, and the caller decides whether to
+follow it, draining the body first (`web_fetch` follows up to 5 hops and runs its SSRF guard on each).
 
 ## Sse
 

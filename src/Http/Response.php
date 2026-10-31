@@ -35,4 +35,28 @@ final class Response
 
         return $body;
     }
+
+    /**
+     * The absolute URL this response redirects to (a 301, 302, 303, 307 or 308 with a `Location`,
+     * which may be absolute or path-absolute, resolved against `$from`), or null when it is not a
+     * redirect. A caller that follows it drains this body first and checks the target as it would
+     * any URL: a transport never follows redirects on its own.
+     */
+    public function redirectTarget(string $from): ?string
+    {
+        $location = $this->headers['location'] ?? null;
+        if (null === $location || !\in_array($this->status, [301, 302, 303, 307, 308], true)) {
+            return null;
+        }
+        if (1 === \preg_match('#^https?://#i', $location)) {
+            return $location;
+        }
+        $parts = \parse_url($from);
+        $base  = ($parts['scheme'] ?? 'http') . '://' . ($parts['host'] ?? '') . (isset($parts['port']) ? ':' . $parts['port'] : '');
+        if (\str_starts_with($location, '/')) {
+            return $base . $location;
+        }
+
+        return $base . \rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location;
+    }
 }

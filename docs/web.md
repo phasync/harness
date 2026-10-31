@@ -45,11 +45,16 @@ left off.
 
 ## The SSRF guard
 
-A URL whose scheme is not `http`/`https`, or whose host is `localhost`, a private IPv4 range
-(`127/8`, `10/8`, `172.16/12`, `192.168/16`, `169.254/16`), `::1` or an IPv6 unique-local address
-(`fc00::/7`), is an error result unless the constructor's `allowPrivate: true` (default `false`):
-`web_fetch` runs inside agents that may be on a server with its own internal network, and this is
-the guard against them being used to probe it.
+A URL whose scheme is not `http`/`https`, or whose host is `localhost` or `*.localhost`, an
+address in a private, loopback or link-local range (`0/8`, `127/8`, `10/8`, `172.16/12`,
+`192.168/16`, `169.254/16`, `::1`, `fc00::/7`, `fe80::/10`, and IPv4-mapped IPv6 forms of these),
+a numeric host that is not a canonical literal (`2130706433`, `127.1`, `0x7f000001`: the resolver
+accepts them, so they are refused outright), or a name that resolves to any such address, is an
+error result unless the constructor's `allowPrivate: true` (default `false`): `web_fetch` runs
+inside agents that may be on a server with its own internal network, and this is the guard against
+them being used to probe it. The name is resolved once by the guard and again by the transport, so a
+record that changes between the two (DNS rebinding) is not covered; a redirect's target is checked
+by the same guard.
 
 ## Cache
 

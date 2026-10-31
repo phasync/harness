@@ -124,18 +124,18 @@ it('rejects URLs it cannot serve', function () {
     expect(fn () => (new StreamTransport())->post('ftp://example.com/', [], '', live()))->toThrow(InvalidArgumentException::class);
 });
 
-it('follows a redirect for get(), on a fresh connection to the Location', function () {
-    $result = \fiber\run(function () {
-        [$port2, $task2] = serve(fn () => ["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"]);
-        [$port1, $task1] = serve(fn () => ["HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:$port2/dest\r\nContent-Length: 0\r\n\r\n"]);
-        $response        = (new StreamTransport())->get("http://127.0.0.1:$port1/start", [], live());
-        $body            = \implode('', [...$response->body()]);
+it('returns a redirect as the response it is, with redirectTarget() naming the absolute target', function () {
+    [$status, $target, $relative] = \fiber\run(function () {
+        [$port, $task] = serve(fn () => ["HTTP/1.1 302 Found\r\nLocation: /dest?x=1\r\nContent-Length: 0\r\n\r\n"]);
+        $response      = (new StreamTransport())->get("http://127.0.0.1:$port/start/here", [], live());
+        \implode('', [...$response->body()]);
+        \fiber\await($task);
+        $relative = new Response(301, ['location' => 'next.html'], []);
 
-        return [$response->status, $body, \fiber\await($task1), \fiber\await($task2)];
+        return [$response->status, $response->redirectTarget("http://127.0.0.1:$port/start/here"), $relative->redirectTarget('https://h/a/b/c.html')];
     });
-    [$status, $body, $request1, $request2] = $result;
-    expect($status)->toBe(200)
-        ->and($body)->toBe('ok')
-        ->and($request1)->toStartWith("GET /start HTTP/1.1\r\n")
-        ->and($request2)->toStartWith("GET /dest HTTP/1.1\r\n");
+    expect($status)->toBe(302)
+        ->and($target)->toBe('http://127.0.0.1:' . \parse_url($target, \PHP_URL_PORT) . '/dest?x=1')
+        ->and($relative)->toBe('https://h/a/b/next.html')
+        ->and((new Response(200, ['location' => '/x'], []))->redirectTarget('https://h/'))->toBeNull();
 });

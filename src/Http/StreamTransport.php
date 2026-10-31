@@ -14,7 +14,8 @@ use Harness\Cancelled;
  * every wait is `fiber\readable()` or `fiber\writable()`, so it runs concurrently on any
  * fiber-interop adapter and must be used inside `fiber\run()`. One connection per request
  * (`Connection: close`), chunked and content-length bodies; `post()` and `get()` share this
- * connection and request/response code, `get()` adding up to 5 redirect hops; no proxies or
+ * connection and request/response code; a redirect comes back as the response it is (see
+ * `Response::redirectTarget()`); no proxies or
  * compression. `connectTimeout` bounds connecting and the TLS handshake, `idleTimeout` each wait
  * for more of the response. Every wait is cut into slices of at most 250 ms; between them it
  * checks the `Cancel` signal and throws `Harness\Cancelled` once it is set, so a cancelled turn
@@ -41,17 +42,7 @@ final class StreamTransport implements Transport
 
     public function get(string $url, array $headers, Cancel $cancel): Response
     {
-        for ($redirects = 0;; ++$redirects) {
-            $response = $this->send('GET', $url, $headers, null, $cancel);
-            $location = $response->headers['location'] ?? null;
-            if (null === $location || !\in_array($response->status, [301, 302, 303, 307, 308], true) || $redirects >= 5) {
-                return $response;
-            }
-            foreach ($response->body() as $ignored) {
-                // drained so the connection closes before the next request is made
-            }
-            $url = self::redirectTarget($url, $location);
-        }
+        return $this->send('GET', $url, $headers, null, $cancel);
     }
 
     private function send(string $method, string $url, array $headers, ?string $body, Cancel $cancel): Response
@@ -314,20 +305,5 @@ final class StreamTransport implements Transport
         } finally {
             \restore_error_handler();
         }
-    }
-
-    /** The absolute URL a `Location` header names, which may be absolute or path-absolute. */
-    private static function redirectTarget(string $url, string $location): string
-    {
-        if (1 === \preg_match('#^https?://#i', $location)) {
-            return $location;
-        }
-        $parts = \parse_url($url);
-        $base  = ($parts['scheme'] ?? 'http') . '://' . ($parts['host'] ?? '') . (isset($parts['port']) ? ':' . $parts['port'] : '');
-        if (\str_starts_with($location, '/')) {
-            return $base . $location;
-        }
-
-        return $base . \rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location;
     }
 }

@@ -37,9 +37,10 @@
 ### Changed (breaking)
 
 - **`Transport` gets `get(string $url, array $headers, Cancel $cancel): Response`**, implemented
-  in `StreamTransport` (sharing its connection and request/response code with `post()`; follows up
-  to 5 redirects for 301, 302, 303, 307 and 308, as a browser would for a GET) and scripted in
-  `FakeTransport`. Transport has `get()`; a hand-written `Transport` must add it.
+  in `StreamTransport` (sharing its connection and request/response code with `post()`) and scripted
+  in `FakeTransport`. Transport has `get()`; a hand-written `Transport` must add it. A transport never
+  follows redirects: `Response::redirectTarget($url)` names the target and the caller follows it, so
+  a guard can check every hop (`web_fetch` follows up to 5 and refuses a hop to a private address).
 
 ## 0.1.0 (2026-10-31)
 

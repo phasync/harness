@@ -64,6 +64,22 @@ it('refuses a private-network URL unless allowPrivate is set', function () {
         ->toThrow(RuntimeException::class, 'SSRF guard');
 });
 
+it('follows a redirect, guarding every hop, and gives up after 5', function () {
+    $redirect = fn (string $to) => new Response(302, ['location' => $to], []);
+    $public   = new FakeTransport($redirect('/moved'), $redirect('https://other.example/final'), html('200', 'text/plain', 'landed'));
+    $fetch    = new WebFetch($public, 'agent');
+    expect(webText($fetch->call(['url' => 'https://example.com/start'], callFor())))->toBe('landed')
+        ->and(\array_column($public->requests, 'url'))->toBe(['https://example.com/start', 'https://example.com/moved', 'https://other.example/final']);
+
+    $private = new FakeTransport($redirect('http://127.0.0.1/admin'));
+    expect(fn () => (new WebFetch($private, 'agent'))->call(['url' => 'https://example.com/start'], callFor()))
+        ->toThrow(RuntimeException::class, 'SSRF guard');
+
+    $loop = new FakeTransport(...\array_map(fn () => $redirect('https://example.com/again'), \range(1, 7)));
+    expect(fn () => (new WebFetch($loop, 'agent'))->call(['url' => 'https://example.com/start'], callFor()))
+        ->toThrow(RuntimeException::class, 'more than 5 times');
+});
+
 it('fetches a private-network URL when allowPrivate is true', function () {
     $transport = new FakeTransport(html('200', 'text/plain', 'internal'));
     $fetch     = new WebFetch($transport, 'agent', allowPrivate: true);

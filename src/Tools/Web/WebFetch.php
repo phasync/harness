@@ -29,7 +29,7 @@ use Harness\ToolSpec;
 final readonly class WebFetch implements Tool
 {
     /** IPv4 networks treated as private. */
-    private const PRIVATE_NETS_V4 = [['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['169.254.0.0', 16]];
+    private const PRIVATE_NETS_V4 = [['0.0.0.0', 8], ['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['169.254.0.0', 16]];
 
     public function __construct(
         private Transport $transport,
@@ -87,27 +87,58 @@ final readonly class WebFetch implements Tool
         }
     }
 
+    /**
+     * True for a host the guard refuses: `localhost` and `*.localhost`, an address literal in a private,
+     * loopback or link-local range, a numeric host that is not a canonical literal (`2130706433`,
+     * `127.1`, `0x7f000001`: the resolver accepts these forms, so they are refused outright), and a
+     * name any of whose resolved addresses is private. The name is resolved here and again by the
+     * transport, so a record that changes between the two (DNS rebinding) is not covered.
+     */
     private static function isPrivateHost(string $host): bool
     {
         $host = \trim(\strtolower($host), '[]'); // parse_url keeps the brackets of an IPv6 literal
-        if ('localhost' === $host || '' === $host) {
+        if ('' === $host || 'localhost' === $host || \str_ends_with($host, '.localhost')) {
             return true;
         }
-        if (false !== \filter_var($host, \FILTER_VALIDATE_IP, \FILTER_FLAG_IPV4)) {
-            $long = \ip2long($host);
-            foreach (self::PRIVATE_NETS_V4 as [$net, $bits]) {
-                $mask = -1 << (32 - $bits);
-                if (($long & $mask) === (\ip2long($net) & $mask)) {
-                    return true;
-                }
-            }
-
-            return false;
+        $bin = \inet_pton($host);
+        if (false !== $bin) {
+            return self::isPrivateAddress($bin);
         }
-        if (false !== \filter_var($host, \FILTER_VALIDATE_IP, \FILTER_FLAG_IPV6)) {
-            $bin = (string) \inet_pton($host);
+        if (1 === \preg_match('/^[0-9a-fx.:]+$/', $host)) {
+            return true; // numeric, but not a canonical literal
+        }
+        $addresses = \gethostbynamel($host) ?: [];
+        foreach (\dns_get_record($host, \DNS_AAAA) ?: [] as $record) {
+            $addresses[] = $record['ipv6'];
+        }
+        foreach ($addresses as $address) {
+            $packed = \inet_pton($address);
+            if (false !== $packed && self::isPrivateAddress($packed)) {
+                return true;
+            }
+        }
 
-            return '::1' === $host || (0xFC === (\ord($bin[0]) & 0xFE));
+        return false;
+    }
+
+    /** @param string $bin a packed address from inet_pton(), 4 or 16 bytes */
+    private static function isPrivateAddress(string $bin): bool
+    {
+        if (16 === \strlen($bin)) {
+            if ("\0\0\0\0\0\0\0\0\0\0\xff\xff" === \substr($bin, 0, 12)) {
+                $bin = \substr($bin, 12); // an IPv4-mapped address is judged as its IPv4
+            } else {
+                return "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x01" === $bin // ::1
+                    || 0xFC === (\ord($bin[0]) & 0xFE)                                // fc00::/7
+                    || (0xFE === \ord($bin[0]) && 0x80 === (\ord($bin[1]) & 0xC0));  // fe80::/10
+            }
+        }
+        $long = (int) \unpack('N', $bin)[1];
+        foreach (self::PRIVATE_NETS_V4 as [$net, $bits]) {
+            $mask = -1 << (32 - $bits);
+            if (($long & $mask) === (\ip2long($net) & $mask)) {
+                return true;
+            }
         }
 
         return false;
@@ -116,9 +147,23 @@ final readonly class WebFetch implements Tool
     /** @return array{0: string, 1: string} the lower-case content type without parameters, and the body up to maxBytes */
     private function fetch(string $url, Call $call): array
     {
-        $cancel   = new Cancel($call->isCancelled(...));
-        $headers  = ['User-Agent' => $this->userAgent, 'Accept' => 'text/html,application/xhtml+xml,text/*,application/json'];
-        $response = $this->transport->get($url, $headers, $cancel);
+        $cancel  = new Cancel($call->isCancelled(...));
+        $headers = ['User-Agent' => $this->userAgent, 'Accept' => 'text/html,application/xhtml+xml,text/*,application/json'];
+        for ($hops = 0;; ++$hops) {
+            $this->guard($url); // every hop: a public host may redirect to a private one
+            $response = $this->transport->get($url, $headers, $cancel);
+            $target   = $response->redirectTarget($url);
+            if (null === $target) {
+                break;
+            }
+            if ($hops >= 5) {
+                throw new \RuntimeException("'$url' redirects more than 5 times; web_fetch gives up");
+            }
+            foreach ($response->body() as $ignored) {
+                // drained so the connection closes before the next request is made
+            }
+            $url = $target;
+        }
         $type     = \strtolower(\trim(\explode(';', $response->headers['content-type'] ?? '')[0]));
         $body     = '';
         foreach ($response->body() as $chunk) {
