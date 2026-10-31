@@ -6,6 +6,7 @@ use Harness\Accumulator;
 use Harness\Cancel;
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
+use Harness\ErrorKind;
 use Harness\FinishReason;
 use Harness\Http\Response;
 use Harness\Mcp\Connection;
@@ -325,3 +326,59 @@ it('does not keep paging tools/list forever when the cursor never advances', fun
     expect(fn () => $server->tools())->toThrow(McpException::class, 'does not advance')
         ->and($conn->calls)->toBe(2);
 });
+
+/*
+ * Round 7's attack on #35's fix: an alternating A, B, A, ... cursor is caught (the second A is a
+ * repeat `$seen` already has). A server handing out 10 000 distinct, never-repeating cursors (even
+ * with empty pages every time) is NOT caught by `$seen`, and docs/mcp.md only says "`tools/list`
+ * (every page) is cached for its `ttlMs`" -- it never promises a page-count cap, so fetching however
+ * many distinct pages a server claims to have is the documented contract working as intended, not a
+ * new defect; this module's #35 fix was aimed at the one thing that IS a protocol violation (a
+ * cursor that doesn't advance), and it still only catches that. `ttlMs` of `0`/negative also behaves
+ * exactly as documented ("a list with ttlMs: 0 is fetched each step"): `$this->expires = microtime(true)
+ * + $ttl / 1000` lands at or before now, so the very next `tools()` call re-fetches, matching the doc
+ * -- not a defect either.
+ *
+ * The real gap is elsewhere in this same class: `Messages::stream()`'s `message_stop` handler maps
+ * `stop_reason` to `Finish` purely from the server's say-so --
+ *   'tool_use' => FinishReason::ToolCalls,
+ * -- with no check that a `tool_use` content block (`ToolCallStart`/`ToolCallEnd`) was ever actually
+ * yielded during the stream. docs/anthropic.md's own promise ("`stop_reason`: ... `tool_use` ->
+ * ToolCalls") describes a reply that calls a tool; `FinishReason::ToolCalls` is the signal the rest
+ * of the harness (Run, any host UI) reads to mean "there is a tool call to carry out" -- compare
+ * Responses.php in this same module, which tracks its own `$called` flag and only reports
+ * `FinishReason::ToolCalls` when a `function_call` item actually showed up, falling back to `Stop`
+ * otherwise. Anthropic's `Messages` has no equivalent check: a server that claims `stop_reason:
+ * "tool_use"` while every content block was `text` makes this provider yield `Finish(ToolCalls)` for
+ * a message that, decoded by the real `Accumulator`, holds nothing but `Text` -- the one case this
+ * exact `match` already treats everything else defensively (an unrecognised `stop_reason` throws
+ * `ModelException` right there), yet this specific, checkable inconsistency sails through silently.
+ *
+ * Verified directly against the real code (both adapters): a stream with a single `text` block and
+ * `stop_reason: "tool_use"` yields `Finish(FinishReason::ToolCalls)` with no `ToolCallStart` or
+ * `ToolCallEnd` anywhere in the delta list.
+ */
+it('does not report ToolCalls when stop_reason says tool_use but no tool_use block was ever started', function () {
+    $body = '';
+    foreach ([
+        ['type' => 'message_start', 'message' => ['usage' => []]],
+        ['type' => 'content_block_start', 'index' => 0, 'content_block' => ['type' => 'text', 'text' => '']],
+        ['type' => 'content_block_delta', 'index' => 0, 'delta' => ['type' => 'text_delta', 'text' => 'Let me check...']],
+        ['type' => 'content_block_stop', 'index' => 0],
+        // The server lies: it says it stopped to call a tool, but never opened a tool_use block.
+        ['type' => 'message_delta', 'delta' => ['stop_reason' => 'tool_use'], 'usage' => []],
+        ['type' => 'message_stop'],
+    ] as $e) {
+        $body .= "event: {$e['type']}\ndata: " . \json_encode($e) . "\n\n";
+    }
+    $model = new Messages(new FakeTransport(new Response(200, [], \str_split($body, 23))), 'k', 'claude-x');
+
+    // Today: no exception, and the deltas end with Finish(ToolCalls) even though the real
+    // Accumulator would build a Text-only message (no ToolCallStart/End anywhere) from this stream.
+    try {
+        [...$model->stream(new Prompt(null, [], [], new Options(), live()))];
+        $this->fail('no exception');
+    } catch (ModelException $e) {
+        expect($e->kind)->toBe(ErrorKind::ModelError);
+    }
+})->group('bug');

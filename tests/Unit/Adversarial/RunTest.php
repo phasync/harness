@@ -25,6 +25,7 @@ use Harness\Stop;
 use Harness\Testing\FakeModel;
 use Harness\Tools;
 use Harness\ToolSpec;
+use Harness\UnsupportedOptionException;
 use Harness\Usage;
 
 /*
@@ -289,3 +290,65 @@ it('does not silently lose a message interjected while handling TurnEnded', func
     // is still accounted for in queued.
     expect($threw instanceof LogicException || [] !== $run->ended()->queued)->toBeTrue();
 }); // #36: interject() succeeded into orphaned arrays; the turn is over before TurnEnded is emitted now
+
+/*
+ * Round 7: attacking the #36 fix itself. `running` is now false before `TurnEnded` is emitted, so
+ * `ended()` works and `interject()` throws in its handler -- but `turn()`'s own guard
+ * (`if ($this->running) throw ...`) is the ONLY thing that ever stopped a second `turn()` call
+ * while a previous one's generator had not finished. Since `running` is false for the entire
+ * `TurnEnded` handling window, nothing stops the host from calling `turn()` again from inside
+ * that handler, starting a brand-new turn while the OLD turn()'s generator is still suspended
+ * mid-`yield`, with its own cleanup (and, for a failed turn, `turn()`'s documented "A
+ * \LogicException ... is rethrown from the iteration after TurnEnded") not yet delivered.
+ *
+ * For a turn that failed with a misuse `\LogicException`, that rethrow does not happen until the
+ * consumer asks the OLD generator for its next event -- which, if a nested turn was started and
+ * run to completion inside the TurnEnded handler, is only after that whole second turn finished.
+ * The result: the first turn's exception surfaces later, out of its own context, after a
+ * completely different (successful) turn has already run and been observed -- not "from the
+ * iteration after TurnEnded" of the turn it actually belongs to, as documented, but from whatever
+ * code happens to resume the outer generator next, long after the host reasonably believed that
+ * turn was already handled.
+ *
+ * Verified directly against the real code with both adapters: a turn that fails with
+ * `UnsupportedOptionException` (a `\LogicException`), handled by starting a second, successful
+ * nested turn inside the `TurnEnded` branch, lets the nested turn finish and report
+ * `Reason::Done` -- and only then, when the outer foreach resumes, throws the FIRST turn's
+ * `UnsupportedOptionException`, landing in a catch the host may reasonably have assumed, by then,
+ * covered a turn that had already succeeded.
+ */
+it('does not let a nested turn() defer the previous turn\'s exception past it', function () {
+    $model = new FakeModel(
+        static function () {
+            throw new UnsupportedOptionException('no temperature here');
+        },
+        [new TextDelta('second turn text'), new Usage(1, 1), new Finish(FinishReason::Stop)],
+    );
+    $run      = new Harness\Run($model, new Tools());
+    $nestedOk = false;
+    $threw    = null;
+
+    \fiber\run(function () use ($run, &$nestedOk, &$threw) {
+        try {
+            foreach ($run->turn(new Message(Role::User, [new Text('go')])) as $e) {
+                if ($e instanceof Harness\Event\TurnEnded) {
+                    // The old generator has not finished its last yield; nothing stops a second
+                    // turn from starting (isRunning() is already false since the #36 fix).
+                    foreach ($run->turn(new Message(Role::User, [new Text('second')])) as $e2) {
+                    }
+                    $nestedOk = Reason::Done === $run->ended()->reason;
+                }
+            }
+        } catch (\Throwable $ex) {
+            $threw = $ex;
+        }
+    });
+
+    // Today: the nested turn runs to completion and reports Done ($nestedOk is true), then,
+    // resuming the OUTER generator, the FIRST turn's UnsupportedOptionException is thrown --
+    // after the second turn already finished, not "from the iteration after TurnEnded" of the
+    // turn it belongs to. The correct behaviour keeps the two turns from interleaving: either the
+    // nested turn() call itself throws (a turn's generator must be finished before another
+    // starts), or the first turn's exception is delivered before any nested turn can complete.
+    expect($nestedOk && $threw instanceof UnsupportedOptionException)->toBeFalse();
+})->group('bug');

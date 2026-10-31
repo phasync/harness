@@ -242,3 +242,34 @@ it('refuses a maxOutput of 0 or 1, which could not bound the output at all', fun
     expect(fn () => new ShellTool(\sys_get_temp_dir(), maxOutput: $maxOutput))
         ->toThrow(InvalidArgumentException::class, 'at least 2');
 })->with([0, 1]);
+
+/*
+ * `Shell`'s (the Policy rule class's) constructor validates `$program` against exactly two
+ * things: `'' === $program` and `str_contains($program, '/')`, each with its own instructive
+ * `InvalidArgumentException`. Nothing validates whitespace. But `matches()` for a Deny rule does
+ * `basename($argv[0]) === $this->program` -- an *exact* string comparison against a word the
+ * tokenizer in `parse()` already split on spaces and tabs, so `$argv[0]` (and its basename) can
+ * never legitimately contain whitespace. A program name with leading, trailing or embedded
+ * whitespace can therefore never equal any real `basename($argv[0])`, ever -- the rule is
+ * constructed without complaint and then matches nothing, for the rest of its life.
+ *
+ * `deny()`'s own docblock promises it "matches the program by its base name (`rm`, `/bin/rm`,
+ * `'r'm`, `r\m`), whatever its arguments" -- a promise this breaks completely, silently, for the
+ * single most plausible authoring mistake there is: a stray trailing space from a copy-paste, a
+ * trailing newline trimmed from a config line but not quite all the way, or a list of program
+ * names built with `"$program "` string interpolation. `Shell::allow('rm ')` would merely degrade
+ * to never-Allow (fail closed, harmless); `Shell::deny('rm ')` degrades to never-Deny -- the
+ * dangerous direction -- with no exception, no warning, nothing: it just quietly stops
+ * protecting against the exact program the host meant to block.
+ *
+ * Verified directly: `Shell::deny('rm ')` (one trailing space) constructs without error, and
+ * `Shell::check('rm -rf /', [Shell::deny('rm ')])` comes back `Ask` ("the shell command 'rm -rf'
+ * matches no allow rule"), never `Deny` -- for the exact command the host's rule was written to
+ * stop.
+ */
+it('refuses a shell rule program name with whitespace, which could never match a real argv[0]', function () {
+    // Today: this constructs fine, and the rule silently never matches anything -- a deny rule
+    // for 'rm ' (one trailing space) never denies `rm`, degrading to whatever $otherwise is.
+    expect(fn () => Shell::deny('rm '))
+        ->toThrow(InvalidArgumentException::class);
+})->group('bug');

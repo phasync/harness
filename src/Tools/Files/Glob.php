@@ -14,7 +14,8 @@ use Harness\ToolSpec;
 
 /**
  * `glob`: files whose path relative to `path` matches a pattern: `*` and `?` within a name, `**`
- * across directories, `[abc]` and `{a,b}`. Sorted, paged by `offset`; `.git` directories are skipped.
+ * across directories, `[abc]` and `{a,b}`. Sorted, paged by `offset`; `.git` directories are skipped;
+ * a path holding a control character is shown as a JSON string literal.
  */
 final readonly class Glob implements Tool
 {
@@ -48,7 +49,7 @@ final readonly class Glob implements Tool
         $matches = [];
         foreach (self::files($base) as $rel) {
             if (1 === \preg_match($regex, $rel)) {
-                $matches[] = $this->root->relative($base . '/' . $rel);
+                $matches[] = Page::name($this->root->relative($base . '/' . $rel));
             }
         }
         \sort($matches);

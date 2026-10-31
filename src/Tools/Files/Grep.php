@@ -72,7 +72,7 @@ final readonly class Grep implements Tool
                 ++$binary;
                 continue;
             }
-            $name = $this->root->relative($base . '/' . $rel);
+            $name = Page::name($this->root->relative($base . '/' . $rel));
             foreach (\explode("\n", \str_ends_with($content, "\n") ? \substr($content, 0, -1) : $content) as $no => $line) { // the trailing newline is not one more line, as read_file counts
                 if (1 === \preg_match($regex, $line)) {
                     $line    = Utf8::scrub($line);

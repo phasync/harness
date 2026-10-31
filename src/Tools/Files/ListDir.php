@@ -12,7 +12,10 @@ use Harness\Tool;
 use Harness\Tools\Input;
 use Harness\ToolSpec;
 
-/** `list_dir`: the entries of a directory, sorted, directories with a trailing slash, paged by `offset`. */
+/**
+ * `list_dir`: the entries of a directory, sorted, directories with a trailing slash, paged by
+ * `offset`; a name holding a control character is shown as a JSON string literal.
+ */
 final readonly class ListDir implements Tool
 {
     public function __construct(private Root $root, private int $limit = 500)
@@ -45,7 +48,7 @@ final readonly class ListDir implements Tool
         $entries = [];
         foreach ($names as $name) {
             if ('.' !== $name && '..' !== $name) {
-                $entries[] = \is_dir($abs . '/' . $name) ? $name . '/' : $name;
+                $entries[] = Page::name($name) . (\is_dir($abs . '/' . $name) ? '/' : '');
             }
         }
 
