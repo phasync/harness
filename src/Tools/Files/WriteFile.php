@@ -6,6 +6,7 @@ namespace Harness\Tools\Files;
 
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Fs;
 use Harness\Result;
 use Harness\Tool;
 use Harness\Tools\Input;
@@ -49,14 +50,9 @@ final readonly class WriteFile implements Tool
         if (!\is_dir($dir)) { // checked before mkdir(), which would warn about it
             throw new \RuntimeException("'$path' cannot be created: '" . $this->root->relative($dir) . "' is a file, not a directory");
         }
-        $dir = \dirname($abs);
-        if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
-            throw new \RuntimeException("Could not create the directory for '$path'");
-        }
+        Fs::mkdir(\dirname($abs), "the directory for '$path'");
         $this->journal?->record($abs);
-        if (false === \file_put_contents($abs, $content)) {
-            throw new \RuntimeException("Could not write '$path'");
-        }
+        Fs::write($abs, $content, "'$path'");
 
         $text = ($existed ? 'Replaced' : 'Created') . " '$path' (" . \strlen($content) . ' bytes)';
         if (null !== $this->check) {

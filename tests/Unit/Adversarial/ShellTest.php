@@ -645,3 +645,30 @@ it('does not insert line breaks the real output never had, when the cut marker s
     expect($r->content[0]->text)->toContain('bytes cut]') // the cut really did happen
         ->and(\substr_count($r->content[0]->text, "\n"))->toBe(1); // only the header separator is a real line break
 }); // #99: the marker came wrapped in two line breaks the output never had
+
+/*
+ * Round 17 attacked #99's line-boundary-aware trim (the head is trimmed back to just after its
+ * last "\n", the tail forward to its first "\n" (keeping it), and both trims are added into the
+ * cut count) and found it holds up everywhere tried: the exact head+cut+tail = total byte
+ * accounting across a minimal 1-byte-over cut, `maxOutput: 2` and `3`, a tail collapsing to a
+ * bare `"\n"` when its only real content before the cut boundary is one dangling fragment, a
+ * multi-byte character still correctly scrubbed when trimming finds no `"\n"` at all to work
+ * with, and 60 randomized trials mixing ASCII, CR, LF and multi-byte bytes against varied
+ * `maxOutput` values (all produced valid UTF-8 and a sane cut count). The one corner not yet
+ * pinned by any existing test: a `"\r\n"` pair that sits *inside* the head's own kept window,
+ * immediately followed by a dangling partial fragment before the real cut -- does the `"\r"`
+ * survive attached to its `"\n"` (both found and kept together by `strrpos(head, "\n")`), or
+ * does trimming the dangling fragment after it somehow also strip the `"\r"` it's paired with?
+ *
+ * Verified directly: a 220-byte line `"ABC\r\nDEFGH" . str_repeat('M', 200) . "ZZZZZZZZZZ"` against
+ * `maxOutput: 20` (room 10, half 10) gives a raw head window of exactly `"ABC\r\nDEFGH"`; trimming
+ * keeps `"ABC\r\n"` (the complete CRLF pair) and folds the dangling `"DEFGH"` into the cut count
+ * (200 + 5 = 205, matching `total(220) - head(10) - tail(10) = 200` plus those 5 trimmed bytes).
+ */
+it('keeps a complete CRLF line ending attached to the head it belongs to, trimming only the dangling fragment after it', function () {
+    $body = 'ABC' . "\r\n" . 'DEFGH' . \str_repeat('M', 200) . 'ZZZZZZZZZZ';
+    $r    = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: 20))->call(['command' => 'printf \'%s\' ' . \escapeshellarg($body)], callFor()));
+
+    expect($r->content[0]->text)->toBe("Exit code 0\nABC\r\n[205 bytes cut]ZZZZZZZZZZ")
+        ->and($r->meta['bytes'])->toBe(\strlen($body));
+});

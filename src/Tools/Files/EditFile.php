@@ -6,6 +6,7 @@ namespace Harness\Tools\Files;
 
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Fs;
 use Harness\Result;
 use Harness\Tool;
 use Harness\Tools\Input;
@@ -74,9 +75,7 @@ final readonly class EditFile implements Tool
         $updated     = \substr_replace($content, $replacement, $located->offset, $located->length);
 
         $this->journal?->record($abs);
-        if (false === \file_put_contents($abs, $updated)) {
-            throw new \RuntimeException("Could not write '$path'");
-        }
+        Fs::write($abs, $updated, "'$path'");
 
         $note    = Matcher::LEVEL_EXACT === $located->level ? '' : ' (matched with ' . Matcher::DESCRIPTIONS[$located->level] . " on lines {$located->startLine}-{$located->endLine})";
         $endLine = $located->startLine + \substr_count($replacement, "\n");

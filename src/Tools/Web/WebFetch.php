@@ -8,6 +8,7 @@ use Harness\Call;
 use Harness\Cancel;
 use Harness\Hints;
 use Harness\Http\Transport;
+use Harness\Internal\Fs;
 use Harness\Internal\Utf8;
 use Harness\Result;
 use Harness\Tool;
@@ -21,9 +22,9 @@ use Harness\ToolSpec;
  * `text/plain`, `application/json` and other `text/*` replies come back as is; anything else is an
  * error result naming the content type. A gzip or deflate `Content-Encoding` is decoded, any other
  * is an error result (a gzip body may hold several members). The body is converted to UTF-8 from
- * the `charset` of `Content-Type`, else from a `<meta charset>` in an HTML page's first 1024 bytes
- * (where the HTML prescan looks), else it is taken as UTF-8; a charset mbstring does not know is
- * an error result. The response body is read up to
+ * a leading byte-order mark (which outranks a wrong header, as in browsers), else the `charset` of
+ * `Content-Type`, else a `<meta charset>` in an HTML page's first 1024 bytes (where the HTML
+ * prescan looks), else it is taken as UTF-8; a charset mbstring does not know is an error result. The response body is read up to
  * `maxBytes` (default 5 MB) of decoded bytes
  * and then stopped; the extracted text is cut at `maxChars` (default 20000) per call with the
  * files tools' tail idiom (`offset` continues from where the previous call left off). A
@@ -211,6 +212,13 @@ final readonly class WebFetch implements Tool
         if (!$html && 'application/json' !== $contentType && !\str_starts_with($contentType, 'text/')) {
             throw new \RuntimeException("web_fetch does not read $contentType; only text");
         }
+        foreach (["\xEF\xBB\xBF" => 'utf-8', "\xFF\xFE" => 'utf-16le', "\xFE\xFF" => 'utf-16be'] as $bom => $named) {
+            if (\str_starts_with($body, $bom)) { // the BOM sniff comes first, as in the WHATWG Encoding standard: it outranks a wrong header
+                $charset = $named;
+                $body    = \substr($body, \strlen($bom));
+                break;
+            }
+        }
         if ('' === $charset && $html && 1 === \preg_match('/<meta[^>]*charset\s*=\s*["\']?\s*([a-z0-9._:-]+)/i', \substr($body, 0, 1024), $m)) {
             $charset = \strtolower($m[1]); // the page's own declaration, where the HTML prescan looks for it
         }
@@ -232,13 +240,8 @@ final readonly class WebFetch implements Tool
         if (!\is_dir($dir)) { // checked before mkdir(), which would warn about it
             throw new \RuntimeException("The cache directory '{$this->cacheDir}' cannot be created: '$dir' is a file, not a directory");
         }
-        $dir = \dirname($cacheFile);
-        if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
-            throw new \RuntimeException("Could not create the cache directory '$dir'");
-        }
-        if (false === \file_put_contents($cacheFile, $text)) {
-            throw new \RuntimeException("Could not write the cache entry for '$url'");
-        }
+        Fs::mkdir(\dirname($cacheFile), "the cache directory '{$this->cacheDir}'");
+        Fs::write($cacheFile, $text, "the cache entry for '$url'");
     }
 
     private static function tail(string $text, int $offset, int $maxChars): string

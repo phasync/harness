@@ -39,9 +39,10 @@ differs from the URL, keeps `pre`/`code` verbatim, renders a table as one row pe
 joined by `" | "`, and otherwise collapses whitespace and decodes entities. `text/plain`,
 `application/json` and other `text/*` replies come back as is; anything else is an error result
 naming the content type (`web_fetch does not read <type>; only text`). A gzip or deflate
-`Content-Encoding` is decoded; any other is an error result. The body is converted to UTF-8 from the
-`charset` of `Content-Type`, else from a `<meta charset>` in an HTML page's first 1024 bytes (where the
-HTML prescan looks), else it is taken as UTF-8; a charset mbstring does not know is an error result.
+`Content-Encoding` is decoded; any other is an error result. The body is converted to UTF-8 from a
+leading byte-order mark (which outranks a wrong header, as in browsers), else the `charset` of
+`Content-Type`, else a `<meta charset>` in an HTML page's first 1024 bytes (where the HTML prescan
+looks), else it is taken as UTF-8; a charset mbstring does not know is an error result.
 The response body is read up to
 `maxBytes` (default 5 MB) of decoded bytes and then stopped; the extracted text is cut at `maxChars` (default
 20000) per call with the files tools' tail idiom, `offset` continuing from where the previous call

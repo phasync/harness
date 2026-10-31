@@ -598,3 +598,33 @@ it('takes the charset from a <meta charset> when the Content-Type has none, and 
         ->and(fn () => $page('iso-8859-1', 'text/html; charset=x-unknown')->call(['url' => 'https://example.com/'], TestCall::make()))
         ->toThrow(RuntimeException::class, 'charset x-unknown, which web_fetch cannot convert');
 }); // #98
+
+/*
+ * `WebFetch::toText()` trusts `Content-Type`'s `charset` parameter unconditionally once it is
+ * present -- the `<meta charset>` prescan only even runs `if ('' === $charset ...)`. But a UTF-8
+ * byte-order mark at the very start of the body is an unambiguous, machine-readable signal of
+ * the TRUE encoding, and real servers do sometimes send one while still declaring a stale or
+ * wrong `charset` in their headers (a common misconfiguration -- a default header a site never
+ * updated after its content became UTF-8). The WHATWG Encoding Standard, and every mainstream
+ * browser, treats a UTF-8 BOM as taking priority over a conflicting declared charset for exactly
+ * this reason. `toText()` has no BOM handling of any kind: a declared `charset=iso-8859-1` wins
+ * outright, `mb_convert_encoding()` is run on bytes that are already UTF-8, and even the BOM's
+ * own three bytes (`\xEF\xBB\xBF`, themselves valid UTF-8 for U+FEFF) get mangled right along
+ * with the rest of the page into garbled, double-decoded mojibake.
+ */
+it('lets a UTF-8 byte-order mark override a wrong declared charset', function () {
+    $bom       = "\xEF\xBB\xBF";
+    $body      = $bom . "<html><body><p>caf\xC3\xA9</p></body></html>"; // genuine UTF-8; 'é' is 0xC3 0xA9
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/html; charset=iso-8859-1'], [$body]));
+    $fetch     = new WebFetch($transport, 'agent');
+
+    expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
+        ->toBe('café');
+}); // #100: the wrong header charset was trusted: "ï»¿" leaked and 'é' was double-decoded
+
+it('decodes a UTF-16 body from its byte-order mark', function () {
+    $body      = "\xFF\xFE" . \mb_convert_encoding('<html><body><p>café</p></body></html>', 'UTF-16LE', 'UTF-8');
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/html'], [$body]));
+
+    expect((new WebFetch($transport, 'agent'))->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)->toBe('café');
+}); // #100

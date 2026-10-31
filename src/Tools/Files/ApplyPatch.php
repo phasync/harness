@@ -6,6 +6,7 @@ namespace Harness\Tools\Files;
 
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Fs;
 use Harness\Result;
 use Harness\Tool;
 use Harness\Tools\Input;
@@ -69,9 +70,7 @@ final readonly class ApplyPatch implements Tool
         foreach ($plan as $abs => $content) {
             if (null === $content && (\is_file($abs) || \is_link($abs))) { // a path only ever planned, never on disk, has nothing to delete
                 $this->journal?->record($abs);
-                if (!\unlink($abs)) {
-                    throw new \RuntimeException("Could not delete '$abs'");
-                }
+                Fs::unlink($abs, "'" . $this->root->relative($abs) . "'");
             }
         }
         foreach ($plan as $abs => $content) {
@@ -79,13 +78,8 @@ final readonly class ApplyPatch implements Tool
                 continue;
             }
             $this->journal?->record($abs);
-            $dir = \dirname($abs);
-            if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
-                throw new \RuntimeException("Could not create the directory for '$abs'");
-            }
-            if (false === \file_put_contents($abs, $content)) {
-                throw new \RuntimeException("Could not write '$abs'");
-            }
+            Fs::mkdir(\dirname($abs), "the directory for '" . $this->root->relative($abs) . "'");
+            Fs::write($abs, $content, "'" . $this->root->relative($abs) . "'");
         }
 
         return Result::text(\implode("\n\n", $reports));

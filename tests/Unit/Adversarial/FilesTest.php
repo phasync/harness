@@ -10,6 +10,7 @@ use Harness\Tools\Files\Journal;
 use Harness\Tools\Files\ListDir;
 use Harness\Tools\Files\ReadFile;
 use Harness\Tools\Files\Root;
+use Harness\Tools\Files\WriteFile;
 
 beforeEach(function () {
     $this->dir = \sys_get_temp_dir() . '/harness-files-adversarial-' . \bin2hex(\random_bytes(4));
@@ -522,8 +523,46 @@ it('keeps the true original across two separate apply_patch calls sharing one Jo
 
 it('refuses write_file under a parent that is a file, without a PHP warning', function () {
     \file_put_contents($this->dir . '/notes', 'a file');
-    $tool = new Harness\Tools\Files\WriteFile($this->root);
+    $tool = new WriteFile($this->root);
 
     expect(fn () => $tool->call(['path' => 'notes/sub/x.txt', 'content' => 'x'], callFor()))
         ->toThrow(RuntimeException::class, "'notes/sub/x.txt' cannot be created: 'notes' is a file, not a directory");
 }); // #95: mkdir() warned before "Could not create the directory" was thrown
+
+/*
+ * Round 20, attacking the #95 fix. Three sub-attacks on write_file's new ancestor walk:
+ * - A dangling symlink as an ancestor: `Root::resolve()`'s own probe loop (`!file_exists($probe)
+ *   && !is_link($probe)`) stops at the dangling symlink itself and fails to `realpath()` it, so
+ *   the call never even reaches WriteFile's new check -- refused earlier, conservatively, as
+ *   "leads outside the root through a symlink". No warning, no new defect.
+ * - An ancestor that is a symlink to a real FILE: `file_exists()` follows the symlink to the file
+ *   (true), so #95's walk correctly stops there, `is_dir()` on it is false (a file, not a
+ *   directory, through the symlink), and the clean "'notes' is a file, not a directory" message
+ *   fires -- exactly the case #95 was built for, confirmed working through a symlink too.
+ * - An ancestor that genuinely IS an existing directory, but is not writable: #95's walk only
+ *   checks `is_dir($dir)` -- never writability -- so this sibling case sails past the new guard
+ *   straight into the still-unguarded `mkdir()` call, and mkdir()'s own native PHP warning
+ *   ("mkdir(): Permission denied") leaks exactly as the "is a file" case used to before #95,
+ *   just for a different underlying cause.
+ */
+it('does not leak a native PHP warning from mkdir() when a directory ancestor is not writable', function () {
+    \mkdir($this->dir . '/readonly', 0755);
+    \chmod($this->dir . '/readonly', 0555); // read + execute, no write
+    $w        = new WriteFile($this->root);
+    $warnings = [];
+    \set_error_handler(function (int $errno, string $message) use (&$warnings): bool {
+        $warnings[] = $message;
+
+        return true;
+    });
+    try {
+        $w->call(['path' => 'readonly/sub/x.txt', 'content' => 'hello'], callFor());
+    } catch (RuntimeException $e) {
+    } finally {
+        \restore_error_handler();
+        \chmod($this->dir . '/readonly', 0755);
+    }
+
+    expect($warnings)->toBe([])
+        ->and($e->getMessage())->toBe("Could not create the directory for 'readonly/sub/x.txt': Permission denied");
+}); // #101: "mkdir(): Permission denied" escaped as a warning; now it is the error's reason
