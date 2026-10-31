@@ -128,4 +128,4 @@ it('keeps running commands in the directory it was built with, even after the pr
         \chdir($started);
         \exec('rm -rf ' . \escapeshellarg($base));
     }
-})->group('bug');
+}); // #23: the second call failed with 'Could not start bash', the relative cwd resolved against the new directory

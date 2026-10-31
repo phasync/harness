@@ -63,6 +63,8 @@
   cut off is handed back in `Ended::$queued` (#21).
 - `Tools\Files\Grep`: a file's trailing newline is not a line, so `^$` no longer reports a match
   one past the end (#22).
+- `Tools\Shell\Shell` resolves its `cwd` to an absolute path when built, so a later `chdir()` by the
+  process does not move or break its commands (#23).
 
 ### Changed (breaking)
 

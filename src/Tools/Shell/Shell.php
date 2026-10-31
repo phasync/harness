@@ -24,8 +24,10 @@ use Harness\ToolSpec;
  */
 final readonly class Shell implements Tool
 {
+    private string $cwd;
+
     public function __construct(
-        private string $cwd,
+        string $cwd,
         private float $timeout = 120.0,
         private float $maxTimeout = 600.0,
         private int $maxOutput = 30000,
@@ -33,6 +35,7 @@ final readonly class Shell implements Tool
         if (!\is_dir($cwd)) {
             throw new \InvalidArgumentException("Shell cwd '$cwd' is not a directory");
         }
+        $this->cwd = \realpath($cwd); // absolute: a later chdir() by the process must not move the tool
     }
 
     public function spec(): ToolSpec
