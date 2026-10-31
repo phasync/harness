@@ -133,7 +133,7 @@ final readonly class ApplyPatch implements Tool
             if ($located instanceof NoMatch) {
                 throw new \RuntimeException("apply_patch: '{$section->path}', hunk " . ($index + 1) . ": context not found. The closest region is lines {$located->startLine}-{$located->endLine}:\n" . Lines::numbered(\explode("\n", $located->text), $located->startLine));
             }
-            $after       = Matcher::withEol(Matcher::reindent($hunk->after, $located->fromIndent, $located->toIndent, $located->indentMap), $content);
+            $after       = Matcher::withEol(Matcher::reindent($hunk->after, $located->fromIndent, $located->toIndent, $located->indentLines), $content);
             $content     = \substr_replace($content, $after, $located->offset, $located->length);
             $endLine     = $located->startLine + \substr_count($after, "\n");
             $regions[]   = Lines::region($content, $located->startLine, $endLine);

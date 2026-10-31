@@ -67,7 +67,7 @@ final readonly class EditFile implements Tool
             throw new \RuntimeException("'old' was not found in '$path'; read the file and copy the text exactly. The closest region is lines {$located->startLine}-{$located->endLine}:\n" . Lines::numbered(\explode("\n", $located->text), $located->startLine));
         }
 
-        $replacement = Matcher::withEol(Matcher::reindent($new, $located->fromIndent, $located->toIndent, $located->indentMap), $content);
+        $replacement = Matcher::withEol(Matcher::reindent($new, $located->fromIndent, $located->toIndent, $located->indentLines), $content);
         $updated     = \substr_replace($content, $replacement, $located->offset, $located->length);
 
         $this->journal?->record($abs);

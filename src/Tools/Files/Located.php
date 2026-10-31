@@ -16,8 +16,8 @@ final readonly class Located
         public string $text,
         public string $fromIndent = '',
         public string $toIndent = '',
-        /** @var array<string, string> `old`'s relative indents (beyond `fromIndent`) to the matched block's (beyond `toIndent`) */
-        public array $indentMap = [],
+        /** @var list<array{string, string}|null> per line of `old`: its relative indent (beyond `fromIndent`) beside the matched line's (beyond `toIndent`); null for a blank line */
+        public array $indentLines = [],
     ) {
     }
 }

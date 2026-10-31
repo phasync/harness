@@ -37,7 +37,7 @@ final class Html
         }
         $root = $dom->getElementsByTagName('body')->item(0) ?? $dom->documentElement;
         if (null !== $root) {
-            $body = \str_replace("\u{E001}", '  ', \implode("\n\n", self::blocks($root)));
+            $body = \str_replace("\0i", '  ', \implode("\n\n", self::blocks($root)));
             if ('' !== $body) {
                 $lines[] = $body;
             }
@@ -110,7 +110,7 @@ final class Html
                 continue;
             }
             if ('br' === $tag) {
-                $out .= "\u{E000}"; // a line break, see below
+                $out .= "\0n"; // a line break, see below
             } elseif ('a' === $tag) {
                 $text = self::collapse(self::inline($child));
                 $href = $child->getAttribute('href');
@@ -119,23 +119,23 @@ final class Html
                 $out .= $child->textContent;
             } elseif ('ul' === $tag || 'ol' === $tag) {
                 foreach (self::blocks($child) as $item) { // a nested list: its items on their own lines, indented
-                    $out .= "\u{E000}\u{E001}" . \str_replace("\n", "\u{E000}\u{E001}", $item);
+                    $out .= "\0n\0i" . \str_replace("\n", "\0n\0i", $item);
                 }
-                $out .= "\u{E000}";
+                $out .= "\0n";
             } elseif ('pre' === $tag) { // kept verbatim: spliced back in after the collapse, on its own lines
                 $verbatim[] = \rtrim($child->textContent, "\n");
-                $out .= "\u{E000}\u{E002}\u{E000}";
+                $out .= "\0n\0v\0n";
             } else {
                 $out .= self::inline($child);
             }
         }
 
-        // E000 is a line break, E001 one level of list indentation and E002 a verbatim block; all
-        // survive the whitespace collapse, and extract() turns the indentation into spaces once the
-        // nesting is complete
-        $text = \preg_replace('/ ?\x{E000} ?/u', "\n", self::collapse($out)) ?? '';
+        // "\0n" is a line break, "\0i" one level of list indentation and "\0v" a verbatim block: a
+        // NUL cannot come from the page (libxml drops it), and all three survive the whitespace
+        // collapse; extract() turns the indentation into spaces once the nesting is complete
+        $text = \preg_replace('/ ?\x00n ?/', "\n", self::collapse($out)) ?? '';
 
-        return \trim(\preg_replace_callback('/\x{E002}/u', static fn (): string => \array_shift($verbatim) ?? '', $text) ?? '');
+        return \trim(\preg_replace_callback('/\x00v/', static fn (): string => \array_shift($verbatim) ?? '', $text) ?? '');
     }
 
     /** One line per `tr`, its `td`/`th` cells joined with `" | "`. */

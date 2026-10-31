@@ -41,3 +41,35 @@ it('keeps the file\'s own tab indentation on a nested line instead of mixing it 
     // indentation is now translated line by line to the block's own style
     expect(\file_get_contents($this->dir . '/a.php'))->toBe("function f() {\n\tif (true) {\n\t\tbaz();\n\t}\n}\n");
 });
+
+/*
+ * Round 2, attacking `Matcher::window()`'s new indentMap (post-#13 fix). The map is built by
+ * `$map[$o[0]] ??= $w[0]` -- keyed by `old`'s *relative indent string*, first occurrence wins. A
+ * single matched block can legitimately contain the same relative indent string in `old` twice
+ * while the file's own indentation for those two spots is NOT the same (the file itself is
+ * inconsistently indented, e.g. one nested body one tab deeper than a sibling one). The map has no
+ * way to record two different translations for the same key, so every occurrence after the first
+ * silently gets the FIRST one's translation instead of its own -- `reindent()` is keyed by string
+ * content, not by line position, breaking the "translated line by line" promise in Matcher's
+ * docblock whenever a block isn't self-consistently indented.
+ *
+ * Concretely: a file has two sibling `if` blocks, the first body one tab deeper than the `if`, the
+ * second body two tabs deeper (the file's own, pre-existing inconsistency -- nothing to do with the
+ * edit). `old`/`new` describe both blocks with a uniform 2-space relative indent (as a model would,
+ * having no reason to notice the file's inconsistency). The first block's "  " maps correctly to
+ * "\t" from the first sibling; the second sibling's "  " is the *same map key*, so it also gets
+ * translated to "\t" -- one tab short of the "\t\t" the file actually had there. The edit silently
+ * de-indents a line it was never asked to touch structurally.
+ */
+it('translates each occurrence of a relative indent by its own position, not the first one seen', function () {
+    // second if's body is one tab deeper than the first if's body -- the file's own inconsistency
+    \file_put_contents($this->dir . '/a.php', "function f() {\n\tif (a) {\n\t\tone();\n\t}\n\tif (b) {\n\t\t\ttwo();\n\t}\n}\n");
+    $e   = new EditFile($this->root);
+    $old = "if (a) {\n  one();\n}\nif (b) {\n  two();\n}";
+    $new = "if (a) {\n  one();\n}\nif (b) {\n  TWO();\n}";
+    $e->call(['path' => 'a.php', 'old' => $old, 'new' => $new], callFor());
+
+    // #13, round 2: the second body came out as "\t\tTWO();", the first body's style; a line of new
+    // at the position of a line of old with the same relative indent now keeps that file line's own
+    expect(\file_get_contents($this->dir . '/a.php'))->toBe("function f() {\n\tif (a) {\n\t\tone();\n\t}\n\tif (b) {\n\t\t\tTWO();\n\t}\n}\n");
+});

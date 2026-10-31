@@ -469,7 +469,12 @@ final class Run
                 }
                 $step = new Step($n, $message, $calls, $results, $stepUsage, $usage);
                 foreach ($this->stop as $predicate) {
-                    if ($predicate($step)) {
+                    try {
+                        $hit = $predicate($step);
+                    } catch (\Throwable $e) {
+                        throw $this->mark($e, 'middleware'); // host code, like a middleware: not the model's fault
+                    }
+                    if ($hit) {
                         $reason = Reason::Stopped;
                         break 2;
                     }

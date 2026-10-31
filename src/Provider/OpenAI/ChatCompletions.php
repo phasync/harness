@@ -121,6 +121,9 @@ final readonly class ChatCompletions implements Model
         if (isset($delta['content']) && '' !== $delta['content']) {
             yield new TextDelta($delta['content']);
         }
+        if (isset($delta['refusal']) && '' !== $delta['refusal']) { // a structured-output refusal: its text is the reply
+            yield new TextDelta($delta['refusal']);
+        }
         foreach ($delta['tool_calls'] ?? [] as $call) {
             $index = (int) ($call['index'] ?? 0);
             if (!isset($ids[$index])) {

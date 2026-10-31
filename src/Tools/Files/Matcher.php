@@ -66,41 +66,54 @@ final class Matcher
 
     /**
      * `$new`, re-indented for the block it replaces: each line's common indent `$fromIndent` becomes
-     * `$toIndent`, and the indentation beyond it is translated by `$indentMap` (`old`'s relative
-     * indents to the matched block's, as `Located::$indentMap` holds them), so a file indented with
-     * tabs stays tabs when `old` and `$new` were written with spaces. A relative indent the map does
-     * not know is scaled by the map's smallest step; one that is not a multiple of it is kept.
+     * `$toIndent`, and the indentation beyond it is translated to the matched block's own style, so
+     * a file indented with tabs stays tabs when `old` and `$new` were written with spaces.
+     * `$indentLines` pairs each line of `old` with the matched line of the file (`[relative indent
+     * in old, relative indent in the file]`, null for a blank line), as `Located::$indentLines`
+     * holds them. A line of `$new` at the same position as a line of `old` with the same relative
+     * indent takes that file line's indentation (the block may be indented inconsistently); any
+     * other line is translated by the first file line that had its relative indent, a deeper one
+     * by the smallest known step, and one the pairs say nothing about is kept as written.
      *
-     * @param array<string, string> $indentMap
+     * @param list<array{string, string}|null> $indentLines
      */
-    public static function reindent(string $new, string $fromIndent, string $toIndent, array $indentMap = []): string
+    public static function reindent(string $new, string $fromIndent, string $toIndent, array $indentLines = []): string
     {
-        $same = true;
-        foreach ($indentMap as $from => $to) {
-            if ($from !== $to) {
+        $map  = [];
+        $unit = null; // the smallest known relative step, [from, to]
+        foreach ($indentLines as $pair) {
+            if (null === $pair) {
+                continue;
+            }
+            [$from, $to] = $pair;
+            $map[$from] ??= $to;
+            if ('' !== $from && (null === $unit || \strlen($from) < \strlen($unit[0]))) {
+                $unit = [$from, $to];
+            }
+        }
+        $same = $fromIndent === $toIndent;
+        foreach ($indentLines as $pair) {
+            if (null !== $pair && $pair[0] !== $pair[1]) {
                 $same = false;
             }
         }
-        if ($fromIndent === $toIndent && $same) {
+        if ($same) {
             return $new;
         }
-        $unit = null; // the smallest known relative step, [from, to]
-        foreach ($indentMap as $from => $to) {
-            if ('' !== $from && (null === $unit || \strlen($from) < \strlen($unit[0]))) {
-                $unit = [(string) $from, $to];
-            }
-        }
-        $lines = \explode("\n", $new);
-        foreach ($lines as &$line) {
+        $lines      = \explode("\n", $new);
+        $positional = \count($lines) === \count($indentLines);
+        foreach ($lines as $k => &$line) {
             if ('' === \trim($line) || !\str_starts_with($line, $fromIndent)) {
                 continue;
             }
             \preg_match('/^[ \t]*/', \substr($line, \strlen($fromIndent)), $m);
             $relative = $m[0];
             $rest     = \substr($line, \strlen($fromIndent) + \strlen($relative));
-            if (isset($indentMap[$relative])) {
-                $relative = $indentMap[$relative];
-            } elseif (null !== $unit && '' !== $relative && 0 === \strlen($relative) % \strlen($unit[0]) && \str_repeat($unit[0], \intdiv(\strlen($relative), \strlen($unit[0]))) === $relative) {
+            if ($positional && null !== $indentLines[$k] && $indentLines[$k][0] === $relative) {
+                $relative = $indentLines[$k][1];
+            } elseif (isset($map[$relative])) {
+                $relative = $map[$relative];
+            } elseif (null !== $unit && '' !== $relative && \str_repeat($unit[0], \intdiv(\strlen($relative), \strlen($unit[0]))) === $relative) {
                 $relative = \str_repeat($unit[1], \intdiv(\strlen($relative), \strlen($unit[0])));
             }
             $line = $toIndent . $relative . $rest;
@@ -153,17 +166,18 @@ final class Matcher
         $text   = \implode("\n", $window);
         $from   = self::commonIndent($oldLines);
         $to     = self::commonIndent($window);
-        $map    = [];
-        foreach ($oldLines as $k => $line) { // old's relative indents → the block's, line by line
+        $pairs  = [];
+        foreach ($oldLines as $k => $line) { // old's relative indents beside the block's, line by line
             if ('' === \trim($line) || !\str_starts_with($line, $from) || !\str_starts_with($window[$k], $to)) {
+                $pairs[] = null;
                 continue;
             }
             \preg_match('/^[ \t]*/', \substr($line, \strlen($from)), $o);
             \preg_match('/^[ \t]*/', \substr($window[$k], \strlen($to)), $w);
-            $map[$o[0]] ??= $w[0];
+            $pairs[] = [$o[0], $w[0]];
         }
 
-        return new Located($level, $offset, \strlen($text), $i + 1, $i + $n, $text, $from, $to, $map);
+        return new Located($level, $offset, \strlen($text), $i + 1, $i + $n, $text, $from, $to, $pairs);
     }
 
     /**

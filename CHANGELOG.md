@@ -47,6 +47,12 @@
   wrapped program (#4).
 - `Provider\Anthropic\Messages`: a `ToolResult` with no content is sent as a one-line text block
   (`Error` or `(no output)`), not the empty list the API rejects (#14).
+- `Tools\Web\Html`: a private-use character in the page text (an icon-font glyph) is kept; the
+  extractor's internal markers were in that range (#15).
+- `Run`: a `Stop` predicate that throws ends the turn `Failed` with `ErrorKind::MiddlewareError`,
+  as host code, not `ModelError` (#16).
+- `Provider\OpenAI\ChatCompletions`: a refusal's text (`delta.refusal`) is yielded as text, as the
+  Responses provider does, not dropped on the way to `Finish(Refusal)` (#17).
 
 ### Changed (breaking)
 
