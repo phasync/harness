@@ -15,7 +15,7 @@ $tools = new Tools(new ReadFile($root), new ListDir($root), new Glob($root), new
 | `list_dir` | `path`, `offset` | readOnly, idempotent |
 | `glob` | `pattern` (`*`, `?`, `**`, `[ab]`, `{a,b}`), `path`, `offset` | readOnly, idempotent |
 | `grep` | `pattern` (PCRE, no delimiters), `path`, `glob`, `ignore_case`, `offset` | readOnly, idempotent |
-| `write_file` | `path`, `content` (creates parent directories) | destructive, idempotent |
+| `write_file` | `path`, `content` (creates parent directories; a parent that is a file is refused) | destructive, idempotent |
 | `edit_file` | `path`, `old`, `new` (`old` must match exactly once) | destructive |
 | `apply_patch` | `patch` (the V4A format) | destructive |
 

@@ -17,7 +17,8 @@ use Harness\ToolSpec;
  * when the list may have changed.
  *
  * Tool names get `$prefix`, and characters a `ToolSpec` name cannot hold become `_`; calls use the
- * server's own name. `annotations` become `Hints` with MCP's defaults (`destructiveHint` and
+ * server's own name, and two server tools whose names become the same are an `McpException`.
+ * `annotations` become `Hints` with MCP's defaults (`destructiveHint` and
  * `openWorldHint` true unless the server says otherwise). A tool whose `x-mcp-header` annotations
  * are invalid is left out, as the spec requires. The client declares form elicitation only.
  */
@@ -44,6 +45,7 @@ final class McpServer implements ToolSource
         if (\microtime(true) >= $this->expires) {
             $this->discover();
             $tools  = [];
+            $names  = []; // exposed name => the server's name: two server tools must not meet in one
             $cursor = null;
             $ttl    = null;
             $seen   = [];
@@ -58,7 +60,12 @@ final class McpServer implements ToolSource
                 foreach ($page['tools'] ?? [] as $tool) {
                     $headers = self::headerPaths($tool['inputSchema'] ?? []);
                     if (null !== $headers) {
-                        $tools[] = new McpTool($this, $tool['name'], $this->spec($tool), $headers);
+                        $spec = $this->spec($tool);
+                        if (isset($names[$spec->name])) {
+                            throw new McpException("The MCP server's tools '{$names[$spec->name]}' and '{$tool['name']}' both become '{$spec->name}' as a tool name (characters a name cannot hold become _, and it is cut at 64); their calls could not be told apart");
+                        }
+                        $names[$spec->name] = $tool['name'];
+                        $tools[]            = new McpTool($this, $tool['name'], $spec, $headers);
                     }
                 }
             } while (null !== $cursor);

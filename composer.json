@@ -6,6 +6,7 @@
     "require": {
         "php": "^8.2",
         "ext-zlib": "*",
+        "ext-mbstring": "*",
         "fiber-interop/api": "^0.3.1",
         "psr/log": "^1 || ^2 || ^3"
     },

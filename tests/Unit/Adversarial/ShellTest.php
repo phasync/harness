@@ -607,3 +607,41 @@ it('cancels a command promptly too, not just a timeout, even when the kill races
             ->and($result->content[0]->text)->toStartWith('Killed: cancelled');
     }
 }); // regression: round 15 found no new defect; this pins #87's fix generalizing to cancel(), not just timeout
+
+/*
+ * Round 16 attacked the cut marker's placement: `$output = $head . "\n[" . N . " bytes
+ * cut]\n" . $tail` unconditionally splices `"\n"` before and after the marker, regardless of
+ * whether a real line break ever sat at that position in the command's actual output. A single
+ * line that never contained a newline at all -- not an edge case, the ordinary shape of a lot of
+ * real command output (a long `printf`, a minified JSON blob, a single CSV row, a progress bar
+ * line rewritten with `\r`) -- comes back looking exactly like three separate lines, with nothing
+ * in the text to tell a model that two of those three line breaks are not real: `docs/shell.md`
+ * promises "the output, the middle cut out past maxOutput bytes with a marker", not "...with two
+ * fabricated line breaks around the marker, even where the real output never had one there".
+ * A model asked to count, reconstruct or quote lines from a cut command's output cannot
+ * distinguish a genuine line boundary from one the marker itself invented.
+ *
+ * Also attacked per this round's suggestions, and found already correct, not reported:
+ *  - `spec()`'s description after construction with a `cwd` holding quotes, spaces and non-ASCII
+ *    (`'/tmp/weird "dir\' with spaces and ñ 日本語'`): the string is interpolated and handed back
+ *    verbatim, `json_encode()` on it (what a model-API client actually does) succeeds -- nothing
+ *    breaks, it is just whatever text the constructor was given.
+ *  - `timeout` given as `'1e3'` (scientific-notation string, 1000 s) against a 10 s `maxTimeout`:
+ *    `Input::number()` parses it correctly and `\min(..., $this->maxTimeout)` caps it to the real
+ *    10 s regardless of the input's numeric format; the call is killed at 10 s, not 1000.
+ *  - `Policy\Shell::check()` against a 200 000-word command line: time scales linearly (≈0.002 s
+ *    at 1 000 words, ≈0.36 s at 200 000), no quadratic blow-up to worry about as a DoS vector.
+ *  - Program-name matching stays case-sensitive throughout (no `strtolower()`/`strcasecmp()`
+ *    anywhere in `Shell.php`), matching Linux's own case-sensitive `exec()`, so `RM` never folds
+ *    onto a `deny('rm')` rule.
+ *  - `allow('ls', flags: ['-l'])` against `ls -la`: `-la` is compared to `$flags` verbatim (no
+ *    short-option splitting), is not `'-l'`, and correctly falls through to `Ask` -- over-blocking
+ *    a combined flag, not an under-blocking bypass.
+ */
+it('does not insert line breaks the real output never had, when the cut marker splices into one unbroken line', function () {
+    // A single-line, newline-free 40-byte output; only the "Exit code 0" header separator is a real line break.
+    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: 20))->call(['command' => "printf '%s' AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD"], callFor()));
+
+    expect($r->content[0]->text)->toContain('bytes cut]') // the cut really did happen
+        ->and(\substr_count($r->content[0]->text, "\n"))->toBe(1); // only the header separator is a real line break
+}); // #99: the marker came wrapped in two line breaks the output never had

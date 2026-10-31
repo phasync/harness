@@ -44,7 +44,12 @@ final readonly class WriteFile implements Tool
             throw new \RuntimeException("'$path' is a directory");
         }
         $existed = \file_exists($abs);
-        $dir     = \dirname($abs);
+        for ($dir = \dirname($abs); !\file_exists($dir); $dir = \dirname($dir)) {
+        }
+        if (!\is_dir($dir)) { // checked before mkdir(), which would warn about it
+            throw new \RuntimeException("'$path' cannot be created: '" . $this->root->relative($dir) . "' is a file, not a directory");
+        }
+        $dir = \dirname($abs);
         if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
             throw new \RuntimeException("Could not create the directory for '$path'");
         }

@@ -187,6 +187,21 @@
 - An MCP error response with `id: null` (the server could not tell which request it answers) fails
   every open request with its message, instead of being dropped (#93); over HTTP it is the request's
   answer (#94).
+- `write_file` under a parent that is a file is refused with `'x' cannot be created: 'y' is a file,
+  not a directory` before `mkdir()` is tried, which warned about it (#95); `web_fetch`'s cache
+  directory the same.
+- `McpServer::tools()` throws an `McpException` when two server tools become the same tool name
+  once characters a name cannot hold are replaced (`search.web` and `search_web`) or the name is cut
+  at 64, instead of handing out both and letting a name-keyed map keep one (#96).
+- `Run`: the turn's state is set at the `turn()` call, so `isRunning()` is true, `cancel()` and
+  `interrupt()` take effect and `interject()` lands before the generator's first iteration, as the
+  docblock says; a generator dropped before its first iteration frees the Run (#97).
+- `web_fetch` converts the body to UTF-8 from the `charset` of `Content-Type`, else from a `<meta
+  charset>` in an HTML page's first 1024 bytes, instead of letting libxml guess (a Latin-1 page's
+  bytes were taken as UTF-8); a charset mbstring does not know is an error result (#98).
+- `shell` widens the cut past `maxOutput` to the line boundaries the kept parts have, so the
+  `[N bytes cut]` marker sits between real lines and one unbroken line gets it inline, instead of
+  wrapping the marker in two line breaks the output never had (#99).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

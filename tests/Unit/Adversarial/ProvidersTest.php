@@ -1071,3 +1071,45 @@ it('reports a response with id null over HTTP too, not a generic "stream ended" 
     expect(fn () => \fiber\run(fn () => $conn->request('server/discover', ['_meta' => ['io.modelcontextprotocol/protocolVersion' => McpServer::VERSION]], live())))
         ->toThrow(McpException::class, 'Parse error upstream');
 }); // #94: only an exact id match counted; the error fell through to 'stream ended'
+
+/*
+ * Round 20, the MCP list, first item: `McpServer::tools()` builds each tool's exposed name by
+ * sanitizing the server's own name (`McpServer::spec()`:
+ *   preg_replace('/[^a-zA-Z0-9_-]/', '_', $this->prefix . $tool['name'])
+ * ) but never checks whether two different server tool names collide onto the same sanitized
+ * result -- `search.web` and `search_web` both become `search_web`. Nothing in `tools()` compares
+ * the names it is about to hand out; both `McpTool`s are returned side by side, each with the exact
+ * same `ToolSpec::$name`.
+ *
+ * Whatever builds a name-keyed map from a `ToolSource` (e.g. `Run`'s own step tools) necessarily
+ * keeps only one of the two -- the model is offered one tool called `search_web`, calls it, and
+ * reaches whichever server tool happened to be read later, silently, with the other one simply
+ * gone: no error, no warning, nothing in the tool list that hints two different capabilities were
+ * collapsed into one name. A model that read the (correct) description for "search the web" may
+ * be calling "a completely different tool" instead, and never finds out why its results don't
+ * match what it was told the tool does.
+ *
+ * Verified directly against the real code (both adapters): an MCP server listing `search.web`
+ * ("Search the web") and `search_web` ("A completely different tool") makes `McpServer::tools()`
+ * return two `McpTool`s whose `spec()->name` is `'search_web'` for both -- no `McpException`, no
+ * disambiguation, nothing distinguishing one from the other by name alone.
+ */
+it('reports a name collision when two tools sanitize to the same name', function () {
+    $conn = new class implements Connection {
+        public function request(string $method, array $params, Cancel $cancel, ?Closure $notify = null, array $headers = []): array
+        {
+            if ('server/discover' === $method) {
+                return ['supportedVersions' => [McpServer::VERSION]];
+            }
+
+            return ['tools' => [
+                ['name' => 'search.web', 'description' => 'Search the web', 'inputSchema' => ['type' => 'object']],
+                ['name' => 'search_web', 'description' => 'A completely different tool', 'inputSchema' => ['type' => 'object']],
+            ], 'ttlMs' => 60000];
+        }
+    };
+    $server = new McpServer($conn);
+
+    expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
+        ->toThrow(McpException::class, "'search.web' and 'search_web' both become 'search_web'");
+}); // #96: two McpTools came back, both named search_web; a name-keyed map kept one

@@ -168,18 +168,34 @@ final class Run
      */
     public function turn(Message|Resume|array $input, ?Call $parentCall = null): \Generator
     {
-        // Checked here, at the call, not at the first iteration: a generator runs nothing until then.
-        if ($this->running) {
+        // Checked and set here, at the call, not at the first iteration: a generator runs nothing until then.
+        if ($this->isRunning()) {
             throw new \LogicException('A turn is already running on this Run; finish iterating it first');
         }
-        if ($this->open && null !== $this->generator?->get()) { // a generator dropped before it was iterated released its claim
+        if ($this->open && null !== $this->generator?->get()) {
             throw new \LogicException("The previous turn's generator is still open; exhaust it (TurnEnded is its last event, a misuse exception follows) or release it before starting a new turn");
         }
-        $generator       = $this->events($input, $this->checkInput($input), $parentCall);
-        $this->open      = true;
-        $this->generator = \WeakReference::create($generator);
+        $answers           = $this->checkInput($input);
+        $this->running     = true; // from here isRunning(): cancel() and interject() reach this turn before its first event
+        $this->misuse      = null;
+        $this->cancelled   = false;
+        $this->interrupted = false;
+        $this->partial     = null;
+        $this->steer       = [];
+        $this->queue       = [];
+        $this->parentCall  = $parentCall;
+        $this->ended       = null;
+        $generator         = $this->events($input, $answers, $parentCall?->id);
+        $this->open        = true;
+        $this->generator   = \WeakReference::create($generator);
 
         return $generator;
+    }
+
+    /** True when the turn's generator was dropped before its first iteration: nothing of it ran, and the Run is free again. */
+    private function abandoned(): bool
+    {
+        return $this->open && null === $this->generator?->get();
     }
 
     /**
@@ -187,20 +203,10 @@ final class Run
      *
      * @return \Generator<int, Event>
      */
-    private function events(Message|Resume|array $input, array $answers, ?Call $parentCall): \Generator
+    private function events(Message|Resume|array $input, array $answers, ?string $parent): \Generator
     {
-        $this->running       = true;
-        $this->misuse        = null;
-        $this->cancelled     = false;
-        $this->interrupted   = false;
-        $this->partial       = null;
-        $this->steer         = [];
-        $this->queue         = [];
-        $this->parentCall    = $parentCall;
-        $this->ended         = null;
-        $parent              = $parentCall?->id;
-        $turn                = ++$this->turns;
-        $queue               = new EventQueue();
+        $turn  = ++$this->turns;
+        $queue = new EventQueue();
 
         $globals = [$_GET, $_POST, $_COOKIE, $_FILES, $_SERVER, $_REQUEST];
         try {
@@ -258,7 +264,7 @@ final class Run
     /** How the last turn ended. Throws while a turn runs or before the first. */
     public function ended(): Ended
     {
-        if ($this->running) {
+        if ($this->isRunning()) {
             throw new \LogicException('The turn is still running; ended() is available once its events are exhausted');
         }
 
@@ -275,7 +281,7 @@ final class Run
      */
     public function cancel(): void
     {
-        if ($this->running) {
+        if ($this->isRunning()) {
             $this->cancelled = true;
         }
     }
@@ -289,7 +295,7 @@ final class Run
      */
     public function interrupt(): void
     {
-        if ($this->running) {
+        if ($this->isRunning()) {
             $this->interrupted = true;
             $this->cancelled   = true;
         }
@@ -315,7 +321,7 @@ final class Run
                 throw new \InvalidArgumentException('An interjection holds no ToolResult: tool results are the run\'s to append');
             }
         }
-        if (!$this->running) {
+        if (!$this->isRunning()) {
             throw new \LogicException('No turn is running to interject in; start one with turn()');
         }
         if (Delivery::Steer === $delivery) {
@@ -329,16 +335,17 @@ final class Run
      * True from `turn()` until the turn's last event, `TurnEnded`, is emitted: while it is,
      * `cancel()`, `interrupt()` and `interject()` have an effect and `ended()` throws. In the
      * `TurnEnded` handler the turn is over: `ended()` works and an interjection has nowhere to land.
+     * A turn whose generator is dropped before its first iteration never ran: the Run is free again.
      */
     public function isRunning(): bool
     {
-        return $this->running;
+        return $this->running && !$this->abandoned();
     }
 
     /** True while a running turn has been cancelled or interrupted, directly or through the run it is nested in. */
     public function isCancelled(): bool
     {
-        return $this->running && ($this->cancelled || ($this->parentCall?->isCancelled() ?? false));
+        return $this->isRunning() && ($this->cancelled || ($this->parentCall?->isCancelled() ?? false));
     }
 
     /** @return list<Message> every message of the conversation */

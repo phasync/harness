@@ -20,7 +20,10 @@ use Harness\ToolSpec;
  * from a generic header) and `Accept: text/html,application/xhtml+xml,text/*,application/json`.
  * `text/plain`, `application/json` and other `text/*` replies come back as is; anything else is an
  * error result naming the content type. A gzip or deflate `Content-Encoding` is decoded, any other
- * is an error result (a gzip body may hold several members). The response body is read up to
+ * is an error result (a gzip body may hold several members). The body is converted to UTF-8 from
+ * the `charset` of `Content-Type`, else from a `<meta charset>` in an HTML page's first 1024 bytes
+ * (where the HTML prescan looks), else it is taken as UTF-8; a charset mbstring does not know is
+ * an error result. The response body is read up to
  * `maxBytes` (default 5 MB) of decoded bytes
  * and then stopped; the extracted text is cut at `maxChars` (default 20000) per call with the
  * files tools' tail idiom (`offset` continues from where the previous call left off). A
@@ -67,8 +70,8 @@ final readonly class WebFetch implements Tool
         if (null !== $cacheFile && \is_file($cacheFile) && \filemtime($cacheFile) > \time() - $this->cacheTtl) {
             $text = (string) \file_get_contents($cacheFile);
         } else {
-            [$contentType, $body] = $this->fetch($url, $call);
-            $text                 = $this->toText($contentType, $body);
+            [$contentType, $charset, $body] = $this->fetch($url, $call);
+            $text                           = $this->toText($contentType, $charset, $body, $url);
             if (null !== $cacheFile) {
                 $this->store($cacheFile, $text, $url);
             }
@@ -147,7 +150,7 @@ final readonly class WebFetch implements Tool
         return false;
     }
 
-    /** @return array{0: string, 1: string} the lower-case content type without parameters, and the body up to maxBytes */
+    /** @return array{0: string, 1: string, 2: string} the lower-case content type, its charset parameter ('' when none), and the body up to maxBytes */
     private function fetch(string $url, Call $call): array
     {
         $cancel  = new Cancel($call->isCancelled(...));
@@ -167,7 +170,15 @@ final readonly class WebFetch implements Tool
             }
             $url = $target;
         }
-        $type     = \strtolower(\trim(\explode(';', $response->headers['content-type'] ?? '')[0]));
+        $params   = \explode(';', $response->headers['content-type'] ?? '');
+        $type     = \strtolower(\trim(\array_shift($params)));
+        $charset  = '';
+        foreach ($params as $param) {
+            [$name, $value] = \array_pad(\explode('=', $param, 2), 2, '');
+            if ('charset' === \strtolower(\trim($name))) {
+                $charset = \strtolower(\trim(\trim($value), '"'));
+            }
+        }
         $encoding = \strtolower(\trim($response->headers['content-encoding'] ?? ''));
         $inflater = match ($encoding) {
             '', 'identity'   => null,
@@ -187,25 +198,40 @@ final readonly class WebFetch implements Tool
             }
         }
 
-        return [$type, \substr($body, 0, $this->maxBytes)];
+        return [$type, $charset, \substr($body, 0, $this->maxBytes)];
     }
 
-    private function toText(string $contentType, string $body): string
+    /** @param string $charset the Content-Type's charset, '' when it has none */
+    private function toText(string $contentType, string $charset, string $body, string $url): string
     {
         if ('' === $contentType) {
             $contentType = 'text/plain';
         }
-        if ('text/html' === $contentType || 'application/xhtml+xml' === $contentType) {
-            return Html::extract($body);
+        $html = 'text/html' === $contentType || 'application/xhtml+xml' === $contentType;
+        if (!$html && 'application/json' !== $contentType && !\str_starts_with($contentType, 'text/')) {
+            throw new \RuntimeException("web_fetch does not read $contentType; only text");
         }
-        if ('application/json' === $contentType || \str_starts_with($contentType, 'text/')) {
-            return $body;
+        if ('' === $charset && $html && 1 === \preg_match('/<meta[^>]*charset\s*=\s*["\']?\s*([a-z0-9._:-]+)/i', \substr($body, 0, 1024), $m)) {
+            $charset = \strtolower($m[1]); // the page's own declaration, where the HTML prescan looks for it
         }
-        throw new \RuntimeException("web_fetch does not read $contentType; only text");
+        if ('' !== $charset && 'utf-8' !== $charset && 'utf8' !== $charset) {
+            try {
+                $body = \mb_convert_encoding($body, 'UTF-8', $charset);
+            } catch (\ValueError) {
+                throw new \RuntimeException("'$url' is sent as charset $charset, which web_fetch cannot convert to UTF-8");
+            }
+        }
+
+        return $html ? Html::extract($body) : $body;
     }
 
     private function store(string $cacheFile, string $text, string $url): void
     {
+        for ($dir = \dirname($cacheFile); !\file_exists($dir); $dir = \dirname($dir)) {
+        }
+        if (!\is_dir($dir)) { // checked before mkdir(), which would warn about it
+            throw new \RuntimeException("The cache directory '{$this->cacheDir}' cannot be created: '$dir' is a file, not a directory");
+        }
         $dir = \dirname($cacheFile);
         if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
             throw new \RuntimeException("Could not create the cache directory '$dir'");

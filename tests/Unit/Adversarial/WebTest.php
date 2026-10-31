@@ -565,3 +565,36 @@ it('resolves a leading <br> correctly even inside a nested table\'s first cell',
 
     expect(Html::extract($html))->toBe('After');
 });
+
+/*
+ * WebFetch::fetch() takes only the media type from Content-Type -- `\explode(';',
+ * $response->headers['content-type'] ?? '')[0]` -- discarding any `charset` parameter before the
+ * body ever reaches Html::extract() or toText(). Html::extract() has no charset parameter of its
+ * own either; it always prepends a hardcoded `<?xml encoding="utf-8"?>` and otherwise leaves
+ * encoding entirely to libxml's own byte-sniffing. A server that declares `charset=iso-8859-1`
+ * (still common for legacy/non-English sites) and sends genuinely Latin-1 bytes gets no benefit
+ * from that declaration at all: when a Latin-1 byte PAIR happens to also be valid UTF-8 (e.g.
+ * 0xC2 0xA9, which is "Â©" in Latin-1 but the valid UTF-8 encoding of a lone "©"), libxml's
+ * sniffing favors "this parses as UTF-8" over the page's own explicit, machine-readable
+ * declaration -- producing silent, undetectable mojibake with no error of any kind. docs/web.md
+ * promises `web_fetch` turns a page into "readable text"; this is not that.
+ */
+it('honors a declared charset instead of letting libxml guess UTF-8 for an ambiguous byte pair', function () {
+    // 0xC2 0xA9 is "Â©" read as the declared ISO-8859-1, but is also exactly the valid UTF-8
+    // encoding of "©" alone -- genuinely ambiguous without the Content-Type's charset hint.
+    $latin1Bytes = "\xC2\xA9";
+    $body        = "<html><body><p>Price $latin1Bytes 2024</p></body></html>";
+    $transport   = new FakeTransport(new Response(200, ['content-type' => 'text/html; charset=iso-8859-1'], [$body]));
+    $fetch       = new WebFetch($transport, 'agent');
+
+    expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
+        ->toBe(\mb_convert_encoding("Price \xC2\xA9 2024", 'UTF-8', 'ISO-8859-1'));
+}); // #98: the charset was dropped with the Content-Type parameters; libxml read the bytes as UTF-8
+
+it('takes the charset from a <meta charset> when the Content-Type has none, and refuses one it cannot convert', function () {
+    $page = fn (string $meta, string $type) => new WebFetch(new FakeTransport(new Response(200, ['content-type' => $type], ["<html><head><meta charset=\"$meta\"></head><body><p>caf\xE9</p></body></html>"])), 'agent');
+
+    expect($page('iso-8859-1', 'text/html')->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)->toBe('café')
+        ->and(fn () => $page('iso-8859-1', 'text/html; charset=x-unknown')->call(['url' => 'https://example.com/'], TestCall::make()))
+        ->toThrow(RuntimeException::class, 'charset x-unknown, which web_fetch cannot convert');
+}); // #98

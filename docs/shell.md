@@ -12,8 +12,10 @@ shares the name, so a file that uses both aliases one (`use Harness\Policy\Shell
 - Input: `command`, optional `timeout` in seconds (capped at `maxTimeout`).
 - stdout and stderr are merged; stdin is empty. Output is reported as it arrives through
   `Call::progress()` (`ToolProgress` events), and the model gets `Exit code N` and the output, the
-  middle cut out past `maxOutput` bytes with a marker; bytes that are not valid UTF-8 (binary output,
-  a character split by the cut) become U+FFFD.
+  middle cut out past `maxOutput` bytes with a `[N bytes cut]` marker. The cut is widened to the line
+  boundaries the kept parts have, so the marker sits between whole lines; one unbroken line gets it
+  inline, and no line break is invented. Bytes that are not valid UTF-8 (binary output, a character
+  split by the cut) become U+FFFD.
 - A non-zero exit, a timeout or a cancellation is an error result; `value` is the exit code, or
   null when the process was killed (a timeout or a cancellation), since a killed process has none.
   A command the OS refuses to start (longer than `ARG_MAX`, say) is an error result naming the

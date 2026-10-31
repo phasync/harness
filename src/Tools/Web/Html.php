@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Harness\Tools\Web;
 
+use Harness\Internal\Utf8;
+
 /**
  * @internal the HTML-to-text extraction behind `WebFetch`; not a stable API
  *
@@ -14,7 +16,9 @@ namespace Harness\Tools\Web;
  * line, a nested list's items on their own lines indented two spaces under the parent item); `a` becomes `"text (url)"`
  * only when the link text differs from the URL; `pre` is kept verbatim; a table becomes one row
  * per line, its cells joined with `" | "` (a nested table's rows on their own lines inside the cell); everything else has its whitespace collapsed to single
- * spaces and entities decoded (both by the DOM parser).
+ * spaces and entities decoded (both by the DOM parser). The input is UTF-8 (`WebFetch` converts from
+ * the declared charset); it reaches the parser as ASCII with numeric entities, so a `<meta charset>`
+ * in the page cannot re-decode it.
  */
 final class Html
 {
@@ -25,7 +29,8 @@ final class Html
     {
         $dom      = new \DOMDocument();
         $previous = \libxml_use_internal_errors(true);
-        $dom->loadHTML('<?xml encoding="utf-8"?>' . $html, \LIBXML_NOERROR | \LIBXML_NOWARNING);
+        // the parser gets ASCII with numeric entities: a <meta charset> in the page then cannot re-decode the UTF-8 it was given
+        $dom->loadHTML(\mb_encode_numericentity(Utf8::scrub($html), [0x80, 0x10FFFF, 0, 0x1FFFFF], 'UTF-8'), \LIBXML_NOERROR | \LIBXML_NOWARNING);
         \libxml_use_internal_errors($previous);
 
         $lines = [];

@@ -18,7 +18,9 @@ use Harness\ToolSpec;
 /**
  * `shell`: runs a command with `bash -c` in `cwd`, stdout and stderr merged, stdin empty. Output is
  * read with `fiber\readable()` and reported as `ToolProgress`; the model gets the exit code and the
- * output, the middle cut out past `maxOutput` bytes, invalid UTF-8 replaced by U+FFFD. The call ends when the shell exits, times out or
+ * output, the middle cut out past `maxOutput` bytes (the cut widened to the line boundaries the
+ * kept parts have, so the marker sits between whole lines; one unbroken line gets it inline),
+ * invalid UTF-8 replaced by U+FFFD. The call ends when the shell exits, times out or
  * is cancelled, and the command's whole process group is then killed (on Linux it runs under `setsid`):
  * a background child does not outlive the call. A non-zero exit is an error result.
  * Which commands may run is a policy for middleware.
@@ -163,7 +165,20 @@ final readonly class Shell implements Tool
             $call->progress(Utf8::scrub($carry));
         }
         $exit   = $status['exitcode'];
-        $output = $head . ($total > \strlen($head) + \strlen($tail) ? "\n[" . ($total - \strlen($head) - \strlen($tail)) . " bytes cut]\n" : '') . $tail;
+        $cut    = $total - \strlen($head) - \strlen($tail);
+        if ($cut > 0) {
+            // the cut moves out to the line boundaries the kept parts have, so the marker sits between
+            // real lines; one unbroken line gets it inline: no line break is invented
+            if (false !== ($nl = \strrpos($head, "\n"))) {
+                $cut += \strlen($head) - $nl - 1;
+                $head = \substr($head, 0, $nl + 1);
+            }
+            if (false !== ($nl = \strpos($tail, "\n"))) {
+                $cut += $nl;
+                $tail = \substr($tail, $nl);
+            }
+        }
+        $output = $head . ($cut > 0 ? "[$cut bytes cut]" : '') . $tail;
         $output = Utf8::scrub($output); // binary output and a character split by the cut become U+FFFD
         $header = null !== $killed ? "Killed: $killed" : "Exit code $exit";
 

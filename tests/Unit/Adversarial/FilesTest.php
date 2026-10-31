@@ -519,3 +519,11 @@ it('keeps the true original across two separate apply_patch calls sharing one Jo
     $journal->undo();
     expect(\file_get_contents($this->dir . '/a.txt'))->toBe("TRUE ORIGINAL\n");
 });
+
+it('refuses write_file under a parent that is a file, without a PHP warning', function () {
+    \file_put_contents($this->dir . '/notes', 'a file');
+    $tool = new Harness\Tools\Files\WriteFile($this->root);
+
+    expect(fn () => $tool->call(['path' => 'notes/sub/x.txt', 'content' => 'x'], callFor()))
+        ->toThrow(RuntimeException::class, "'notes/sub/x.txt' cannot be created: 'notes' is a file, not a directory");
+}); // #95: mkdir() warned before "Could not create the directory" was thrown

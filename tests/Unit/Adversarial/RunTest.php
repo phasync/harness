@@ -803,9 +803,10 @@ it('refuses a second turn() at the call while the first generator is kept, and a
 
     $gen1 = $run->turn(new Message(Role::User, [new Text('one')]));
 
-    // The first turn() claimed the Run at the call; the second is refused while that generator is kept.
+    // The first turn() claimed the Run at the call; the second is refused while that generator is kept
+    // (since #97 that turn is running from the call, so this is the "already running" refusal).
     expect(fn () => $run->turn(new Message(Role::User, [new Text('two')])))
-        ->toThrow(LogicException::class, 'still open');
+        ->toThrow(LogicException::class, 'already running');
     $gen1 = null; // dropped before it was iterated: the claim goes with it
     \fiber\run(function () use ($run) {
         foreach ($run->turn(new Message(Role::User, [new Text('two')])) as $e) {
@@ -813,3 +814,52 @@ it('refuses a second turn() at the call while the first generator is kept, and a
     });
     expect($run->ended()->reason)->toBe(Reason::Done);
 }); // #92: the guards sat inside the generator body and ran only at the first iteration
+
+/*
+ * Round 16, attacking the #92 fix. It moved the misuse guards and checkInput() out of the
+ * generator body so they run eagerly, at the call to turn() -- but $this->running is still set
+ * inside `events()`, which stays a generator and so still only runs at the first iteration.
+ * `isRunning()`'s own docblock was not updated to match: "True from `turn()` until the turn's last
+ * event, `TurnEnded`, is emitted" -- literally from the call, not from the first iteration. And
+ * `interject()`'s docblock promises it "throws when no turn is running: start one with turn()",
+ * as if the only way to see that error is to never have called turn() at all.
+ *
+ * In the gap between calling turn() and first iterating its generator, isRunning() is false, so
+ * cancel() silently does nothing and interject() throws "No turn is running to interject in; start
+ * one with turn()" -- even though turn() was just called. A host that reasonably calls turn() and
+ * then interjects before its first foreach tick (or inside a callback scheduled between the two)
+ * is told, wrongly, to do the very thing it just did.
+ */
+it('lets interject() land a message called right after turn(), before the first iteration', function () {
+    $model = new FakeModel(
+        [new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)],
+        [new TextDelta('ok again'), new Usage(1, 1), new Finish(FinishReason::Stop)],
+    );
+    $run = new Harness\Run($model, new Tools());
+
+    $gen = $run->turn(new Message(Role::User, [new Text('go')]));
+
+    // Per isRunning()'s own docblock ("True from turn()"), this should already be true.
+    expect($run->isRunning())->toBeTrue();
+
+    // Per interject()'s docblock, the only way to see "no turn is running" is to not have called
+    // turn() at all; a turn was just started, so this should land as an ordinary steer, not throw.
+    $run->interject(new Message(Role::User, [new Text('steer!')]));
+
+    $events = [];
+    \fiber\run(function () use ($gen, &$events) {
+        foreach ($gen as $e) {
+            $events[] = $e;
+        }
+    });
+
+    $texts = [];
+    foreach ($run->messages() as $m) {
+        foreach ($m->parts as $p) {
+            if ($p instanceof Text) {
+                $texts[] = $p->text;
+            }
+        }
+    }
+    expect($texts)->toContain('steer!');
+}); // #97: the state was set at the first iteration; isRunning() was false and interject() threw
