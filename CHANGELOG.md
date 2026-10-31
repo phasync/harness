@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-10-31)
 
 phasync/harness is the runtime between a model and an application: the tool loop, a typed event
 stream, one pause-and-resume contract for input and interruption, and two middleware seams
