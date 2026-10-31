@@ -6,6 +6,7 @@ namespace Harness\Tools\Web;
 
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Utf8;
 use Harness\Part\Text;
 use Harness\Result;
 use Harness\Tool;
@@ -44,8 +45,10 @@ final readonly class WebSearch implements Tool
         }
         $lines = [];
         foreach ($hits as $i => $hit) {
-            $snippet = \strlen($hit->snippet) > 300 ? \substr($hit->snippet, 0, 300) . '...' : $hit->snippet;
-            $lines[] = ($i + 1) . ". {$hit->title} — {$hit->url}\n   $snippet";
+            // One line per field, whatever the page put in them: a newline in a title could forge a result
+            [$title, $url, $snippet] = \array_map(static fn (string $s): string => \trim(\preg_replace('/\s+/u', ' ', Utf8::scrub($s)) ?? ''), [$hit->title, $hit->url, $hit->snippet]);
+            $snippet                 = Utf8::length($snippet) > 300 ? Utf8::slice($snippet, 0, 300) . '...' : $snippet;
+            $lines[]                 = ($i + 1) . ". $title — $url\n   $snippet";
         }
 
         return new Result([new Text(\implode("\n\n", $lines))], meta: ['count' => \count($hits)]);

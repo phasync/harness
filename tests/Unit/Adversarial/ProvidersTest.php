@@ -3,10 +3,13 @@
 declare(strict_types=1);
 
 use Harness\Accumulator;
+use Harness\Cancel;
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
 use Harness\FinishReason;
 use Harness\Http\Response;
+use Harness\Mcp\Connection;
+use Harness\Mcp\McpServer;
 use Harness\Message;
 use Harness\ModelException;
 use Harness\Options;
