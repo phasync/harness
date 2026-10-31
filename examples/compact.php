@@ -3,10 +3,11 @@
 declare(strict_types=1);
 
 /*
- * A long session within a small context budget. A Compact middleware replaces the oldest half of
- * the conversation with a summary whenever a step's prompt would exceed the budget; the run itself
- * keeps every message. Compactions are printed as they happen (the middleware logs them) and after
- * each turn (Compact::last()). The last question can only be answered from the summary.
+ * A long session within a small context budget. A Compact middleware folds the older part of the
+ * conversation into a sectioned checkpoint whenever a step's prompt would exceed the budget, and
+ * updates that checkpoint the next time; the run itself keeps every message. Compactions are
+ * printed as they happen (the middleware logs them, the checkpoint in full at debug) and after each
+ * turn (Compact::last()). The last question can only be answered from the checkpoint.
  *
  *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/compact.php [budget]
  */
@@ -92,7 +93,7 @@ fiber\run(function () use ($run, $compact, $questions) {
         $last = $compact->last();
         echo "\e[2m" . (null === $last
             ? 'last step: no compaction'
-            : "last step: {$last->removed} messages summarized" . ($last->reused ? ' (summary reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2) . ', offset ' . \round($last->offset))
+            : "last step: {$last->removed} messages in the checkpoint" . ($last->reused ? ' (reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2) . ', offset ' . \round($last->offset))
             . ', ' . \count($run->messages()) . " messages in the run\e[0m\n";
     }
 });

@@ -6,9 +6,11 @@ namespace Harness\Compact;
 
 use Harness\Accumulator;
 use Harness\Cancel;
+use Harness\ErrorKind;
 use Harness\FinishReason;
 use Harness\Message;
 use Harness\Model;
+use Harness\ModelException;
 use Harness\ModelMiddleware;
 use Harness\Options;
 use Harness\Part;
@@ -25,62 +27,81 @@ use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
- * Keeps each step's prompt within a token budget by replacing its oldest messages with a summary.
- * The budget is `$budgetTokens`, or when that is null the step's `Options::$contextWindow` less a
+ * Keeps each step's prompt within a token budget by folding its older messages into a sectioned
+ * checkpoint (Goal; Progress: Done, In progress, Blocked; Decisions; Known; Next; Context). The
+ * budget is `$budgetTokens`, or when that is null the step's `Options::$contextWindow` less a
  * reserve of 20 %, taken at first use; with neither, the step throws a `\LogicException`.
- * When the prompt counts over the budget, the oldest half of the messages after the first
- * `$keepFirst` is replaced by one user message holding a summary that `$summarizer` wrote in a side
- * call (what was asked, what was done, what is known, what remains), followed by an assistant
- * acknowledgement when the next kept message is a user message, so roles alternate from there on.
- * The system prompt, the tool specs and the first `$keepFirst` messages are never touched; the
- * cut moves back so a `ToolResult` stays with its `ToolCall`; `Reasoning` is left out of what is
- * summarized. Only the prompt handed on changes, never `Run::messages()`.
  *
- * A summary is reused while the conversation keeps the same prefix and the result fits the budget,
- * so the provider's cache sees a stable prefix; when the budget is exceeded again, the earlier
- * summary is summarized again together with the oldest half of what follows it, round after round
- * until the prompt fits or nothing is left to summarize (a warning is logged then). A round whose
- * summary would not make the prompt smaller is dropped with that warning, and a later round runs
- * only for a part larger than the summary that was dropped, so no side call is spent per step on a
- * part too small to shrink. The last 8
- * summaries are kept, each under the messages it summarized, so one instance may serve several
- * conversations at once (the forks of a sub-agent's template share it). Each new summary is logged
- * at info level; `last()` says what the last step, of any conversation, did.
+ * When the prompt counts over the budget, the most recent `$keepRecentTokens` (default a quarter of
+ * the budget) stay verbatim and everything older after the first `$keepFirst` messages is folded
+ * into one user message holding the checkpoint, which `$summarizer` writes in a side call, followed
+ * by an assistant acknowledgement when the next message is a user message. The cut lands on a
+ * message boundary that keeps every `ToolResult` with its `ToolCall`. Whatever the reserve, the
+ * recent part holds the step in flight (the last assistant message and its results), and the latest
+ * user message stays verbatim: when the cut falls after it, it is folded and also kept right after
+ * the checkpoint. The system prompt, the tool specs and the first `$keepFirst` messages are never
+ * touched; only the prompt handed on changes, never `Run::messages()`.
  *
- * The side call has no tools, `$summarizerOptions` and the turn's `Cancel`; it is given the run's
- * system text as the agent's instructions, the kept first messages and the part to summarize. A
- * summary that comes back empty, cut at the output token limit (`FinishReason::Length`), or shorter
- * than a quarter of the summary it replaces, is asked for once more; a second such summary fails
- * the step with a `\RuntimeException` naming what went wrong.
+ * A checkpoint is reused while the conversation keeps its prefix and the prompt fits, so the
+ * provider's cache sees a stable prefix. When the budget is exceeded again, the side call gets the
+ * previous checkpoint and the messages since, and updates it, keeping every fact it holds; it never
+ * summarizes a checkpoint from scratch. Checkpoints are keyed by a content hash of the messages they
+ * cover, so one instance serves several conversations (the forks of a sub-agent's template) and a
+ * conversation rebuilt from arrays finds its checkpoint. A checkpoint that comes back empty, cut at
+ * the output token limit, or under a quarter of the one it updates, is asked for once more; a
+ * second fails the step with a `\RuntimeException`. A round whose checkpoint would not make the
+ * prompt smaller is dropped with a warning.
  *
- * The count is `$count($prompt)` calibrated by the provider's reported input tokens of the prompts
- * Compact passed on (a report of zero is ignored): `ratio * $count + offset`, the line through the
- * smallest and the largest prompt reported, once the largest counts at least twice the smallest;
- * until then the ratio is 1 and the offset the largest one's difference. A chat template adds a
- * fixed preamble (a Qwen template's tool instructions are some 270 tokens) and wraps every
- * message, so the offset holds the one and the ratio the other. The fixed part of the prompt
- * (system text, tool specs, the first `$keepFirst` messages), counted at first use, must count at
- * most half the budget, by the calibrated count once there is a line, or the step throws a
- * `\LogicException`: a budget that passes at first use fails on a later step when the provider's
- * reports show the counter undercounted. The calibration is a `Calibration` value: `calibration()`
- * returns it and the constructor takes one, so a host that builds a Compact per request keeps it.
+ * When the provider rejects a prompt as too long (`ErrorKind::ContextTooLong`) before streaming,
+ * the step is compacted again to 85 %, 70 %, 50 % and 35 % of the budget and retried, each retry
+ * logged, then the error is rethrown.
  *
- * Once the calibration is a line, a reported input count under 70 % of the calibrated count means the server cut
- * the prompt (a server that evicts silently when the prompt exceeds its window): a warning names
- * both numbers, `last()` has `truncatedUpstream` set, and the report is left out of the calibration.
+ * The count is `$count($prompt)` calibrated by the input tokens the provider reports (see
+ * `Calibration`). The fixed part of the prompt (system text, tool specs, the first `$keepFirst`
+ * messages), counted at first use, must count at most half the budget, by the calibrated count once
+ * there is a line, or the step throws a `\LogicException`. Once the calibration is a line, a report
+ * under 70 % of the calibrated count means the server cut the prompt: a warning names both,
+ * `last()` has `truncatedUpstream` set, and the report is left out of the calibration. The
+ * calibration and the checkpoints are a `State`: `state()` returns it and the constructor takes one.
+ * Each new checkpoint is logged at info (sizes) and in full at debug.
  */
 final class Compact implements ModelMiddleware
 {
     private const PROMPT = <<<'TXT'
-        You compress the earlier part of a conversation between a user and an AI agent that uses tools, so the agent can continue without it. Write a summary under four headings:
-        1. Asked: what the user asked for, with every requirement and constraint (the start of the conversation states the task).
-        2. Done: what the agent did, step by step, with the tools used and their important results (paths, names, numbers, errors).
-        3. Known: facts, decisions and findings established so far.
-        4. Remaining: what is still to do, and open questions.
-        Be complete about facts and terse in wording. Write only the summary.
+        You keep the checkpoint of a conversation between a user and an AI agent that uses tools. The agent continues from the checkpoint alone, without the messages it replaces. Write it in Markdown under exactly these headings, in this order:
+
+        ## Goal
+        The task and its constraints, quoting the user's own words for each requirement.
+
+        ## Progress
+        ### Done
+        Every finished step with its result. List every file, page or other resource already read, by its exact path or name, with what in it matters, so the agent does not read it again.
+        ### In progress
+        What the agent was doing when the checkpoint was taken.
+        ### Blocked
+        What failed or waits on something, with the error.
+
+        ## Decisions
+        Choices made, with why.
+
+        ## Known
+        Facts established so far, each with its source: paths, names, numbers, quotes.
+
+        ## Next
+        What remains, in order. Nothing that is under Done.
+
+        ## Context
+        Anything else the agent will need.
+
+        Be complete about facts and terse in wording. Write "None." under a heading with nothing to report. Write only the checkpoint.
         TXT;
 
-    /** How many summaries are kept, one per conversation the instance serves. */
+    private const UPDATE = 'Update the checkpoint: keep every fact it holds (every entry under Done, Decisions and Known stays, in the same detail), move what the new messages finished from In progress and Next to Done, and add what they establish. Write the whole updated checkpoint.';
+
+    private const HEADER = "[A checkpoint of the earlier conversation, which was compacted to save context. What is under Done is finished: do not do it again.]\n\n";
+    private const ACK    = 'Understood. I continue from the checkpoint.';
+
+    /** How many checkpoints are kept, one per conversation the instance serves. */
     private const CACHE = 8;
 
     /** The share of the context window a budget taken from it leaves for the prompt. */
@@ -89,30 +110,26 @@ final class Compact implements ModelMiddleware
     /** A report under this share of the calibrated count means the server cut the prompt. */
     private const TRUNCATED = 0.7;
 
+    /** The shares of the budget a prompt the provider rejected as too long is compacted to, in turn. */
+    private const OVERFLOW = [0.85, 0.70, 0.50, 0.35];
+
     /** @var \Closure(Prompt): int */
     private readonly \Closure $count;
     private readonly LoggerInterface $log;
-    /**
-     * Newest first: the conversation's messages up to the cut (`summarized`), what replaces them
-     * (the kept first messages, the summary and its acknowledgement), the summary, the number of
-     * messages it stands for, the size of the summary it replaced and how its side call ended.
-     *
-     * @var list<array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int, finish: FinishReason}>
-     */
-    private array $cache = [];
-    private ?Calibration $calibration;
+    private State $state;
     /** The budget in use, fixed at first use. */
     private ?int $budget = null;
     /** The fixed part of the prompt, by `$count`, at first use. */
     private ?int $fixed = null;
-    /** `$count` of the last summary that did not shrink the prompt: a smaller part is not summarized. */
+    /** `$count` of the last checkpoint that did not shrink the prompt: a smaller part is not folded. */
     private ?int $noGain      = null;
     private ?Compaction $last = null;
 
     /**
-     * @param int|null                     $budgetTokens null: the step's `Options::$contextWindow` less 20 %
-     * @param (\Closure(Prompt): int)|null $count        null: `Compact::approximate(...)`
-     * @param Calibration|null             $calibration  a calibration kept from an earlier instance
+     * @param int|null                     $budgetTokens     null: the step's `Options::$contextWindow` less 20 %
+     * @param (\Closure(Prompt): int)|null $count            null: `Compact::approximate(...)`
+     * @param State|null                   $state            the state of an earlier instance (`state()`)
+     * @param int|null                     $keepRecentTokens the recent tokens kept verbatim; null: a quarter of the budget
      */
     public function __construct(
         private readonly Model $summarizer,
@@ -121,7 +138,8 @@ final class Compact implements ModelMiddleware
         private readonly int $keepFirst = 1,
         ?LoggerInterface $log = null,
         private readonly Options $summarizerOptions = new Options(maxOutputTokens: 1024),
-        ?Calibration $calibration = null,
+        ?State $state = null,
+        private readonly ?int $keepRecentTokens = null,
     ) {
         if (null !== $budgetTokens && $budgetTokens < 1) {
             throw new \InvalidArgumentException('Compact needs a budget of at least 1 token, or null for the context window less 20 %');
@@ -129,9 +147,12 @@ final class Compact implements ModelMiddleware
         if ($keepFirst < 0) {
             throw new \InvalidArgumentException('keepFirst is 0 or more');
         }
-        $this->count       = $count ?? self::approximate(...);
-        $this->log         = $log ?? new NullLogger();
-        $this->calibration = $calibration;
+        if (null !== $keepRecentTokens && $keepRecentTokens < 1) {
+            throw new \InvalidArgumentException('keepRecentTokens is at least 1, or null for a quarter of the budget');
+        }
+        $this->count = $count ?? self::approximate(...);
+        $this->log   = $log ?? new NullLogger();
+        $this->state = $state ?? new State();
     }
 
     /**
@@ -160,23 +181,48 @@ final class Compact implements ModelMiddleware
     }
 
     /**
-     * The counter's calibration from the provider's reports so far, null before the first. Persist
-     * `toArray()` and pass `Calibration::fromArray()` to the next instance's constructor.
+     * The calibration and the checkpoints so far. Persist `toArray()` and pass `State::fromArray()`
+     * to the next instance's constructor.
      */
-    public function calibration(): ?Calibration
+    public function state(): State
     {
-        return $this->calibration;
+        return $this->state;
     }
 
     public function stream(Prompt $prompt, \Closure $next): iterable
     {
-        [$compacted, $counted, $calibration, $compaction] = $this->compact($prompt);
-        $reported                                         = 0;
-        foreach ($next($compacted) as $delta) {
-            if ($delta instanceof Usage) {
-                $reported = \max($reported, $delta->input);
+        $share = 1.0;
+        $sent  = null;
+        for ($retry = 0;; ++$retry) {
+            [$compacted, $counted, $calibration, $compaction] = $this->compact($prompt, $share);
+            $reported                                         = 0;
+            $started                                          = false;
+            try {
+                if (null === $sent || $compacted->messages != $sent) {
+                    $sent = $compacted->messages;
+                    foreach ($next($compacted) as $delta) {
+                        $started = true;
+                        if ($delta instanceof Usage) {
+                            $reported = \max($reported, $delta->input);
+                        }
+                        yield $delta;
+                    }
+                    break;
+                }
+                $this->log->warning('Compact: at {percent} % of the budget the prompt is the one rejected, nothing more to fold', ['percent' => (int) \round(100 * $share)]);
+            } catch (ModelException $e) {
+                if (ErrorKind::ContextTooLong !== $e->kind || $started) {
+                    throw $e;
+                }
+                $rejected = $e;
             }
-            yield $delta;
+            if (!isset(self::OVERFLOW[$retry])) {
+                $this->log->error('Compact: the provider rejected the prompt as too long at ' . (int) \round(100 * $share) . ' % of the budget too; giving up', ['message' => $rejected->getMessage()]);
+
+                throw $rejected;
+            }
+            $share = self::OVERFLOW[$retry];
+            $this->log->warning('Compact: the provider rejected the prompt as too long ({message}); compacting to {percent} % of the budget and retrying', ['message' => $rejected->getMessage(), 'percent' => (int) \round(100 * $share)]);
         }
         if (0 === $reported) {
             return;
@@ -192,7 +238,8 @@ final class Compact implements ModelMiddleware
 
             return;     // a cut prompt's report would teach the calibration the cut
         }
-        $this->calibration = $this->calibration?->with($counted, $reported) ?? new Calibration($counted, $reported, $counted, $reported);
+        $current     = $this->state->calibration;
+        $this->state = new State($current?->with($counted, $reported) ?? new Calibration($counted, $reported, $counted, $reported), $this->state->checkpoints);
     }
 
     /**
@@ -208,122 +255,180 @@ final class Compact implements ModelMiddleware
             if (null === $window) {
                 throw new \LogicException('Compact has no budget: pass budgetTokens, or set Options::$contextWindow on the run, whose window less a reserve of 20 % becomes the budget');
             }
-
-            return $this->budget = (int) \floor(self::WINDOW_SHARE * $window);
+            $budget = (int) \floor(self::WINDOW_SHARE * $window);
+        } else {
+            if (null !== $window && $this->budgetTokens > $window) {
+                throw new \LogicException('Compact: the budget of ' . \number_format($this->budgetTokens) . ' tokens is over the context window of ' . \number_format($window) . ' (Options::$contextWindow); set it below the window by the output tokens a step needs, or pass null for the window less 20 %');
+            }
+            $budget = $this->budgetTokens;
         }
-        if (null !== $window && $this->budgetTokens > $window) {
-            throw new \LogicException('Compact: the budget of ' . \number_format($this->budgetTokens) . ' tokens is over the context window of ' . \number_format($window) . ' (Options::$contextWindow); set it below the window by the output tokens a step needs, or pass null for the window less 20 %');
+        if (null !== $this->keepRecentTokens && 2 * $this->keepRecentTokens > $budget) {
+            throw new \LogicException('Compact: keepRecentTokens of ' . \number_format($this->keepRecentTokens) . ' is over half the budget of ' . \number_format($budget) . ': the rest must hold the fixed part of the prompt and the checkpoint. Lower it, or pass null for a quarter of the budget');
         }
 
-        return $this->budget = $this->budgetTokens;
+        return $this->budget = $budget;
     }
 
     /**
+     * Compacts the prompt to `$share` of the budget.
+     *
      * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: ?Compaction} the prompt to hand on, `$count` of
      *                                                                   it, the calibration it was counted with and what was done
      */
-    private function compact(Prompt $prompt): array
+    private function compact(Prompt $prompt, float $share): array
     {
         // Another conversation's step may change the calibration while this one waits.
-        $cal         = $this->calibration;
+        $cal         = $this->state->calibration;
         $fitted      = $cal?->fitted ?? false;
         $tokens      = fn (int $counted): int => null === $cal ? $counted : $cal->tokens($counted);
         $calibration = 'counter ratio ' . \round($cal?->ratio ?? 1.0, 3) . ', offset ' . \round($cal?->offset ?? 0.0);
         $budget      = $this->budget($prompt);
+        $target      = (int) \floor($share * $budget);
+        $reserve     = (int) \floor($share * ($this->keepRecentTokens ?? \intdiv($budget, 4)));
         // Counted at first use, compared calibrated once there is a line: one report's difference,
         // taken from a long restored conversation, says little about the fixed part.
         $this->fixed ??= ($this->count)(new Prompt($prompt->system, \array_slice($prompt->messages, 0, $this->keepFirst), $prompt->tools, $prompt->options, $prompt->cancel));
         $fixed = $fitted ? $tokens($this->fixed) : $this->fixed;
         if (2 * $fixed > $budget) {
             $raise = null === $this->budgetTokens ? 'Raise Options::$contextWindow (the budget is 80 % of it) or pass budgetTokens of ' : 'Raise budgetTokens to ';
-            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens' . ($fitted ? " ($calibration)" : '') . ', over half the budget of ' . \number_format($budget) . ': the budget must leave room above it for a summary and the recent half. ' . $raise . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
+            throw new \LogicException("Compact: the fixed part of the prompt (system text, tool specs and the first {$this->keepFirst} messages) counts " . \number_format($fixed) . ' tokens' . ($fitted ? " ($calibration)" : '') . ', over half the budget of ' . \number_format($budget) . ': the budget must leave room above it for the checkpoint and the recent messages. ' . $raise . \number_format(4 * $fixed) . ' or more, or shorten the system prompt and tool descriptions');
         }
         $counted = ($this->count)($prompt);
         $before  = $tokens($counted);
-        if ($before <= $budget) {
+        if ($before <= $target) {
             $this->last = null;
 
             return [$prompt, $counted, $cal, null];
         }
         $messages = $prompt->messages;
-        // === holds the same Message objects: a fork's copy of the messages shares them.
-        $entry = null;
-        foreach ($this->cache as $e) {
-            $known = \count($e['summarized']);
-            if (\count($messages) > $known && (null === $entry || $known > \count($entry['summarized'])) && \array_slice($messages, 0, $known) === $e['summarized']) {
-                $entry = $e;
+        $n        = \count($messages);
+        $hashes   = [''];
+        foreach ($messages as $i => $message) {
+            $hashes[$i + 1] = \hash('xxh128', $hashes[$i] . \json_encode($message->toArray(), \JSON_THROW_ON_ERROR));
+        }
+        $checkpoint = null;
+        foreach ($this->state->checkpoints as $c) {
+            if ($c->covered < $n && $c->hash === $hashes[$c->covered] && $c->covered > ($checkpoint?->covered ?? 0)) {
+                $checkpoint = $c;
             }
         }
-        $view   = $messages;
-        $offset = 0;      // $view[$i] is $messages[$i + $offset] from $floor on
-        $floor  = 0;      // the start of what $view keeps verbatim after a summary
-        if (null !== $entry) {
-            $view   = [...$entry['replacement'], ...\array_slice($messages, \count($entry['summarized']))];
-            $offset = \count($entry['summarized']) - \count($entry['replacement']);
-            $floor  = \count($entry['replacement']);
+        $view    = null === $checkpoint ? $messages : self::view($messages, $checkpoint);
+        $counted = ($this->count)(self::with($prompt, $view));
+        $after   = $tokens($counted);
+        if (null !== $checkpoint && $after <= $target) {
+            return $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
         }
-        $rounds  = 0;
-        $nothing = 'Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize';
-        while (($after = $tokens($counted = ($this->count)(self::with($prompt, $view)))) > $budget) {
-            $start = \min($this->keepFirst, \count($view));
-            if ($start > 0 && $start < \count($view) && self::hasResults($view[$start])) {
-                ++$start;   // the results of the last kept message's tool calls stay with it
-            }
-            $floor = \max($floor, $start);
-            $cut   = \min(\max($start + \intdiv(\count($view) - $start, 2), $floor + 1), \count($view) - 1);
-            while ($cut > $floor && self::hasResults($view[$cut])) {
-                --$cut;     // never end the summarized part between a tool call and its result
-            }
-            if ($cut <= $floor) {
-                // Too little before the cut: take the pair after it in whole, if a message remains.
-                for ($cut = $floor + 1; $cut < \count($view) && self::hasResults($view[$cut]); ++$cut) {
-                }
-            }
-            $segment = \array_slice($view, $start, $cut - $start);
-            if ($cut >= \count($view) || (null !== $this->noGain && $this->countMessages($prompt, $segment) <= $this->noGain)) {
-                $this->log->warning($nothing, ['tokens' => $after, 'budget' => $budget]);
-                break;
-            }
-            // A later round summarizes the earlier summary together with what follows it.
-            $previous            = null === $entry ? null : \strlen($entry['summary']);
-            [$summary, $finish]  = $this->summarize($prompt->system, \array_slice($view, 0, $start), $segment, $prompt->cancel, $previous);
-            $replace             = [new Message(Role::User, [new Text("[A summary of the earlier conversation, which was compacted to save context]\n\n$summary")])];
-            if (Role::User === $view[$cut]->role) {
-                $replace[] = new Message(Role::Assistant, [new Text('Understood. I continue from that summary.')]);
-            }
-            $known     = $cut + $offset;
-            $candidate = [
-                'summarized'  => \array_slice($messages, 0, $known),
-                'replacement' => [...\array_slice($view, 0, $start), ...$replace],
-                'summary'     => $summary,
-                'removed'     => $known - $start,
-                'previous'    => $previous,
-                'finish'      => $finish,
-            ];
-            $next = [...$candidate['replacement'], ...\array_slice($messages, $known)];
-            if (($this->count)(self::with($prompt, $next)) >= $counted) {
-                // Two small messages replaced by a larger summary: keep them, and spend no side
-                // call on a part this small again.
-                $this->noGain = $this->countMessages($prompt, $replace);
-                $this->log->warning($nothing, ['tokens' => $after, 'budget' => $budget, 'summaryBytes' => \strlen($summary)]);
-                break;
-            }
-            $entry  = $candidate;
-            $view   = $next;
-            $offset = $known - \count($entry['replacement']);
-            $floor  = \count($entry['replacement']);
-            ++$rounds;
-            $this->log->info('Compact: replaced {removed} messages with a summary of {bytes} bytes (budget {budget} tokens, {calibration})', ['removed' => $entry['removed'], 'bytes' => \strlen($summary), 'budget' => $budget, 'calibration' => $calibration]);
-        }
-        if (null === $entry || $view === $messages) {
-            $this->last = null;
 
-            return [$prompt, $counted, $cal, null];
+        $kept = \min($this->keepFirst, $n);
+        if ($kept > 0 && $kept < $n && self::hasResults($messages[$kept])) {
+            ++$kept;   // the results of the last kept message's tool calls stay with it
         }
-        $this->remember($entry);
-        $this->last = new Compaction($entry['removed'], \count($messages) - \count($entry['summarized']), $entry['summary'], $before, $after, 0 === $rounds, $entry['previous'], $cal?->ratio ?? 1.0, $cal?->offset ?? 0.0, $entry['finish']);
+        $from = \max($kept, $checkpoint?->covered ?? 0);
+        // The step in flight: the last assistant message and its results, or the latest user
+        // message when no reply follows it. The recent part starts there at the latest.
+        $latest = null;
+        $reply  = null;
+        foreach ($messages as $i => $message) {
+            if (Role::Assistant === $message->role) {
+                $reply = $i;
+            } elseif (self::hasText($message)) {
+                $latest = $i;
+            }
+        }
+        $last = null !== $reply && $reply > ($latest ?? -1) ? $reply : ($latest ?? $n - 1);
+        // The reserve: the most recent messages, back to a boundary, that count within it.
+        $ratio = $cal?->ratio ?? 1.0;
+        $cut   = $last;
+        for ($i = $last - 1; $i > $from; --$i) {
+            if ($ratio * $this->countMessages($prompt, \array_slice($messages, $i)) > $reserve) {
+                break;
+            }
+            if (!self::hasResults($messages[$i])) {
+                $cut = $i;
+            }
+        }
+        $nothing = 'Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize';
+        $segment = $cut > $from ? \array_slice($messages, $from, $cut - $from) : [];
+        if ([] === $segment || (null !== $this->noGain && $this->countMessages($prompt, $segment) <= $this->noGain)) {
+            $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target]);
+
+            return null === $checkpoint
+                ? $this->unchanged($prompt, $cal)
+                : $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
+        }
+        $previous       = null === $checkpoint ? null : \strlen($checkpoint->text);
+        [$text, $finish] = $this->summarize($prompt->system, \array_slice($messages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel);
+        $lifted         = null !== $latest && $latest >= $kept && $latest < $cut ? $latest : null;
+        $new            = new Checkpoint($hashes[$cut], $cut, $kept, $lifted, $text, $previous, $finish);
+        $next           = self::view($messages, $new);
+        $nextCount      = ($this->count)(self::with($prompt, $next));
+        if ($nextCount >= $counted) {
+            // Two small messages replaced by a larger checkpoint: keep them, and spend no side
+            // call on a part this small again.
+            $this->noGain = $this->countMessages($prompt, [new Message(Role::User, [new Text(self::HEADER . $text)])]);
+            $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target, 'summaryBytes' => \strlen($text)]);
+
+            return null === $checkpoint
+                ? $this->unchanged($prompt, $cal)
+                : $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
+        }
+        // Store it in place of the checkpoints it supersedes: those of the same conversation.
+        $this->state = new State($this->state->calibration, \array_slice([$new, ...\array_filter(
+            $this->state->checkpoints,
+            static fn (Checkpoint $c): bool => $c->covered > $cut || $c->hash !== $hashes[$c->covered],
+        )], 0, self::CACHE));
+        $after = $tokens($nextCount);
+        $this->log->info('Compact: replaced {removed} messages with a checkpoint of {bytes} bytes (budget {budget} tokens, {calibration})', ['removed' => $new->removed(), 'bytes' => \strlen($text), 'budget' => $target, 'calibration' => $calibration]);
+        $this->log->debug("Compact: the checkpoint of {removed} messages:\n{checkpoint}", ['removed' => $new->removed(), 'checkpoint' => $text]);
+        if ($after > $target) {
+            $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target]);
+        }
+
+        return $this->served($prompt, $next, $nextCount, $cal, $new, $before, $after, false);
+    }
+
+    /** @return array{0: Prompt, 1: int, 2: ?Calibration, 3: null} */
+    private function unchanged(Prompt $prompt, ?Calibration $cal): array
+    {
+        $this->last = null;
+
+        return [$prompt, ($this->count)($prompt), $cal, null];
+    }
+
+    /**
+     * @param list<Message> $view
+     *
+     * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: Compaction}
+     */
+    private function served(Prompt $prompt, array $view, int $counted, ?Calibration $cal, Checkpoint $checkpoint, int $before, int $after, bool $reused): array
+    {
+        $this->last = new Compaction($checkpoint->removed(), \count($prompt->messages) - $checkpoint->covered + (null === $checkpoint->lifted ? 0 : 1), $checkpoint->text, $before, $after, $reused, $checkpoint->previousBytes, $cal?->ratio ?? 1.0, $cal?->offset ?? 0.0, $checkpoint->finish);
 
         return [self::with($prompt, $view), $counted, $cal, $this->last];
+    }
+
+    /**
+     * The messages with the checkpoint in place of what it covers: the kept first messages, the
+     * checkpoint, an acknowledgement when a user message follows, the lifted latest user message,
+     * then the rest verbatim.
+     *
+     * @param list<Message> $messages
+     *
+     * @return list<Message>
+     */
+    private static function view(array $messages, Checkpoint $checkpoint): array
+    {
+        $view   = \array_slice($messages, 0, $checkpoint->kept);
+        $view[] = new Message(Role::User, [new Text(self::HEADER . $checkpoint->text)]);
+        $follow = null === $checkpoint->lifted ? $messages[$checkpoint->covered] : $messages[$checkpoint->lifted];
+        if (Role::User === $follow->role) {
+            $view[] = new Message(Role::Assistant, [new Text(self::ACK)]);
+        }
+        if (null !== $checkpoint->lifted) {
+            $view[] = $messages[$checkpoint->lifted];
+        }
+
+        return [...$view, ...\array_slice($messages, $checkpoint->covered)];
     }
 
     /**
@@ -337,31 +442,17 @@ final class Compact implements ModelMiddleware
     }
 
     /**
-     * Puts the entry first, in place of the entries it supersedes: its own, when reused, and the
-     * earlier summaries of the same conversation, whose messages are a prefix of its own.
-     *
-     * @param array{summarized: list<Message>, replacement: list<Message>, summary: string, removed: int, previous: ?int, finish: FinishReason} $entry
-     */
-    private function remember(array $entry): void
-    {
-        $known       = \count($entry['summarized']);
-        $this->cache = [$entry, ...\array_filter($this->cache, static fn (array $e): bool => \count($e['summarized']) > $known || \array_slice($entry['summarized'], 0, \count($e['summarized'])) !== $e['summarized'])];
-        $this->cache = \array_slice($this->cache, 0, self::CACHE);
-    }
-
-    /**
-     * The summary of `$segment` and how its side call ended, with the agent's instructions and the
-     * `$kept` messages before it for context (the task, which the summarizer would otherwise report
-     * as unknown, in the terms the instructions use). A collapsed one (empty, cut at the token
-     * limit, or under a quarter of the `$previous` summary's bytes) is asked for once more, and
-     * fails the step the second time.
+     * The checkpoint for `$segment` and how its side call ended: a new one, or `$previous` updated
+     * with it. The agent's instructions and the `$kept` first messages go along as context (the
+     * task, in the terms the instructions use). A collapsed one (empty, cut at the token limit, or
+     * under a quarter of `$previous`) is asked for once more, and fails the step the second time.
      *
      * @param list<Message> $kept
      * @param list<Message> $segment
      *
      * @return array{0: string, 1: FinishReason}
      */
-    private function summarize(?string $system, array $kept, array $segment, Cancel $cancel, ?int $previous): array
+    private function summarize(?string $system, array $kept, ?string $previous, array $segment, Cancel $cancel): array
     {
         $context = '';
         foreach ($kept as $message) {
@@ -372,10 +463,14 @@ final class Compact implements ModelMiddleware
             $transcript .= self::render($message);
         }
         $ask = null === $system || '' === \trim($system) ? '' : "The agent's instructions (context only, do not summarize them):\n\n" . \trim($system) . "\n\n";
-        $ask .= '' === $context
-            ? "The conversation so far:\n\n{$transcript}Write the summary."
-            : "The start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\n{$context}The part to summarize, which follows it:\n\n{$transcript}Write the summary.";
+        if ('' !== $context) {
+            $ask .= "The start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\n$context";
+        }
+        $ask .= null === $previous
+            ? "The messages to fold into a new checkpoint:\n\n{$transcript}Write the checkpoint."
+            : "The current checkpoint:\n\n$previous\n\nThe messages since the checkpoint, to fold into it:\n\n$transcript" . self::UPDATE;
         $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text($ask)])], [], $this->summarizerOptions, $cancel);
+        $bytes  = null === $previous ? null : \strlen($previous);
         for ($attempt = 1;; ++$attempt) {
             $acc = new Accumulator();
             foreach ($this->summarizer->stream($prompt) as $delta) {
@@ -388,19 +483,19 @@ final class Compact implements ModelMiddleware
                 }
             }
             $text   = \trim($text);
-            $finish = $acc->finish() ?? throw new \Harness\ModelException(\Harness\ErrorKind::ModelError, 'The summarizer\'s stream ended without a Finish delta');
-            if ('' !== $text && FinishReason::Length !== $finish && (null === $previous || 4 * \strlen($text) >= $previous)) {
+            $finish = $acc->finish() ?? throw new ModelException(ErrorKind::ModelError, 'The summarizer\'s stream ended without a Finish delta');
+            if ('' !== $text && FinishReason::Length !== $finish && (null === $bytes || 4 * \strlen($text) >= $bytes)) {
                 return [$text, $finish];
             }
             $what = match (true) {
                 '' === $text                     => "returned no text (finish: {$finish->value})",
                 FinishReason::Length === $finish => 'was cut at its output token limit after ' . \number_format(\strlen($text)) . ' bytes (finish: length)',
-                default                          => 'collapsed the summary to ' . \number_format(\strlen($text)) . ' bytes from the ' . \number_format((int) $previous) . "-byte summary it replaces, under a quarter (finish: {$finish->value})",
+                default                          => 'collapsed the checkpoint to ' . \number_format(\strlen($text)) . ' bytes from the ' . \number_format((int) $bytes) . "-byte checkpoint it updates, under a quarter (finish: {$finish->value})",
             };
             if (2 === $attempt) {
-                throw new \RuntimeException("Compact: the summarizer $what, twice; a collapsed summary loses what the agent knew. Give it more output tokens or turn its thinking off in summarizerOptions, or use another summarizer");
+                throw new \RuntimeException("Compact: the summarizer $what, twice; a collapsed checkpoint loses what the agent knew. Give it more output tokens or turn its thinking off in summarizerOptions, or use another summarizer");
             }
-            $this->log->warning("Compact: the summarizer $what; asking once more", ['bytes' => \strlen($text), 'previous' => $previous]);
+            $this->log->warning("Compact: the summarizer $what; asking once more", ['bytes' => \strlen($text), 'previous' => $bytes]);
         }
     }
 
@@ -426,6 +521,18 @@ final class Compact implements ModelMiddleware
     {
         foreach ($message->parts as $part) {
             if ($part instanceof ToolResult) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** A user message that holds more than tool results: something the user said. */
+    private static function hasText(Message $message): bool
+    {
+        foreach ($message->parts as $part) {
+            if (!$part instanceof ToolResult) {
                 return true;
             }
         }

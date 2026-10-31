@@ -7,7 +7,8 @@ declare(strict_types=1);
  * events as JSON lines (what an SSE or WebSocket route would forward) and keeps the conversation and
  * the pending calls in a JSON file between requests. A write needs the user's approval; a tool can
  * ask the user a question. A Compact built per request keeps the prompt within the context window,
- * and its calibration is kept in the file too, so the next request starts calibrated.
+ * and its state (the calibration and the checkpoint) is kept in the file too, so the next request
+ * starts calibrated and serves the checkpoint without a side call.
  *
  *   php examples/web.php state.json say "Remember that my favourite colour is blue"
  *   php examples/web.php state.json answer '{"<call id>": {"approval": "allow"}}'   # or {"deny": "why"}
@@ -20,8 +21,8 @@ use Harness\Answer;
 use Harness\Approval;
 use Harness\Call;
 use Harness\ClosureTool;
-use Harness\Compact\Calibration;
 use Harness\Compact\Compact;
+use Harness\Compact\State;
 use Harness\Decision;
 use Harness\Hints;
 use Harness\Http\StreamTransport;
@@ -48,7 +49,7 @@ $url                      = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_O
 if (null === $file || !\in_array($command, ['say', 'answer'], true) || null === $arg) {
     exit("Usage: php examples/web.php <state.json> say <message> | answer <json>\n");
 }
-$state = \is_file($file) ? \json_decode(\file_get_contents($file), true, 512, \JSON_THROW_ON_ERROR) : ['messages' => [], 'pending' => [], 'notes' => [], 'calibration' => null];
+$state = \is_file($file) ? \json_decode(\file_get_contents($file), true, 512, \JSON_THROW_ON_ERROR) : ['messages' => [], 'pending' => [], 'notes' => [], 'compact' => null];
 
 $ask = new ClosureTool(
     new ToolSpec('ask_user', 'Ask the user a question and get the answer', ['type' => 'object', 'properties' => ['question' => ['type' => 'string']], 'required' => ['question']], new Hints(readOnly: true)),
@@ -84,7 +85,7 @@ $compact = new Compact(
     $model,
     null,
     summarizerOptions: new Options(maxOutputTokens: 1024, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]),
-    calibration: null === ($state['calibration'] ?? null) ? null : Calibration::fromArray($state['calibration']),
+    state: null === ($state['compact'] ?? null) ? null : State::fromArray($state['compact']),
 );
 
 $run = new Run(
@@ -118,7 +119,7 @@ fiber\run(function () use ($run, $input, $sink) {
     }
 });
 
-$state['messages']    = \array_map(fn (Message $m) => $m->toArray(), $run->messages());
-$state['pending']     = \array_map(fn (Pending $p) => $p->toArray(), $run->ended()->pending);
-$state['calibration'] = $compact->calibration()?->toArray();
+$state['messages'] = \array_map(fn (Message $m) => $m->toArray(), $run->messages());
+$state['pending']  = \array_map(fn (Pending $p) => $p->toArray(), $run->ended()->pending);
+$state['compact']  = $compact->state()->toArray();
 \file_put_contents($file, \json_encode($state, \JSON_PRETTY_PRINT | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR));

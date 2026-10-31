@@ -9,9 +9,8 @@ namespace Harness\Compact;
  * from two reported prompts, the smallest (`lowCounted` by the counter, `lowReported` by the
  * provider) and the largest. Once the largest counts at least twice the smallest (`fitted`), the
  * ratio and offset are the line through both; until then the ratio is 1 and the offset the largest
- * one's difference. Ratio, offset and `fitted` follow from the points. A JSON value: a host that
- * builds a `Compact` per request persists `toArray()` next to the conversation and passes
- * `Calibration::fromArray()` to the next one, which then starts calibrated.
+ * one's difference. Ratio, offset and `fitted` follow from the points. A JSON value, part of
+ * `State`.
  */
 final readonly class Calibration implements \JsonSerializable
 {

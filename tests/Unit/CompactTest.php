@@ -2,8 +2,14 @@
 
 declare(strict_types=1);
 
+use Harness\Compact\Calibration;
+use Harness\Compact\Checkpoint;
 use Harness\Compact\Compact;
+use Harness\Compact\State;
+use Harness\ErrorKind;
+use Harness\FinishReason;
 use Harness\Message;
+use Harness\ModelException;
 use Harness\Part\Reasoning;
 use Harness\Part\Text;
 use Harness\Part\ToolCall;
@@ -36,6 +42,12 @@ final class Summaries implements Harness\Model
 
         return says('S' . \count($this->prompts));
     }
+
+    /** The text of the n-th side call's one user message. */
+    public function asked(int $n): string
+    {
+        return $this->prompts[$n]->messages[0]->parts[0]->text;
+    }
 }
 
 function assistant(Harness\Part ...$parts): Message
@@ -43,16 +55,24 @@ function assistant(Harness\Part ...$parts): Message
     return new Message(Role::Assistant, $parts);
 }
 
-/** u0, then $pairs tool steps (each 300 bytes of result), then a closing reply and question. */
-function agentic(int $pairs): array
+/** u0, then $pairs tool steps (each 300 bytes of result, about 560 bytes a pair). */
+function agentic(int $pairs, string $task = 'the task'): array
 {
-    $m = [user('the task')];
+    $m = [user($task)];
     for ($i = 1; $i <= $pairs; ++$i) {
         $m[] = assistant(new Reasoning("thinking $i"), new ToolCall("c$i", 'read', ['n' => $i]));
-        $m[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) $i, 300))])]);
+        $m[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 300))])]);
     }
 
     return $m;
+}
+
+/** $pairs more tool steps after $messages, numbered on from what is there. */
+function more(array $messages, int $pairs): array
+{
+    $n = \intdiv(\count($messages) - 1, 2);
+
+    return [...$messages, ...\array_slice(agentic($n + $pairs), 1 + 2 * $n)];
 }
 
 /** Streams one step through the middleware and returns the prompt the model got. */
@@ -64,84 +84,88 @@ function step(Compact $compact, array $messages, ?string $system = 'sys', array 
     return $model->prompts[0];
 }
 
-it('replaces the oldest half with a summary, cut where tool pairs stay together, the rest unchanged', function () {
+/** A logger that keeps [level, message with its placeholders filled]. */
+function lines(): AbstractLogger
+{
+    return new class extends AbstractLogger {
+        public array $lines = [];
+
+        public function log($level, string|Stringable $message, array $context = []): void
+        {
+            $this->lines[] = [$level, \preg_replace_callback('/\{(\w+)\}/', fn ($m) => (string) ($context[$m[1]] ?? $m[0]), (string) $message)];
+        }
+    };
+}
+
+it('folds everything older than the step in flight into a checkpoint when the reserve holds no more', function () {
     $summarizer = new Summaries();
     $compact    = new Compact($summarizer, 2000, bytesOf(...));
-    $messages   = agentic(5);                     // 11 messages, about 2.3 KB
+    $messages   = agentic(5);                     // 11 messages, about 2.8 KB; the reserve is 500
     $spec       = new ToolSpec('read', 'Reads', ['type' => 'object']);
     $prompt     = step($compact, $messages, 'sys', [$spec]);
 
-    // After the first message, 10 remain; half is 5, so the cut would fall on message 6, a tool
-    // result: it moves back to message 5, the call it answers.
-    expect($prompt->messages)->toHaveCount(8)
+    // The last pair alone is over the reserve, so the recent part is the step in flight: the
+    // last call and its result.
+    expect($prompt->messages)->toHaveCount(4)
         ->and($prompt->messages[0])->toBe($messages[0])
         ->and($prompt->messages[1]->role)->toBe(Role::User)
-        ->and($prompt->messages[1]->parts[0]->text)->toEndWith("\n\nS1")
-        ->and($summarizer->prompts)->toHaveCount(1)
-        ->and(\array_slice($prompt->messages, 2))->toBe(\array_slice($messages, 5))
+        ->and($prompt->messages[1]->parts[0]->text)->toStartWith('[A checkpoint of the earlier conversation')->toEndWith("\n\nS1")
+        ->and(\array_slice($prompt->messages, 2))->toBe(\array_slice($messages, 9))
         ->and($prompt->system)->toBe('sys')
         ->and($prompt->tools)->toBe([$spec])
-        ->and($compact->last())->toEqual(new Harness\Compact\Compaction(4, 6, 'S1', bytesOf(TestPrompt::make(null, $messages)), bytesOf($prompt), false, finish: Harness\FinishReason::Stop));
+        ->and($summarizer->prompts)->toHaveCount(1)
+        ->and($compact->last())->toEqual(new Harness\Compact\Compaction(8, 2, 'S1', bytesOf(TestPrompt::make(null, $messages)), bytesOf($prompt), false, finish: FinishReason::Stop));
 
     $asked = $summarizer->prompts[0];
-    $text  = $asked->messages[0]->parts[0]->text;
+    $text  = $summarizer->asked(0);
     expect($asked->tools)->toBe([])
-        ->and($asked->system)->toContain('Remaining')
-        ->and($text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nsys\n\nThe start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe part to summarize")
-        ->and($text)->toContain('[calls read {"n":2}]')->toContain(\str_repeat('2', 300))
-        ->and($text)->not->toContain('[calls read {"n":3}]')
+        ->and($asked->system)->toContain("## Goal\n")->toContain("## Progress\n### Done\n")->toContain("### In progress\n")->toContain("### Blocked\n")
+        ->and($asked->system)->toContain("## Decisions\n")->toContain("## Known\n")->toContain("## Next\n")->toContain("## Context\n")
+        ->and($asked->system)->toContain('List every file, page or other resource already read')->toContain('complete about facts and terse in wording')
+        ->and($text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nsys\n\nThe start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe messages to fold into a new checkpoint:")
+        ->and($text)->toEndWith('Write the checkpoint.')
+        ->and($text)->toContain('[calls read {"n":4}]')->toContain(\str_repeat('4', 300))
+        ->and($text)->not->toContain('[calls read {"n":5}]')
         ->and($text)->not->toContain('thinking');
 });
 
-it('reuses the summary while the conversation fits, and summarizes again with it when it does not', function () {
-    $summarizer = new Summaries();
-    $compact    = new Compact($summarizer, 2000, bytesOf(...));
-    $messages   = agentic(5);
-    $first      = step($compact, $messages);
-    $summary    = $first->messages[1];
+it('keeps the most recent keepRecentTokens verbatim, cut on a boundary that keeps tool pairs together', function () {
+    $compact  = new Compact(new Summaries(), 4000, bytesOf(...), keepRecentTokens: 1200);
+    $messages = agentic(8);                       // about 4.5 KB
+    $prompt   = step($compact, $messages);
+    // Two pairs (about 1.1 KB) fit the reserve, a third does not; a result never starts the recent part.
+    expect(\array_slice($prompt->messages, 2))->toBe(\array_slice($messages, 13))
+        ->and($prompt->messages[2]->parts[1])->toBeInstanceOf(ToolCall::class)
+        ->and($compact->last()->removed)->toBe(12)
+        ->and($compact->last()->kept)->toBe(4)
+        ->and(bytesOf(TestPrompt::make(null, \array_slice($messages, 13))))->toBeLessThanOrEqual(1200)
+        ->and(bytesOf(TestPrompt::make(null, \array_slice($messages, 11))))->toBeGreaterThan(1200);
 
-    // One more short exchange: no new summary, the same prefix objects.
-    $messages[] = assistant(new Text('short'));
-    $messages[] = user('more');
-    $second     = step($compact, $messages);
-    expect($summarizer->prompts)->toHaveCount(1)
-        ->and($second->messages[1])->toBe($summary)
-        ->and(\array_slice($second->messages, 2))->toBe(\array_slice($messages, 5))
-        ->and($compact->last()->reused)->toBeTrue()
-        ->and($compact->last()->removed)->toBe(4);
-
-    // Much more: over the budget again, so the earlier summary is summarized with what follows.
-    $messages = [...$messages, ...\array_slice(agentic(4), 1)];
-    $third    = step($compact, $messages);
-    $rounds   = \count($summarizer->prompts) - 1;
-    expect($rounds)->toBeGreaterThanOrEqual(1)
-        ->and($summarizer->prompts[1]->messages[0]->parts[0]->text)->toContain('S1')
-        ->and($third->messages[0])->toBe($messages[0])
-        ->and($third->messages[1]->parts[0]->text)->toEndWith('S' . ($rounds + 1))
-        ->and($compact->last()->reused)->toBeFalse()
-        ->and(bytesOf($third))->toBeLessThanOrEqual(2000)
-        ->and(\array_slice($third->messages, -1)[0])->toBe(\array_slice($messages, -1)[0]);
+    // Whatever the reserve, the step in flight stays.
+    $tiny = step(new Compact(new Summaries(), 4000, bytesOf(...), keepRecentTokens: 1), $messages);
+    expect(\array_slice($tiny->messages, 2))->toBe(\array_slice($messages, 15))
+        ->and(fn () => step(new Compact(new Summaries(), 4000, bytesOf(...), keepRecentTokens: 2001), $messages))
+        ->toThrow(LogicException::class, 'keepRecentTokens of 2,001 is over half the budget of 4,000');
 });
 
-it('never touches the system prompt or the first keepFirst messages, and keeps a tool result with its kept call', function () {
-    $summarizer = new Summaries();
-    $compact    = new Compact($summarizer, 1500, bytesOf(...), keepFirst: 2);
-    $messages   = agentic(6);                     // message 1 calls c1, message 2 holds its result
-    $prompt     = step($compact, $messages, 'the system');
-    expect($prompt->system)->toBe('the system')
-        ->and(\array_slice($prompt->messages, 0, 3))->toBe(\array_slice($messages, 0, 3))
-        ->and($prompt->messages[3]->parts[0]->text)->toContain('[A summary of the earlier conversation')
-        ->and(bytesOf($prompt))->toBeLessThanOrEqual(1500)
-        // The kept call and its result are context for the summarizer, not part of what it summarizes.
-        ->and(\explode('The part to summarize', $summarizer->prompts[0]->messages[0]->parts[0]->text)[1])->not->toContain(\str_repeat('1', 300));
-});
-
-it('adds an assistant acknowledgement when the kept part starts with a user message', function () {
-    $messages = [user('u0'), assistant(new Text('a1')), user('u2'), assistant(new Text('a3')), user('u4'), assistant(new Text('a5')), user('u6')];
-    // A budget the first round meets: the roles after the summary alternate.
-    $prompt = step(new Compact(new Summaries(), 30, fn (Prompt $p) => 5 * \count($p->messages), keepFirst: 1), $messages);
+it('keeps the latest user message verbatim when the cut falls after it', function () {
+    // A second question, then a tool loop answering it: the reserve holds only the last step.
+    $messages = [user('the task'), assistant(new Text('Done with that.')), user('Now count the servers on provider B.'), ...\array_slice(agentic(5), 1)];
+    $prompt   = step($compact = new Compact($summaries = new Summaries(), 2000, bytesOf(...)), $messages);
     expect(\array_map(fn (Message $m) => $m->role, $prompt->messages))->toBe([Role::User, Role::User, Role::Assistant, Role::User, Role::Assistant, Role::User])
-        ->and(\array_slice($prompt->messages, 3))->toBe(\array_slice($messages, 4));
+        ->and($prompt->messages[2]->parts[0]->text)->toBe('Understood. I continue from the checkpoint.')
+        ->and($prompt->messages[3])->toBe($messages[2])
+        ->and(\array_slice($prompt->messages, 4))->toBe(\array_slice($messages, 11))
+        // It is folded too, so the Goal can quote it.
+        ->and($summaries->asked(0))->toContain('Now count the servers on provider B.')
+        ->and($compact->last()->removed)->toBe(9)
+        ->and($compact->last()->kept)->toBe(3);
+
+    // A chat whose latest message is the question itself: the question is the recent part.
+    $chat   = [user('u0'), assistant(new Text(\str_repeat('a', 900))), user(\str_repeat('b', 900)), assistant(new Text(\str_repeat('c', 900))), user('the current question')];
+    $prompt = step(new Compact(new Summaries(), 2000, bytesOf(...)), $chat);
+    expect(\array_slice($prompt->messages, -1)[0])->toBe($chat[4])
+        ->and($prompt->messages[2]->role)->toBe(Role::Assistant);
 });
 
 it('passes a prompt within the budget on unchanged', function () {
@@ -153,7 +177,54 @@ it('passes a prompt within the budget on unchanged', function () {
         ->and($compact->last())->toBeNull();
 });
 
-it('compacts inside a run: the model sees the summary, the run keeps every message, and the compaction is logged', function () {
+it('reuses the checkpoint while the conversation fits, and updates it with what follows when it does not', function () {
+    $summarizer = new Summaries();
+    $compact    = new Compact($summarizer, 2000, bytesOf(...));
+    $messages   = agentic(5);
+    $first      = step($compact, $messages);
+
+    // One more step: the same checkpoint, no side call.
+    $messages = more($messages, 1);
+    $second   = step($compact, $messages);
+    expect($summarizer->prompts)->toHaveCount(1)
+        ->and($second->messages[1])->toEqual($first->messages[1])
+        ->and(\array_slice($second->messages, 2))->toBe(\array_slice($messages, 9))
+        ->and($compact->last()->reused)->toBeTrue()
+        ->and($compact->last()->removed)->toBe(8);
+
+    // Over the budget with it: the side call updates the checkpoint with the messages since it,
+    // and never sees the messages it already holds.
+    $messages = more($messages, 3);
+    $third    = step($compact, $messages);
+    $update   = $summarizer->asked(1);
+    expect($summarizer->prompts)->toHaveCount(2)
+        ->and($update)->toContain("The current checkpoint:\n\nS1\n\nThe messages since the checkpoint, to fold into it:\n\nASSISTANT:\n[calls read {\"n\":5}]")
+        ->and($update)->toEndWith('Update the checkpoint: keep every fact it holds (every entry under Done, Decisions and Known stays, in the same detail), move what the new messages finished from In progress and Next to Done, and add what they establish. Write the whole updated checkpoint.')
+        ->and($update)->not->toContain('[calls read {"n":4}]')
+        ->and($update)->not->toContain('[calls read {"n":9}]')
+        ->and($third->messages[0])->toBe($messages[0])
+        ->and($third->messages[1]->parts[0]->text)->toEndWith("\n\nS2")
+        ->and(\array_slice($third->messages, 2))->toBe(\array_slice($messages, -2))
+        ->and($compact->last()->reused)->toBeFalse()
+        ->and($compact->last()->previousSummaryBytes)->toBe(2)
+        ->and($compact->last()->removed)->toBe(16)
+        ->and($compact->state()->checkpoints)->toHaveCount(1);
+});
+
+it('never touches the system prompt or the first keepFirst messages, and keeps a tool result with its kept call', function () {
+    $summarizer = new Summaries();
+    $compact    = new Compact($summarizer, 1500, bytesOf(...), keepFirst: 2);
+    $messages   = agentic(6);                     // message 1 calls c1, message 2 holds its result
+    $prompt     = step($compact, $messages, 'the system');
+    expect($prompt->system)->toBe('the system')
+        ->and(\array_slice($prompt->messages, 0, 3))->toBe(\array_slice($messages, 0, 3))
+        ->and($prompt->messages[3]->parts[0]->text)->toContain('[A checkpoint of the earlier conversation')
+        ->and(bytesOf($prompt))->toBeLessThanOrEqual(1500)
+        // The kept call and its result are context for the summarizer, not what it folds.
+        ->and(\explode('The messages to fold', $summarizer->asked(0))[1])->not->toContain(\str_repeat('1', 300));
+});
+
+it('compacts inside a run: the model sees the checkpoint, the run keeps every message, and the compaction is logged', function () {
     $log = new class extends AbstractLogger {
         public array $lines = [];
 
@@ -168,6 +239,7 @@ it('compacts inside a run: the model sees the summary, the run keeps every messa
     $model = new FakeModel($quiet(calls(['c1', 'read', []])), $quiet(calls(['c2', 'read', []])), $quiet(calls(['c3', 'read', []])), $quiet(calls(['c4', 'read', []])), $quiet(says('done')));
     $run   = new Run($model, new Tools($read), middleware: [new Compact($summaries = new Summaries(), 1200, bytesOf(...), log: $log)]);
     turn($run, user('go'));
+    $levels = \array_column($log->lines, 0);
     expect($run->ended()->reason)->toBe(Reason::Done)
         ->and($run->messages())->toHaveCount(10)
         ->and($model->prompts[4]->messages[1]->parts[0]->text)->toEndWith('S' . \count($summaries->prompts))
@@ -175,7 +247,19 @@ it('compacts inside a run: the model sees the summary, the run keeps every messa
         ->and($log->lines[0][0])->toBe('info')
         ->and($log->lines[0][2]['removed'])->toBeGreaterThan(0)
         ->and($log->lines[0][2]['bytes'])->toBe(2)
-        ->and(\array_column($log->lines, 0))->toBe(\array_fill(0, \count($summaries->prompts), 'info'));
+        // Each checkpoint: its sizes at info, its text in full at debug.
+        ->and($levels)->toBe(\array_merge(...\array_fill(0, \count($summaries->prompts), ['info', 'debug'])))
+        ->and($log->lines[1][2]['checkpoint'])->toBe('S1');
+});
+
+it('logs each accepted checkpoint in full at debug', function () {
+    $log        = lines();
+    $checkpoint = "## Goal\nCount the servers.\n\n## Progress\n### Done\n- read metrics.md: 14 servers";
+    step(new Compact(new FakeModel(says($checkpoint)), 2000, bytesOf(...), log: $log), agentic(5));
+    expect($log->lines)->toBe([
+        ['info', 'Compact: replaced 8 messages with a checkpoint of ' . \strlen($checkpoint) . ' bytes (budget 2000 tokens, counter ratio 1, offset 0)'],
+        ['debug', "Compact: the checkpoint of 8 messages:\n$checkpoint"],
+    ]);
 });
 
 it('approximates tokens as bytes / 4 plus fixed costs', function () {
@@ -185,42 +269,23 @@ it('approximates tokens as bytes / 4 plus fixed costs', function () {
 });
 
 it('asks once more when the summarizer gives no text, and fails the step the second time', function () {
-    $empty   = [new Harness\Delta\Finish(Harness\FinishReason::Length)];
+    $empty   = [new Harness\Delta\Finish(FinishReason::Length)];
     $compact = new Compact($summarizer = new FakeModel($empty, $empty), 100);
     expect(fn () => step($compact, agentic(3)))->toThrow(RuntimeException::class, 'the summarizer returned no text (finish: length), twice');
     expect($summarizer->prompts)->toHaveCount(2)
         ->and($summarizer->prompts[1])->toBe($summarizer->prompts[0]);
 });
 
-it('summarizes round after round until the prompt fits, and warns when nothing is left', function () {
-    $log = new class extends AbstractLogger {
-        public array $levels = [];
-
-        public function log($level, string|Stringable $message, array $context = []): void
-        {
-            $this->levels[] = $level;
-        }
-    };
+it('warns when the checkpoint and the step in flight alone are over the budget', function () {
+    $log       = lines();
     $summaries = new Summaries();
     $prompt    = step(new Compact($summaries, 200, bytesOf(...), log: $log), agentic(4));
-    // The last pair alone is over 200: it summarizes until only the first message, a summary and the last pair remain.
-    expect(\count($summaries->prompts))->toBeGreaterThan(1)
-        ->and(\array_slice($log->levels, -1))->toBe(['warning'])
-        ->and($prompt->messages)->toHaveCount(4);
+    // The last pair alone is over 200: one checkpoint, and the prompt goes on over the budget.
+    expect($summaries->prompts)->toHaveCount(1)
+        ->and($prompt->messages)->toHaveCount(4)
+        ->and(\array_slice($log->lines, -1)[0][0])->toBe('warning')
+        ->and(\array_slice($log->lines, -1)[0][1])->toEndWith('over the budget of 200, but has nothing more to summarize');
 });
-
-/** A logger that keeps [level, message with its placeholders filled]. */
-function lines(): AbstractLogger
-{
-    return new class extends AbstractLogger {
-        public array $lines = [];
-
-        public function log($level, string|Stringable $message, array $context = []): void
-        {
-            $this->lines[] = [$level, \preg_replace_callback('/\{(\w+)\}/', fn ($m) => (string) ($context[$m[1]] ?? $m[0]), (string) $message)];
-        }
-    };
-}
 
 it('calls the summarizer with its own options, never the step\'s', function () {
     $summaries = new Summaries();
@@ -237,29 +302,28 @@ it('calls the summarizer with its own options, never the step\'s', function () {
     expect($summaries->prompts[0]->options)->toBe($own);
 });
 
-it('asks once more for a summary under a quarter of the one it replaces, and keeps the second', function () {
+it('asks once more for a checkpoint under a quarter of the one it updates, and keeps the second', function () {
     $log        = lines();
     $summarizer = new FakeModel(says(\str_repeat('a', 400)), says('tiny'), says(\str_repeat('b', 120)));
     $compact    = new Compact($summarizer, 3200, bytesOf(...), log: $log);
     $messages   = agentic(6);
     step($compact, $messages);
-    $messages = [...$messages, ...\array_slice(agentic(2), 1)];
-    $prompt   = step($compact, $messages);
+    $prompt = step($compact, more($messages, 5));
     expect($summarizer->prompts)->toHaveCount(3)
         ->and($summarizer->prompts[2])->toBe($summarizer->prompts[1])
         ->and($prompt->messages[1]->parts[0]->text)->toEndWith(\str_repeat('b', 120))
         ->and($compact->last()->previousSummaryBytes)->toBe(400)
-        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer collapsed the summary to 4 bytes from the 400-byte summary it replaces, under a quarter (finish: stop); asking once more']);
+        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer collapsed the checkpoint to 4 bytes from the 400-byte checkpoint it updates, under a quarter (finish: stop); asking once more']);
 });
 
-it('fails the step on a second collapsed summary, naming both sizes', function () {
+it('fails the step on a second collapsed checkpoint, naming both sizes', function () {
     $summarizer = new FakeModel(says(\str_repeat('a', 1093)), says(\str_repeat('c', 25)), says(\str_repeat('c', 25)));
     $compact    = new Compact($summarizer, 3200, bytesOf(...));
     $messages   = agentic(6);
     step($compact, $messages);
     expect($compact->last()->summary)->toHaveLength(1093);
-    expect(fn () => step($compact, [...$messages, ...\array_slice(agentic(2), 1)]))
-        ->toThrow(RuntimeException::class, 'collapsed the summary to 25 bytes from the 1,093-byte summary it replaces, under a quarter (finish: stop), twice');
+    expect(fn () => step($compact, more($messages, 5)))
+        ->toThrow(RuntimeException::class, 'collapsed the checkpoint to 25 bytes from the 1,093-byte checkpoint it updates, under a quarter (finish: stop), twice');
 });
 
 it('throws at first use when the fixed part of the prompt is over half the budget', function () {
@@ -269,7 +333,7 @@ it('throws at first use when the fixed part of the prompt is over half the budge
     step($compact, agentic(0), 'sys', [$spec]);
     $tight = new Compact(new Summaries(), 300);
     expect(fn () => step($tight, agentic(5), 'sys', [$spec]))
-        ->toThrow(LogicException::class, 'Compact: the fixed part of the prompt (system text, tool specs and the first 1 messages) counts 162 tokens, over half the budget of 300: the budget must leave room above it for a summary and the recent half. Raise budgetTokens to 648 or more');
+        ->toThrow(LogicException::class, 'Compact: the fixed part of the prompt (system text, tool specs and the first 1 messages) counts 162 tokens, over half the budget of 300: the budget must leave room above it for the checkpoint and the recent messages. Raise budgetTokens to 648 or more');
 
     // Compared calibrated once there is a line: twice the count, 324 is over half of 400. One report
     // is not enough: the difference of a long prompt may belong to the rest of it.
@@ -348,7 +412,7 @@ it('takes a fixed preamble in the reports as an offset, not a ratio', function (
         ->and($compact->last()->before)->toBe(bytesOf(TestPrompt::make('sys', $messages)) + 300);
 });
 
-it('serves several conversations from one instance, each its own summary, without recomputing', function () {
+it('serves several conversations from one instance, each its own checkpoint, without recomputing', function () {
     $summaries = new Summaries();
     $compact   = new Compact($summaries, 2000, bytesOf(...));
     $root      = user('the task');               // the template's first message, shared by every fork
@@ -374,22 +438,34 @@ it('serves several conversations from one instance, each its own summary, withou
     $qa  = step($compact, $a);
     $qb  = step($compact, $b);
     expect($summaries->prompts)->toHaveCount(2)
-        ->and($summaries->prompts[0]->messages[0]->parts[0]->text)->toContain('a: ')
-        ->and($summaries->prompts[1]->messages[0]->parts[0]->text)->toContain('b: ')
-        ->and($qa->messages[1])->toBe($pa->messages[1])
-        ->and($qb->messages[1])->toBe($pb->messages[1])
+        ->and($summaries->asked(0))->toContain('a: ')
+        ->and($summaries->asked(1))->toContain('b: ')
+        ->and($qa->messages[1])->toEqual($pa->messages[1])
+        ->and($qb->messages[1])->toEqual($pb->messages[1])
         ->and($qa->messages[1]->parts[0]->text)->toEndWith('S1')
         ->and($qb->messages[1]->parts[0]->text)->toEndWith('S2')
         ->and($compact->last()->reused)->toBeTrue();
 });
 
-it('keeps the last 8 summaries: a ninth conversation evicts the oldest', function () {
+it('finds a checkpoint by the content of the messages, not their identity', function () {
+    $summaries = new Summaries();
+    $compact   = new Compact($summaries, 2000, bytesOf(...));
+    $messages  = agentic(5);
+    step($compact, $messages);
+    $rebuilt = \array_map(fn (Message $m) => Message::fromArray(\json_decode(\json_encode($m->toArray()), true)), more($messages, 1));
+    expect(step($compact, $rebuilt)->messages[1]->parts[0]->text)->toEndWith('S1')
+        ->and($summaries->prompts)->toHaveCount(1)
+        ->and($compact->last()->reused)->toBeTrue();
+});
+
+it('keeps the last 8 checkpoints: a ninth conversation evicts the oldest', function () {
     $summaries     = new Summaries();
     $compact       = new Compact($summaries, 2000, bytesOf(...));
     $conversations = [];
     for ($i = 0; $i < 9; ++$i) {
-        step($compact, $conversations[$i] = agentic(5));
+        step($compact, $conversations[$i] = agentic(5, "task $i"));
     }
+    expect($compact->state()->checkpoints)->toHaveCount(8);
     foreach ([8, 1, 0] as $i) {             // 8 and 1 are kept; 0 was evicted by 8
         $conversations[$i][] = assistant(new Text('on'));
         step($compact, $conversations[$i]);
@@ -397,12 +473,12 @@ it('keeps the last 8 summaries: a ninth conversation evicts the oldest', functio
     expect($summaries->prompts)->toHaveCount(10);
 });
 
-it('compacts two conversations at once on one instance, each with its own summary', function () {
+it('compacts two conversations at once on one instance, each with its own checkpoint', function () {
     // The summarizer waits, so both steps are inside compact() together.
     $summarizer = new FakeModel(...\array_fill(0, 2, function (Prompt $p) {
         \fiber\sleep(0.01);
 
-        return says(\str_contains($p->messages[0]->parts[0]->text, 'from a') ? 'summary of a' : 'summary of b');
+        return says(\str_contains($p->messages[0]->parts[0]->text, 'from a') ? 'checkpoint of a' : 'checkpoint of b');
     }));
     $compact   = new Compact($summarizer, 2000, bytesOf(...));
     $a         = agentic(5);
@@ -410,34 +486,35 @@ it('compacts two conversations at once on one instance, each with its own summar
     $a[2]      = new Message(Role::User, [new ToolResult('c1', [new Text('from a ' . \str_repeat('1', 300))])]);
     $b[2]      = new Message(Role::User, [new ToolResult('c1', [new Text('from b ' . \str_repeat('1', 300))])]);
     [$pa, $pb] = \fiber\run(fn () => \fiber\await_all([\fiber\go(fn () => step($compact, $a)), \fiber\go(fn () => step($compact, $b))]));
-    expect($pa->messages[1]->parts[0]->text)->toEndWith('summary of a')
-        ->and($pb->messages[1]->parts[0]->text)->toEndWith('summary of b');
+    expect($pa->messages[1]->parts[0]->text)->toEndWith('checkpoint of a')
+        ->and($pb->messages[1]->parts[0]->text)->toEndWith('checkpoint of b')
+        ->and($compact->state()->checkpoints)->toHaveCount(2);
     // Each conversation's next step reuses its own.
     $a[] = assistant(new Text('on'));
     $b[] = assistant(new Text('on'));
-    expect(step($compact, $a)->messages[1])->toBe($pa->messages[1])
-        ->and(step($compact, $b)->messages[1])->toBe($pb->messages[1]);
+    expect(step($compact, $a)->messages[1])->toEqual($pa->messages[1])
+        ->and(step($compact, $b)->messages[1])->toEqual($pb->messages[1]);
 });
 
-it('takes a summary cut at the output token limit as a collapse: asked once more, and fatal twice', function () {
-    $cut     = [new Harness\Delta\TextDelta('1. Asked: the ta'), new Harness\Delta\Finish(Harness\FinishReason::Length)];
-    $compact = new Compact($summarizer = new FakeModel($cut, says('a whole summary')), 2000, bytesOf(...), log: $log = lines());
+it('takes a checkpoint cut at the output token limit as a collapse: asked once more, and fatal twice', function () {
+    $cut     = [new Harness\Delta\TextDelta('## Goal\nthe ta'), new Harness\Delta\Finish(FinishReason::Length)];
+    $compact = new Compact($summarizer = new FakeModel($cut, says('a whole checkpoint')), 2000, bytesOf(...), log: $log = lines());
     $prompt  = step($compact, agentic(5));
     expect($summarizer->prompts)->toHaveCount(2)
-        ->and($prompt->messages[1]->parts[0]->text)->toEndWith('a whole summary')
-        ->and($compact->last()->finish)->toBe(Harness\FinishReason::Stop)
-        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer was cut at its output token limit after 16 bytes (finish: length); asking once more']);
+        ->and($prompt->messages[1]->parts[0]->text)->toEndWith('a whole checkpoint')
+        ->and($compact->last()->finish)->toBe(FinishReason::Stop)
+        ->and($log->lines)->toContain(['warning', 'Compact: the summarizer was cut at its output token limit after 15 bytes (finish: length); asking once more']);
 
     $twice = new Compact(new FakeModel($cut, $cut), 2000, bytesOf(...));
-    expect(fn () => step($twice, agentic(5)))->toThrow(RuntimeException::class, 'the summarizer was cut at its output token limit after 16 bytes (finish: length), twice');
+    expect(fn () => step($twice, agentic(5)))->toThrow(RuntimeException::class, 'the summarizer was cut at its output token limit after 15 bytes (finish: length), twice');
 });
 
 it('gives the summarizer the run\'s system text as the agent\'s instructions, and none when there is none', function () {
     $summaries = new Summaries();
     step(new Compact($summaries, 2000, bytesOf(...)), agentic(5), 'Call every file a ledger.');
     step(new Compact($none = new Summaries(), 2000, bytesOf(...)), agentic(5), null);
-    expect($summaries->prompts[0]->messages[0]->parts[0]->text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nCall every file a ledger.\n\nThe start of the conversation")
-        ->and($none->prompts[0]->messages[0]->parts[0]->text)->toStartWith('The start of the conversation');
+    expect($summaries->asked(0))->toStartWith("The agent's instructions (context only, do not summarize them):\n\nCall every file a ledger.\n\nThe start of the conversation")
+        ->and($none->asked(0))->toStartWith('The start of the conversation');
 });
 
 it('drops a round that would not shrink the prompt, and spends no side call on a part that small again', function () {
@@ -452,40 +529,42 @@ it('drops a round that would not shrink the prompt, and spends no side call on a
         ->and($log->lines[0][0])->toBe('warning')
         ->and($log->lines[0][1])->toStartWith('Compact: the prompt is ')->toEndWith('but has nothing more to summarize');
 
-    // One more short exchange: the part to summarize is still smaller than the summary was.
+    // One more short exchange: the part to fold is still smaller than the checkpoint was.
     $messages[] = assistant(new Text('a5'));
     expect(step($compact, $messages)->messages)->toBe($messages)
         ->and($summarizer->prompts)->toHaveCount(1)
         ->and(\array_column($log->lines, 0))->toBe(['warning', 'warning']);
 });
 
-it('gives its calibration as a JSON value, and starts calibrated from one', function () {
-    $compact = new Compact(new Summaries(), 100000, bytesOf(...));
-    expect($compact->calibration())->toBeNull();
+it('gives its state as a JSON value, and a fresh instance serves the checkpoint it holds without a side call', function () {
+    $compact = new Compact(new Summaries(), 2000, bytesOf(...));
+    expect($compact->state())->toEqual(new State());
     $small = [user('the task')];
     $large = agentic(3);
-    step($compact, $small, reported: bytesOf(TestPrompt::make('sys', $small)) + 300);
-    step($compact, $large, reported: 2 * bytesOf(TestPrompt::make('sys', $large)) + 300);
-    $calibration = $compact->calibration();
-    $json        = \json_encode($calibration, \JSON_THROW_ON_ERROR);
-    $restored    = Harness\Compact\Calibration::fromArray(\json_decode($json, true));
-    expect($restored)->toEqual($calibration)
-        ->and($calibration->fitted)->toBeTrue()
-        ->and(\json_decode($json, true))->toBe([
-            'low'    => ['counted' => bytesOf(TestPrompt::make('sys', $small)), 'reported' => bytesOf(TestPrompt::make('sys', $small)) + 300],
-            'high'   => ['counted' => bytesOf(TestPrompt::make('sys', $large)), 'reported' => 2 * bytesOf(TestPrompt::make('sys', $large)) + 300],
-            'ratio'  => $calibration->ratio,
-            'offset' => $calibration->offset,
-        ])
-        ->and(fn () => Harness\Compact\Calibration::fromArray(['low' => ['counted' => 1]]))->toThrow(InvalidArgumentException::class);
-
-    // A new instance with it counts calibrated from its first step: over the budget at once.
+    step($compact, $small, reported: bytesOf(TestPrompt::make('sys', $small)) + 30);
+    step($compact, $large, reported: bytesOf(TestPrompt::make('sys', $large)) + 30);
     $messages = agentic(5);
-    $fresh    = new Compact(new Summaries(), $calibration->tokens(bytesOf(TestPrompt::make('sys', $messages))) - 1, bytesOf(...), calibration: $restored);
-    step($fresh, $messages);
-    expect($fresh->last())->not->toBeNull()
-        ->and($fresh->last()->ratio)->toBe($calibration->ratio)
-        ->and($fresh->calibration())->toBe($restored);
+    step($compact, $messages);
+    $state = $compact->state();
+    $json  = \json_encode($state, \JSON_THROW_ON_ERROR);
+    $data  = \json_decode($json, true);
+    expect(State::fromArray($data))->toEqual($state)
+        ->and($state->calibration->fitted)->toBeTrue()
+        ->and($state->checkpoints)->toHaveCount(1)
+        ->and($data['calibration'])->toEqual($state->calibration->toArray())
+        ->and($data['checkpoints'][0])->toBe(['hash' => $state->checkpoints[0]->hash, 'covered' => 9, 'kept' => 1, 'lifted' => null, 'text' => 'S1', 'previousBytes' => null, 'finish' => 'stop'])
+        ->and(fn () => State::fromArray(['checkpoints' => []]))->toThrow(InvalidArgumentException::class)
+        ->and(fn () => Checkpoint::fromArray(['hash' => 'x']))->toThrow(InvalidArgumentException::class)
+        ->and(fn () => Calibration::fromArray(['low' => ['counted' => 1]]))->toThrow(InvalidArgumentException::class);
+
+    // A new instance (the next request) with the conversation rebuilt from arrays and one more step.
+    $fresh   = new Compact($none = new Summaries(), 2000, bytesOf(...), state: State::fromArray($data));
+    $rebuilt = \array_map(fn (Message $m) => Message::fromArray(\json_decode(\json_encode($m->toArray()), true)), more($messages, 1));
+    $prompt  = step($fresh, $rebuilt);
+    expect($none->prompts)->toBe([])
+        ->and($prompt->messages[1]->parts[0]->text)->toEndWith("\n\nS1")
+        ->and($fresh->last()->reused)->toBeTrue()
+        ->and($fresh->last()->ratio)->toBe($state->calibration->ratio);
 });
 
 it('takes its budget from the context window less 20 %, and throws with neither', function () {
@@ -509,7 +588,7 @@ it('detects a prompt the server cut: a report under 70 % of the calibrated count
     $large   = agentic(3);
     step($compact, $small, reported: bytesOf(TestPrompt::make('sys', $small)));
     step($compact, $large, reported: bytesOf(TestPrompt::make('sys', $large)));
-    $calibration = $compact->calibration();
+    $calibration = $compact->state()->calibration;
     expect($calibration->fitted)->toBeTrue()->and($log->lines)->toBe([]);
 
     $messages = agentic(5);
@@ -518,7 +597,7 @@ it('detects a prompt the server cut: a report under 70 % of the calibrated count
     expect($compact->last()->truncatedUpstream)->toBeTrue()
         ->and($compact->last()->removed)->toBe(0)
         ->and($compact->last()->before)->toBe($counted)
-        ->and($compact->calibration())->toBe($calibration)
+        ->and($compact->state()->calibration)->toBe($calibration)
         ->and($log->lines)->toBe([['warning', 'Compact: the provider reported ' . \intdiv($counted, 2) . " input tokens for a prompt calibrated at $counted: the server cut the prompt. Configure its context window (a server that evicts silently drops the system prompt first) and set Options::\$contextWindow"]]);
 
     // A report near the count is not a cut.
@@ -533,4 +612,47 @@ it('hands a continued prompt on as one, its last message untouched', function ()
     expect($model->prompts[0]->continue)->toBeTrue()
         ->and($model->prompts[0]->messages[\count($model->prompts[0]->messages) - 1])->toBe($messages[11])
         ->and(\count($model->prompts[0]->messages))->toBeLessThan(12);
+});
+
+it('retries a prompt the provider rejects as too long at 85, 70, 50 and 35 % of the budget, then fails', function () {
+    $log      = lines();
+    $tooLong  = fn () => throw new ModelException(ErrorKind::ContextTooLong, 'context length exceeded');
+    $model    = new FakeModel(...\array_fill(0, 5, $tooLong));
+    $compact  = new Compact(new Summaries(), 4000, bytesOf(...), log: $log, keepRecentTokens: 2000);
+    $messages = agentic(5);                       // about 2.8 KB: within the budget, but rejected
+    $stream   = $compact->stream(TestPrompt::make('sys', $messages), fn (Prompt $p) => $model->stream($p));
+    expect(fn () => \iterator_to_array($stream, false))->toThrow(ModelException::class, 'context length exceeded');
+    $warnings = \array_values(\array_filter($log->lines, fn ($l) => 'warning' === $l[0] && \str_contains($l[1], 'rejected the prompt as too long (')));
+    expect(\array_map(fn ($l) => (int) \preg_replace('/.* to (\d+) % .*/', '$1', $l[1]), $warnings))->toBe([85, 70, 50, 35])
+        ->and(\array_slice($log->lines, -1)[0])->toBe(['error', 'Compact: the provider rejected the prompt as too long at 35 % of the budget too; giving up'])
+        ->and($model->prompts[0]->messages)->toBe($messages);
+    // Each retry that changed the prompt was sent, each smaller than the one before.
+    $sizes = \array_map(bytesOf(...), $model->prompts);
+    expect(\count($sizes))->toBeGreaterThan(1);
+    for ($i = 1; $i < \count($sizes); ++$i) {
+        expect($sizes[$i])->toBeLessThan($sizes[$i - 1]);
+    }
+});
+
+it('goes on with the first smaller prompt the provider accepts', function () {
+    $model    = new FakeModel(...\array_fill(0, 5, fn (Prompt $p) => bytesOf($p) > 1500 ? throw new ModelException(ErrorKind::ContextTooLong, 'too many tokens') : says('ok')));
+    $compact  = new Compact($summaries = new Summaries(), 4000, bytesOf(...), log: $log = lines());
+    $messages = agentic(5);
+    $deltas   = \iterator_to_array($compact->stream(TestPrompt::make('sys', $messages), fn (Prompt $p) => $model->stream($p)), false);
+    expect($deltas)->toEqual(says('ok'))
+        ->and($model->prompts)->toHaveCount(2)
+        ->and(bytesOf($model->prompts[1]))->toBeLessThanOrEqual(1500)
+        ->and($summaries->prompts)->toHaveCount(1)
+        ->and($compact->last()->summary)->toBe('S1');
+
+    // Another error, or one after the stream started, is not retried.
+    $late = new FakeModel(function () {
+        yield new Harness\Delta\TextDelta('Hel');
+        throw new ModelException(ErrorKind::ContextTooLong, 'too long');
+    });
+    expect(fn () => \iterator_to_array((new Compact(new Summaries(), 4000, bytesOf(...)))->stream(TestPrompt::make('sys', $messages), fn (Prompt $p) => $late->stream($p)), false))->toThrow(ModelException::class, 'too long')
+        ->and($late->prompts)->toHaveCount(1);
+    $limited = new FakeModel(fn () => throw new ModelException(ErrorKind::RateLimited, 'slow down'));
+    expect(fn () => \iterator_to_array((new Compact(new Summaries(), 4000, bytesOf(...)))->stream(TestPrompt::make('sys', $messages), fn (Prompt $p) => $limited->stream($p)), false))->toThrow(ModelException::class, 'slow down')
+        ->and($limited->prompts)->toHaveCount(1);
 });
