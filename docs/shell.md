@@ -13,7 +13,8 @@ shares the name, so a file that uses both aliases one (`use Harness\Policy\Shell
 - stdout and stderr are merged; stdin is empty. Output is reported as it arrives through
   `Call::progress()` (`ToolProgress` events), and the model gets `Exit code N` and the output, the
   middle cut out past `maxOutput` bytes with a marker.
-- A non-zero exit, a timeout or a cancellation is an error result; `value` is the exit code.
+- A non-zero exit, a timeout or a cancellation is an error result; `value` is the exit code, or
+  null when the process was killed (a timeout or a cancellation), since a killed process has none.
 - The call ends when the shell exits, times out or the run is cancelled; the command's whole process
   group is then killed (on Linux it runs under `setsid`; elsewhere only bash is terminated), so a
   background child (`server &`) does not outlive the call. A host that wants long-running processes

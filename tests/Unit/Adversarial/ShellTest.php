@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Harness\Policy\Shell;
 use Harness\Policy\Verdict;
+use Harness\Tools\Shell\Shell as ShellTool;
 
 /*
  * Shell::deny()'s docblock promises it "matches the program by its base name (`rm`, `/bin/rm`,
@@ -54,4 +55,31 @@ it('peels command, builtin and exec so a deny rule still reaches the wrapped pro
         ->and(Shell::check('builtin rm /tmp/x', $rules)[0])->toBe(Verdict::Deny)
         ->and(Shell::check('exec -a sh rm -rf /tmp/x', $rules)[0])->toBe(Verdict::Deny)
         ->and(Shell::check('command -v rm', $rules)[0])->toBe(Verdict::Deny);
+});
+
+/*
+ * docs/shell.md documents the Shell tool's Result unconditionally: "A non-zero exit, a timeout
+ * or a cancellation is an error result; `value` is the exit code." All three listed conditions
+ * are grouped in one sentence and both clauses ("is an error result" and "value is the exit
+ * code") read as applying to all three -- there is no carve-out saying value is something else
+ * for a timeout or a cancellation.
+ *
+ * Harness\Tools\Shell\Shell::call() does not keep that promise: its Result is built with
+ * `value: null !== $killed ? null : $exit` -- i.e. whenever the call ends by timeout or
+ * cancellation ($killed is set), `value` is hard-coded to `null`, never the exit code. Only a
+ * plain non-zero exit (no kill) gets `value` set to the real exit code. `value` is not cosmetic:
+ * Result's own docblock says it is "what the application gets (in the ToolEnded event)", so a
+ * host that reads `ToolEnded->value` to record what a timed-out command did gets `null` instead
+ * of the exit code docs/shell.md promises.
+ *
+ * Verified directly: a plain `exit 7` gives value=7 as documented; the identical command run
+ * under a timeout that kills it gives value=null, not an int, under both adapters.
+ */
+it('gives a killed call a Result without a value, since a killed process has no exit code', function () {
+    // #18: docs/shell.md promised the exit code for a timeout too; the code never had one to give
+    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir()))->call(['command' => 'sleep 5; exit 7', 'timeout' => 0.2], callFor()));
+
+    expect($r->error)->toBeTrue()
+        ->and($r->content[0]->text)->toStartWith('Killed: timed out after 0.2 s')
+        ->and($r->value)->toBeNull();
 });

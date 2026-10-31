@@ -53,6 +53,7 @@
   as host code, not `ModelError` (#16).
 - `Provider\OpenAI\ChatCompletions`: a refusal's text (`delta.refusal`) is yielded as text, as the
   Responses provider does, not dropped on the way to `Finish(Refusal)` (#17).
+- docs/shell.md: a killed call's `Result::$value` is null, not an exit code it never had (#18).
 
 ### Changed (breaking)
 
