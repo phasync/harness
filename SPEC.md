@@ -1,14 +1,14 @@
 # phasync/harness — specification
 
-Revision 6 (2026-10-31). Revisions 1–5 are 0.0.1-beta1–beta5. Round 5: four of five users call
-the harness complete; the fifth saw a sub-agent loop after many compaction rounds, and a survey of
-pi, OpenCode, Crush, Gemini CLI, Cline/Roo and ACP showed what the mature harnesses do
-differently about compaction and steering. This revision redesigns Compact's summary, splits
-steering into two delivery modes, hardens the shell policy, and names the first adapter module.
-The builder implements this document; sections marked *module* are part of this package but
-live in their own namespace and are never imported by the core.
+Revision 7 (2026-10-31). Revisions 1–6 are 0.0.1-beta1–beta6. Round 6: all five users call the
+harness complete and found no defect; the research readers that looped in round 5 converge on
+the sectioned checkpoint. This revision is the polish round before 0.1.0: it settles the three
+questions the round-6 builder raised, reconciles two sentences with what was built, and closes
+the documentation gaps the users named. No new feature. The builder implements this document;
+sections marked *module* are part of this package but live in their own namespace and are never
+imported by the core.
 
-Changes since revision 5 are marked **[r6]**. Everything not marked is confirmed as built.
+Changes since revision 6 are marked **[r7]**. Everything not marked is confirmed as built.
 
 ## Purpose
 
@@ -33,42 +33,70 @@ allows scope ^0.5, else `dev-main`.
 As built through revision 5 (interrupt-edit-resume, interject, `Options::$contextWindow`, a
 tool's `LogicException` fails the turn with `ErrorKind::ToolError`, `Ended::$queued`).
 
-### [r6] Steering: two delivery modes
+### Steering: two delivery modes
 
 `Run::interject(Message $user, Delivery $delivery = Delivery::Steer)`:
 
-- `Steer` (as built, with one addition from pi): the message lands before the next model call,
+- `Steer` (with one addition from pi): the message lands before the next model call,
   and **the step's tool calls that have not started yet are skipped**, each with an error result
   "Skipped: the user sent a message" so the transcript stays paired; running calls finish.
-- `Queue` **[r6]**: the message waits until the turn would otherwise end `Done`, then starts
+- `Queue`: the message waits until the turn would otherwise end `Done`, then starts
   another step with it (pi's follow-up, OpenCode's `queue`). Several queue in order.
 
 `Interjected(message, delivery)` carries the mode. Leftovers at the end of a turn stay in
 `Ended::$queued` as built. `examples/chat.php`: Enter while streaming steers, Alt+Enter (or a
 `/queue` prefix, since terminals differ) queues.
 
-### [r6] Shaping the tool list is a documented idiom
+### Shaping the tool list is a documented idiom
 
 A `ModelMiddleware` may hand `$next` a `Prompt` with a different `tools` list (Gemini CLI's
 `BeforeToolSelection`): fewer tools for a phase, a tool renamed, a tool added for one step. The
-README shows it in the Middleware section with a test; the loop runs whatever call the model
-makes against the run's `ToolSource` by name, so a tool the middleware removed from the prompt
-but the model still calls is the existing "unknown tool" error result. No new seam.
+README shows it in the Middleware section with a test. **[r7] Confirmed as built:** a call runs
+only if its tool was in the prompt's `tools` after middleware, so a tool the middleware removed
+but the model still calls is the "unknown tool" error result; a resumed call at step 0 and a
+step a middleware answered without the model are checked against the whole `ToolSource`. No
+new seam.
 
-### Documentation **[r6]**
+### Documentation **[r7]**
 
-- A tool's or middleware's `LogicException` is rethrown **inside** the consumer's `foreach`
-  (from the iteration after `TurnEnded`): wrap the loop in `try`, not the code after it.
-- Interrupt and cancel act on the `Run` object of the process that runs the turn: a web host
-  that wants to stop a turn from another request keeps the run in that worker (Swerve) or ends
-  it by closing the client's stream, which cancels the turn as documented.
-- A porting checklist for a hand-written `Model`: `Transport::post()`'s current signature with
-  `$prompt->cancel`, `Prompt::$continue`, `Options::$provider` merging being shallow (a provider
-  whose request nests its knobs under one key must merge that key itself, as Ollama's `options`).
+Round 6's items (LogicException inside the foreach; cancel acts on the running process's `Run`;
+the porting checklist) are built. This round adds, each one or two sentences where the reader
+looks for it:
+
+- README, Options: a thinking model spends output tokens on reasoning first; any `Run` with a
+  tight `maxOutputTokens` against a thinking-capable provider turns thinking off explicitly (the
+  provider knob, as Compact's `summarizerOptions` does) or it ends `Length` with no text.
+  docs/agents.md repeats it for sub-agents, and names the case where the child spends its whole
+  budget on reasoning and ends `Done` with an empty message (finish `Stop`, so AgentTool's
+  cut-off line does not fire): the parent sees "(the agent gave no text)".
+- README, Run: the default `Stop::maxSteps(20)` is stated next to `Reason::Stopped`.
+- `Event\TurnEnded` docblock: it carries the `ErrorKind` only; the exception message is on
+  `Ended::$error` after the generator is drained.
+- CHANGELOG beta6 and README agree: `/queue` is the dependable queue gesture, Alt+Enter is what
+  pi and OpenCode use and depends on the terminal.
+- The `Testing` page lists the event fields a test reads (`ToolEnded::$outcome` is the bare
+  `Result`; `StepStarted::$n`, `StepEnded::$n`).
 
 ## Modules
 
-### Compact (module) **[r6] redesigned summary**
+### Compact (module)
+
+**[r7] Settled from round 6's live result:**
+
+- The default `summarizerOptions` becomes `maxOutputTokens: 2048` (the model wrote 2.2–3.0 KB
+  checkpoints at 1024 and 7 of 22 reader runs failed on the double cut). A checkpoint cut at
+  the output limit twice stays a failure of the step: a prompt over budget must never be sent
+  quietly.
+- Readers re-reading a file listed under *Done* "to verify" is model behaviour; no prompt change.
+- docs/compact.md states: (a) persisted `State` avoids a side call only while the checkpoint's
+  view (its text plus the kept-recent tail) still fits the budget; a request further over budget
+  costs one UPDATE call, never a from-scratch summary; (b) a conversation keeps only its
+  most-covering checkpoint, older ones are evicted on each fold, so branching from an earlier
+  point costs a side call; (c) a checkpoint's *Next* and *Known* may look one action behind for
+  the steps still in the kept-recent tail, which the model sees verbatim: correct, not stale;
+  (d) when none of the overflow targets can shrink the prompt (the declared `contextWindow` is
+  far above the real limit) the ladder logs "nothing more to fold" for each and fails loudly.
+  `Checkpoint`/`State` docblocks say (a) and (b) in one sentence each.
 
 The mechanism stays (a `ModelMiddleware`; the prompt only; the host's transcript untouched;
 calibrated counting; the floor; collapse detection; one instance shared by forks; truncation
@@ -103,7 +131,7 @@ detection). What changes is what a summary is and how it grows, following pi and
   (update preserves facts; latest user message kept; reserve cut; overflow retry sequence;
   State round trip reusing a checkpoint in a fresh instance).
 
-### Policy\Shell (module, **[r6] this round**)
+### Policy\Shell (module)
 
 Crush's rule for the one tool where arguments matter: a `Policy` rule for the shell tool that
 matches **parsed argv**, not the command string.
@@ -120,17 +148,21 @@ peeled and the wrapped command is matched; anything the tokenizer cannot parse (
 backticks, here-docs) is `Ask`. Tested with the usual bypasses (`env rm`, `git status; rm -rf`,
 `ls | sh`, `$(rm)`).
 
-### Acp (module, **[r6] if time allows, after everything above is green**)
+### Acp (module)
 
 The Agent Client Protocol (agentclientprotocol.com, v1) over stdio, as an adapter over the event
 stream: `initialize`, `session/new|load|prompt|cancel`; events → `session/update` (text →
 `agent_message_chunk`, reasoning → `agent_thought_chunk`, tool start/update/end → `tool_call`
-and `tool_call_update` with `kind` from `Hints` and `diff` content for `EditFile`/`WriteFile`,
-`terminal` content for `Shell`); a Policy `Ask` → `session/request_permission` with
+and `tool_call_update` with `kind` from `Hints` and `diff` content for `EditFile`/`WriteFile`;
+**[r7]** shell output is plain text content, the `terminal` variant needs the client's
+`terminal/*` methods which are not used); a Policy `Ask` → `session/request_permission` with
 `allow_once|allow_always|reject_once|reject_always`, the answer resuming the run; `StopReason`
 from `Reason`. Sub-agent pauses flatten into further permission requests; ACP's `fs/*` and
 `terminal/*` client-side I/O is not used (the harness's own tools run). A PHP test client
 (JSON-RPC over pipes) in tests/ drives it; `examples/acp.php` is the agent executable.
+**[r7]** docs/acp.md shows one client-side exchange (`initialize`, `session/new` with its
+required `mcpServers: []`, `session/prompt`, a `session/request_permission` answer) so a client
+author needs no test file. Session `mcpServers` stay unconnected in 0.1; noted under "Not used".
 
 ### Policy, Mcp, Transcript, Agents, Tools, Providers, Testing (modules)
 
@@ -138,8 +170,8 @@ As built.
 
 ## Examples and CLI
 
-As built; `chat.php` gains the queue mode **[r6]**; `web.php` persists `Compact\State` **[r6]**;
-`examples/acp.php` if the module ships.
+As built. **[r7]** `CHANGELOG.md` gets a `## 0.0.1-beta7` section; the builder also writes the
+`## 0.1.0` section header's text as "unreleased" notes so the next tag is a rename.
 
 ## Rules the code follows
 
