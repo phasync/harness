@@ -3,7 +3,9 @@
 declare(strict_types=1);
 
 /*
- * An agent with the file tools over a directory. Writes and edits need your approval on the terminal.
+ * An agent with the file tools over a directory. Writes, edits and patches need your approval on
+ * the terminal; a shared Journal records every change, so typing "undo" (instead of a task) undoes
+ * everything written so far.
  *
  *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/files.php <dir> [task]
  *
@@ -33,10 +35,11 @@ use Harness\Tools\Files;
 // This repository installs two adapters for its tests; an application installs one and skips this line.
 fiber\setup(new FiberInterop\Phasync\Adapter());
 
-$url  = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_OPENAI_URL (and HARNESS_MODEL)\n");
-$dir  = $argv[1] ?? exit("Usage: php examples/files.php <dir> [task]\n");
-$task = \implode(' ', \array_slice($argv, 2));
-$root = new Files\Root($dir);
+$url     = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_OPENAI_URL (and HARNESS_MODEL)\n");
+$dir     = $argv[1] ?? exit("Usage: php examples/files.php <dir> [task]\n");
+$task    = \implode(' ', \array_slice($argv, 2));
+$root    = new Files\Root($dir);
+$journal = new Files\Journal();
 
 // A CLI that only ever answers on the terminal gates in one middleware (see examples/shell.php): it
 // asks, then calls $next() or returns an error Result. This example uses two on purpose, to show the
@@ -90,7 +93,10 @@ $terminal = new class implements ToolMiddleware {
 $model = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default');
 $run   = new Run(
     $model,
-    new Tools(new Files\ReadFile($root), new Files\ListDir($root), new Files\Glob($root), new Files\Grep($root), new Files\WriteFile($root), new Files\EditFile($root)),
+    new Tools(
+        new Files\ReadFile($root), new Files\ListDir($root), new Files\Glob($root), new Files\Grep($root),
+        new Files\WriteFile($root, journal: $journal), new Files\EditFile($root, journal: $journal), new Files\ApplyPatch($root, journal: $journal),
+    ),
     system: "You work on the files in {$root->path} with your tools. Paths are relative to it. Be brief.",
     middleware: [$terminal, $policy],
     options: new Options(maxOutputTokens: 2000),
@@ -116,7 +122,7 @@ function render(Event $e): void
     };
 }
 
-fiber\run(function () use ($run, $task, &$busy) {
+fiber\run(function () use ($run, $task, $journal, &$busy) {
     do {
         if ('' === $task) {
             echo "\n\e[1mtask>\e[0m ";
@@ -126,6 +132,12 @@ fiber\run(function () use ($run, $task, &$busy) {
             }
             $task = \trim($line);
             if ('' === $task) {
+                continue;
+            }
+            if ('undo' === $task) {
+                $paths = $journal->undo();
+                echo [] === $paths ? "\e[2mNothing to undo\e[0m\n" : "\e[2mUndone: " . \implode(', ', $paths) . "\e[0m\n";
+                $task = '';
                 continue;
             }
             $once = false;
