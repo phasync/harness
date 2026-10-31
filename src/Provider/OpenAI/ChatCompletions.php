@@ -99,6 +99,9 @@ final readonly class ChatCompletions implements Model
         if (null !== $usage) {
             yield $usage;
         }
+        if (('tool_calls' === $finish || 'function_call' === $finish) && [] === $ids) {
+            throw new ModelException(ErrorKind::ModelError, "The reply ended with finish_reason $finish but holds no tool call");
+        }
         yield new Finish(match ($finish) {
             'stop'                          => FinishReason::Stop,
             'tool_calls', 'function_call'   => FinishReason::ToolCalls,

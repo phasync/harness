@@ -101,6 +101,16 @@
   from inside the `TurnEnded` handler and have the earlier turn's misuse exception surface after it (#41).
 - `web_fetch` decodes a gzip or deflate `Content-Encoding` instead of handing the compressed bytes to
   the model as text; any other encoding is an error result. Requires ext-zlib (#42).
+- `Tools\Shell\Shell` refuses a `timeout` that is not a positive finite number, a `maxTimeout` below
+  it (#43) and a `cwd` the process cannot enter (#44) at construction, instead of failing every call.
+- A Chat Completions reply ending `finish_reason: tool_calls` with no tool call is a `ModelException`,
+  as #39 for Anthropic (#45).
+- The JSON string literal `list_dir`, `glob` and `grep` show for a name holding a control character
+  is accepted back as a `path` by every file tool (#46).
+- A turn's misuse exception is thrown from the `break` that leaves the loop at `TurnEnded`, instead of
+  escaping `fiber\run()` unhandled (#47).
+- `web_fetch` feeds a compressed body to the decoder in small slices, so a page that inflates far
+  beyond `maxBytes` costs about that much memory, not tens of MB (#48).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 

@@ -217,3 +217,58 @@ it('decodes a gzip-encoded response instead of returning compressed bytes as tex
 
     expect($text)->toBe($plain);
 }); // #42: the compressed bytes came back as the page text
+
+/*
+ * WebFetch's docblock now says the response body "is read up to maxBytes ... of decoded bytes
+ * and then stopped" (the #42 fix). `fetch()` (WebFetch.php) only checks that budget BETWEEN
+ * chunks: `$body .= self::inflate($inflate, $chunk, $url); if (\strlen($body) >= maxBytes) break;`.
+ * A single `inflate_add()` call decodes a WHOLE chunk in one go with no size limit of its own --
+ * DEFLATE's maximum expansion ratio is roughly 1000:1, so one ordinary ~8 KB raw chunk read off
+ * the socket (StreamTransport reads at most 65536 bytes per `fread()`) can decode to several
+ * megabytes before the loop ever gets a chance to check `maxBytes`. A caller who set a small
+ * `maxBytes` specifically to bound memory use for untrusted pages gets no such bound: the single
+ * oversized chunk is fully decoded and held in memory first, and only the final *output* is
+ * truncated to `maxBytes` after the fact -- a classic decompression-bomb DoS against the one
+ * knob the API exposes to prevent it.
+ */
+it('does not decode a single compressed chunk far past maxBytes before checking it', function () {
+    // A highly compressible gzip body built without ever holding its full decompressed size in
+    // this process at once (each push is a reused 1 MB chunk) -- the bomb itself costs this test
+    // process almost nothing, as it would cost a real attacker almost nothing to serve it.
+    $deflate = \deflate_init(\ZLIB_ENCODING_GZIP);
+    $gzip    = '';
+    $chunk   = \str_repeat('0', 1024 * 1024);
+    for ($i = 0; $i < 200; ++$i) { // 200 MB decompressed, from ~200 KB compressed
+        $gzip .= \deflate_add($deflate, $chunk, \ZLIB_NO_FLUSH);
+    }
+    $gzip .= \deflate_add($deflate, '', \ZLIB_FINISH);
+
+    \gc_collect_cycles();
+    $before = \memory_get_peak_usage(true);
+
+    \fiber\run(function () use ($gzip) {
+        $server = \stream_socket_server('tcp://127.0.0.1:0');
+        $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+        go(function () use ($server, $gzip) {
+            $conn    = \stream_socket_accept(readable($server), 0);
+            $request = '';
+            while (!\str_contains($request, "\r\n\r\n")) {
+                $request .= \fread(readable($conn), 65536);
+            }
+            \fwrite(writable($conn), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: " . \strlen($gzip) . "\r\n\r\n" . $gzip);
+            \fclose($conn);
+            \fclose($server);
+        });
+        // A caller who sets maxBytes: 1000 is explicitly asking web_fetch not to hold more than
+        // about a kilobyte of this response in memory.
+        $fetch = new WebFetch(new StreamTransport(), 'agent', allowPrivate: true, maxBytes: 1000);
+        $fetch->call(['url' => "http://127.0.0.1:$port/"], TestCall::make());
+    });
+
+    $after = \memory_get_peak_usage(true);
+
+    // Today: this process's peak memory grows by several MEGABYTES decoding a response capped
+    // at maxBytes: 1000 -- a single inflate_add() call on one ~8 KB raw chunk already decodes to
+    // several MB before `fetch()`'s size check ever runs.
+    expect($after - $before)->toBeLessThan(1024 * 1024);
+}); // #48: one inflate_add() per transport chunk grew peak memory by 6-10 MB against maxBytes 1000

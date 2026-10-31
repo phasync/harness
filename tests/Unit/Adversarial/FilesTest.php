@@ -184,3 +184,23 @@ it('does not let a filename\'s embedded newline forge an extra directory entry',
 
     expect(\explode("\n", $r->content[0]->text))->toBe(['"evil.txt\\nfake.php"', 'real.txt']);
 }); // #38: three lines, as if "fake.php" were its own file; now the name is one JSON string literal
+
+/*
+ * Round 8, attacking the #38 fix. docs/files.md now says, of a name holding a control character:
+ * "listed as a JSON string literal... pass that string back as the `path`." That is an explicit
+ * instruction to the model to copy the exact quoted text `list_dir`/`glob`/`grep` showed it --
+ * quotes and escapes included -- into `path`. `Root::resolve()` (and every tool built on it) does
+ * no JSON-decoding at all: it treats the quote marks and the literal backslash-n as ordinary path
+ * characters, so the one string the docs say to pass back is the one string that cannot resolve to
+ * the file it names. Only the *decoded* name (with a real embedded newline) works -- the opposite
+ * of what a model following the docs verbatim would send -- and the resulting "does not exist"
+ * error gives no hint that the text needs unquoting.
+ */
+it('accepts the exact JSON-quoted name list_dir told it to pass back as the path', function () {
+    \file_put_contents($this->dir . '/' . "evil.txt\nfake.php", "secret\n");
+    $shown = \trim((new ListDir($this->root))->call([], callFor())->content[0]->text);
+    expect($shown)->toBe('"evil.txt\nfake.php"'); // docs/files.md: "pass that string back as the path"
+
+    $result = (new ReadFile($this->root))->call(['path' => $shown], callFor());
+    expect($result->content[0]->text)->toContain('secret');
+}); // #46: the literal the docs said to pass back was "does not exist"

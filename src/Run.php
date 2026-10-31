@@ -150,8 +150,8 @@ final class Run
      * `parent`, and cancelling the outer run cancels this turn too. Must be iterated
      * inside `fiber\run()`. Delivery is synchronous: the turn goes on after an event only once the
      * consumer asks for the next one. Breaking out of the loop cancels the turn. A `\LogicException` (misuse,
-     * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`.
-     * The next turn may start once this generator has finished or been released: not from inside
+     * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`,
+     * or from the `break` that leaves the loop there. The next turn may start once this generator has finished or been released: not from inside
      * the `TurnEnded` handler.
      *
      * @param Message|Resume|list<Answer> $input
@@ -197,6 +197,7 @@ final class Run
             $this->open    = false;
             throw $e;
         }
+        $event = null;
         try {
             while (($event = $queue->next()) !== null) {
                 yield $event;
@@ -208,6 +209,9 @@ final class Run
                 $this->cancel();
             }
             $queue->detach();
+            if ($event instanceof TurnEnded) {
+                await($task); // the host left the loop at TurnEnded: a misuse exception still surfaces here, not from fiber\run()
+            }
         }
     }
 

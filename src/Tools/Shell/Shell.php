@@ -36,6 +36,15 @@ final readonly class Shell implements Tool
         if (!\is_dir($cwd)) {
             throw new \InvalidArgumentException("Shell cwd '$cwd' is not a directory");
         }
+        if (!\is_executable($cwd)) {
+            throw new \InvalidArgumentException("Shell cwd '$cwd' cannot be entered by this process (no execute permission)");
+        }
+        if (!($timeout > 0.0) || \is_infinite($timeout)) {
+            throw new \InvalidArgumentException('Shell timeout is a positive number of seconds, got ' . \var_export($timeout, true));
+        }
+        if (!($maxTimeout >= $timeout) || \is_infinite($maxTimeout)) {
+            throw new \InvalidArgumentException("Shell maxTimeout is at least the default timeout ($timeout s), got " . \var_export($maxTimeout, true));
+        }
         if ($maxOutput < 2) {
             throw new \InvalidArgumentException("Shell maxOutput is at least 2 bytes (one for the head, one for the tail), got $maxOutput");
         }

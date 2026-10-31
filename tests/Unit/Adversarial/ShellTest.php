@@ -273,3 +273,46 @@ it('refuses a shell rule program name with whitespace, which could never match a
     expect(fn () => Shell::deny('rm '))
         ->toThrow(InvalidArgumentException::class, 'whitespace');
 }); // #40: constructed fine and matched nothing, so 'rm -rf /' was Ask
+
+/*
+ * #37 established the precedent for this constructor: a parameter that could never do its job
+ * (`maxOutput` below 2, which cannot hold even one byte on each side of a cut) is refused at
+ * construction with an instructive `InvalidArgumentException`, not left to misbehave at call
+ * time. `timeout` and `maxTimeout` get no such check -- `new Shell($cwd, timeout: 0)` and `new
+ * Shell($cwd, timeout: -5.0)` both construct without complaint, even though every single future
+ * call is now broken by it.
+ *
+ * The breakage lands on the *model*, not the host who misconfigured it: `Shell::call()` reads
+ * `$timeout = $input['timeout'] ?? $this->timeout` and, when the model's tool call omits
+ * `timeout` (the ordinary case -- the spec says it is optional, with "default
+ * {$this->timeout} s"), the broken construction-time default flows straight into `if (...
+ * $timeout <= 0) { throw new Retry("'timeout' must be a positive number of seconds"); }`. The
+ * model gets told its input is wrong and should retry -- but the model supplied no `timeout` at
+ * all; the host's own default is what failed the check. Every call to this tool, for as long as
+ * it exists, hits the identical confusing `Retry`, for a mistake entirely outside the model's
+ * control, when #37's own ruling says this class of misconfiguration belongs at construction.
+ *
+ * Verified directly: `new Shell($cwd, timeout: 0)` constructs successfully; calling it with
+ * `['command' => 'echo hi']` (no `timeout` key, exactly as the spec invites) throws
+ * `Harness\Retry: 'timeout' must be a positive number of seconds` -- never reaching bash at all.
+ */
+it('refuses a non-positive timeout at construction, like #37 refused a too-small maxOutput', function (float $timeout) {
+    expect(fn () => new ShellTool(\sys_get_temp_dir(), timeout: $timeout))
+        ->toThrow(InvalidArgumentException::class, 'positive number of seconds');
+})->with([0.0, -5.0, \NAN, \INF]); // #43: constructed fine; every call without a 'timeout' input was a Retry blaming the model
+
+it('refuses a maxTimeout below the default timeout and a cwd it cannot enter', function () {
+    expect(fn () => new ShellTool(\sys_get_temp_dir(), timeout: 10.0, maxTimeout: 5.0))
+        ->toThrow(InvalidArgumentException::class, 'at least the default timeout');
+    if (0 === \posix_geteuid()) {
+        return; // root enters any directory
+    }
+    $dir = \sys_get_temp_dir() . '/harness-locked-' . \bin2hex(\random_bytes(4));
+    \mkdir($dir, 0o000);
+    try {
+        expect(fn () => new ShellTool($dir))->toThrow(InvalidArgumentException::class, 'cannot be entered');
+    } finally {
+        \chmod($dir, 0o700);
+        \rmdir($dir);
+    }
+}); // #44: the first call failed with 'Could not start bash' and no word about the cwd

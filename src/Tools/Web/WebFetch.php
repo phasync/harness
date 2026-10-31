@@ -176,9 +176,13 @@ final readonly class WebFetch implements Tool
         };
         $body = '';
         foreach ($response->body() as $chunk) {
-            $body .= null === $inflate ? $chunk : self::inflate($inflate, $chunk, $url);
-            if (\strlen($body) >= $this->maxBytes) {
-                break;
+            // compressed input is fed in small slices: DEFLATE expands up to ~1000:1, so one whole
+            // transport chunk could decode to tens of MB before maxBytes is looked at
+            foreach (null === $inflate ? [$chunk] : \str_split($chunk, 256) as $piece) {
+                $body .= null === $inflate ? $piece : self::inflate($inflate, $piece, $url);
+                if (\strlen($body) >= $this->maxBytes) {
+                    break 2;
+                }
             }
         }
 

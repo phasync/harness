@@ -383,3 +383,58 @@ it('does not report ToolCalls when stop_reason says tool_use but no tool_use blo
             ->and($e->getMessage())->toContain('no tool_use block');
     }
 }); // #39: Finish(ToolCalls) with no tool call in the stream
+
+/*
+ * Round 8's attack on #39 and its siblings:
+ *
+ * - The converse for Anthropic (a real tool_use block present, but `stop_reason: end_turn`):
+ *   executed through a full `Run` with a real tool. The tool IS run -- `Run::loop()` decides
+ *   whether to execute tools purely from `$message->parts` holding a `ToolCall` (src/Run.php:
+ *   `$calls = array_filter($message->parts, ... instanceof ToolCall)`), never from the `Finish`
+ *   value, so nothing is silently skipped. `Finish(Stop)` for a turn that did call a tool is an odd
+ *   label but not a wrong *result*, and docs/anthropic.md's mapping is a direct, unconditional
+ *   value table ("`end_turn`/`stop_sequence` -> Stop") with no stated exception for a tool_use
+ *   block being present -- not a new defect.
+ * - Responses `response.completed` with `status: "incomplete"` and `incomplete_details.reason:
+ *   max_output_tokens`: traced the code -- the `Finish` match keys only on `$e['type']`
+ *   ('response.completed' vs 'response.incomplete'), so a `response.completed` event always maps to
+ *   Stop/ToolCalls/Refusal by the `$refused`/`$called` flags, never Length, regardless of what
+ *   `status`/`incomplete_details` the `response` object carries alongside it; docs/openai.md ties
+ *   Length specifically to the `response.incomplete` *event type*, which is what the real API sends
+ *   for a token-limited cutoff -- a `response.completed` event carrying `status: incomplete` would
+ *   be the API contradicting its own event-type contract, not a gap in this code. Not pursued
+ *   further as a defect of ours.
+ * - There is no docs/run.md in this repo; README.md and Accumulator's own docblock were checked for
+ *   a promise that a truncated tool call's error result tells the model exactly *why* the input was
+ *   unusable (max_tokens vs. a genuine formatting mistake): neither says anything about that
+ *   distinction (Accumulator's docblock only promises "the reason quotes at most 500 bytes of the
+ *   input and gives its length"), so the earlier "not valid JSON" framing not naming truncation does
+ *   not break a stated contract -- not pinned as a regression per the coordinator's own conditional
+ *   ("if the docs anywhere promise it").
+ *
+ * - The one that reproduces: `ChatCompletions::stream()` has no guard at all analogous to #39's
+ *   fix. `finish_reason: 'tool_calls'` maps straight to `FinishReason::ToolCalls` regardless of
+ *   whether `$ids` (the tool calls actually seen) is empty -- the exact same defect class #39 fixed
+ *   in `Anthropic\Messages`, now confirmed present in the sibling OpenAI provider in this same
+ *   module.
+ *
+ * Verified directly against the real code (both adapters): a stream with ordinary `content` text
+ * and `finish_reason: "tool_calls"` -- no `tool_calls` delta anywhere -- yields `Finish(ToolCalls)`
+ * with no `ToolCallStart`/`ToolCallEnd` ever emitted.
+ */
+it('does not report ToolCalls when finish_reason says tool_calls but none were ever started', function () {
+    $body = 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => ['content' => 'Hello, no tools here.'], 'finish_reason' => null]]]) . "\n\n"
+          . 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => [], 'finish_reason' => 'tool_calls']]]) . "\n\n"
+          . "data: [DONE]\n\n";
+    $model = new ChatCompletions(new FakeTransport(new Response(200, [], \str_split($body, 19))), 'http://h/v1', 'm');
+
+    // Today: no exception, and the deltas end with Finish(ToolCalls) with no tool call anywhere in
+    // the stream -- the same defect class #39 fixed in Anthropic\Messages, unguarded here.
+    try {
+        [...$model->stream(new Prompt(null, [], [], new Options(), live()))];
+        $this->fail('no exception');
+    } catch (ModelException $e) {
+        expect($e->kind)->toBe(ErrorKind::ModelError)
+            ->and($e->getMessage())->toContain('holds no tool call');
+    }
+}); // #45: Finish(ToolCalls) with no tool call in the stream, as #39 in Messages

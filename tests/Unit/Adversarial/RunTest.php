@@ -351,3 +351,62 @@ it('does not let a nested turn() defer the previous turn\'s exception past it', 
         ->and($nested->getMessage())->toContain('still open')
         ->and($threw)->toBeInstanceOf(UnsupportedOptionException::class);
 }); // #41: the nested turn ran to completion and the first turn's exception surfaced after it
+
+/*
+ * Round 8: attacking the #41 fix from the angle it did not cover -- a host that simply `break`s
+ * out of the foreach right at `TurnEnded` of a turn that failed with a misuse `\LogicException`,
+ * and never resumes or releases the generator (no nested turn(), just normal code going on).
+ *
+ * `turn()`'s docblock promises: "A \LogicException (misuse, such as an option the provider
+ * cannot honour) is rethrown from the iteration after TurnEnded." But that rethrow only exists in
+ * the generator's own code as `await($task);`, reached only once the `while (($event =
+ * $queue->next()) !== null)` loop exits normally -- which requires the consumer to keep asking
+ * for events past `TurnEnded`. A `break` right at `TurnEnded` is exactly the pattern the same
+ * docblock endorses one line earlier ("Breaking out of the loop cancels the turn"), and it is a
+ * completely ordinary way to consume the stream (check the reason at `TurnEnded`, then stop).
+ * When the generator is later destroyed (going out of scope, or GC), PHP only runs its pending
+ * `finally` block (`$this->open = false; ...; $queue->detach();`); it does not resume execution
+ * to reach `await($task)`, so the exception is never "rethrown from the iteration" at all -- that
+ * promise is structurally unreachable once the host breaks.
+ *
+ * Instead, the still-running background task (the `go()`-spawned coroutine that failed with the
+ * LogicException) is simply abandoned, unawaited. Nothing in `turn()`'s docblock, the README's
+ * "rethrown from the iteration after TurnEnded" line, or `Ended`'s docblock documents what happens
+ * to that exception then. Verified directly against the real code with both adapters: it escapes
+ * all the way past `\fiber\run()` itself -- not caught by a `try`/`catch` the host wrapped around
+ * the very `foreach` that iterates the turn, inside the same `fiber\run()` closure, but only by a
+ * `try`/`catch` around the `\fiber\run()` call itself. A host whose error handling (reasonably,
+ * following the documented contract) wraps only the turn-consuming code never sees the exception
+ * there at all; it surfaces from a scope the docs never mention.
+ */
+it('does not let a misuse exception escape past fiber\run() when the host breaks at TurnEnded', function () {
+    $model = new FakeModel(static function () {
+        throw new UnsupportedOptionException('no temperature here');
+    });
+    $run         = new Harness\Run($model, new Tools());
+    $caughtInner = null;
+    $caughtOuter = null;
+
+    try {
+        \fiber\run(function () use ($run, &$caughtInner) {
+            try {
+                foreach ($run->turn(new Message(Role::User, [new Text('go')])) as $e) {
+                    if ($e instanceof Harness\Event\TurnEnded) {
+                        break;  // an ordinary way to consume the stream; never resumed again
+                    }
+                }
+            } catch (Throwable $ex) {
+                $caughtInner = $ex;
+            }
+        });
+    } catch (Throwable $ex) {
+        $caughtOuter = $ex;
+    }
+
+    // Today: $caughtInner is null and $caughtOuter is the UnsupportedOptionException -- the
+    // exception the docs promise "is rethrown from the iteration after TurnEnded" instead escapes
+    // past fiber\run() entirely, bypassing a try/catch the host placed around the very foreach
+    // that consumes the turn, exactly as the docblock's own example shows.
+    expect($caughtInner)->toBeInstanceOf(UnsupportedOptionException::class)
+        ->and($caughtOuter)->toBeNull();
+}); // #47: the failed task's exception surfaced from fiber\run(), past the host's handler
