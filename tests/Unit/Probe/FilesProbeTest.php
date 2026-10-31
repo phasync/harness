@@ -46,3 +46,45 @@ it('fails to delete a file that does not exist in a patch', function () {
     expect(fn () => $apply->call(['patch' => $patch], callFor()))
         ->toThrow(RuntimeException::class, "'missing.txt' does not exist");
 });
+
+it('loses the second of two separate "Update File" sections for the same file, though both report success', function () {
+    // BUG: two separate "*** Update File: config.php" sections (not two @@ hunks under one
+    // section) targeting the same file. ApplyPatch::call() plans every section with
+    // planUpdate(), which calls file_get_contents($abs) itself (ApplyPatch.php line 110) -
+    // always from disk, never from an earlier section's planned content - and then merges every
+    // section's planned write with `$writes = $writes + $fileWrites` (line 55). PHP's array `+`
+    // keeps the LEFT operand's value on a colliding key, so the second section's write for the
+    // same path is silently discarded, while both sections still report "Updated ... (+1 -1)" as
+    // if they had landed.
+    //
+    // 5-line reproduction:
+    //   file:  "<?php\n$a = 1;\n$b = 2;\n"
+    //   patch: *** Update File: f  @@  $a=1; -$b=2; +$b=20;
+    //          *** Update File: f  @@  <?php -$a=1; +$a=2;
+    //   both sections report success; the file on disk ends up "$a = 1;\n$b = 20;\n" - the
+    //   second section's $a=2 edit never reaches disk.
+    \file_put_contents($this->dir . '/config.php', "<?php\n\$a = 1;\n\$b = 2;\n");
+
+    $patch = <<<'PATCH'
+    *** Begin Patch
+    *** Update File: config.php
+    @@
+     $a = 1;
+    -$b = 2;
+    +$b = 20;
+    *** Update File: config.php
+    @@
+     <?php
+    -$a = 1;
+    +$a = 2;
+    *** End Patch
+    PATCH;
+
+    $apply  = new ApplyPatch($this->root);
+    $result = $apply->call(['patch' => $patch], callFor());
+
+    // Both sections claim to have updated the file...
+    expect(\substr_count($result->content[0]->text, "Updated 'config.php' (+1 -1)"))->toBe(2)
+        // ...and the file must actually hold both edits, not just the first section's.
+        ->and(\file_get_contents($this->dir . '/config.php'))->toBe("<?php\n\$a = 2;\n\$b = 20;\n");
+});

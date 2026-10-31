@@ -7,13 +7,17 @@ use Harness\FinishReason;
 use Harness\Http\Response;
 use Harness\Message;
 use Harness\Options;
+use Harness\Part\Media;
 use Harness\Part\Reference;
 use Harness\Part\Text;
+use Harness\Part\ToolCall;
+use Harness\Part\ToolResult;
 use Harness\Prompt;
 use Harness\Provider\Anthropic\Messages as AnthropicMessages;
 use Harness\Provider\OpenAI\ChatCompletions;
 use Harness\Role;
 use Harness\Testing\FakeTransport;
+use Harness\ToolSpec;
 use Harness\Usage;
 
 it('maps a user message with a reference part that has a title', function () {
@@ -42,4 +46,28 @@ it('maps Anthropic message_delta with stop_reason max_tokens to FinishReason::Le
         ->and($last[0]->output)->toBe(20)
         ->and($last[1])->toBeInstanceOf(Finish::class)
         ->and($last[1]->reason)->toBe(FinishReason::Length);
+});
+
+it('sends Anthropic tool result with Media (image) in request body', function () {
+    $respBody = "event: message_start\ndata: " . \json_encode(['message' => ['id' => 'm', 'usage' => ['input_tokens' => 5, 'output_tokens' => 1]]]) . "\n\nevent: message_delta\ndata: " . \json_encode(['delta' => ['stop_reason' => 'end_turn']]) . "\n\nevent: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n";
+    $t        = new FakeTransport(new Response(200, [], \str_split($respBody, 23)));
+    $msgs     = [
+        user('help'),
+        new Message(Role::Assistant, [new Text('I need an image'), new ToolCall('tu1', 'get_image', [])]),
+        new Message(Role::User, [new ToolResult('tu1', [new Media('image/png', 'PNG')], false)]),
+    ];
+    [...(new AnthropicMessages($t, 'key', 'claude-x'))->stream(new Prompt(null, $msgs, [new ToolSpec('get_image', 'Get', ['type' => 'object'])], new Options(), live()))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body['messages'][2])->toBe([
+        'role'    => 'user',
+        'content' => [[
+            'type'        => 'tool_result',
+            'tool_use_id' => 'tu1',
+            'content'     => [[
+                'type'   => 'image',
+                'source' => ['type' => 'base64', 'media_type' => 'image/png', 'data' => \base64_encode('PNG')],
+            ]],
+            'is_error' => false,
+        ]],
+    ]);
 });

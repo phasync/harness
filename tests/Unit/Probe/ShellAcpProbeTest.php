@@ -38,3 +38,39 @@ it('does not leave background children alive', function () {
         }
     }
 });
+
+it('returns promptly when background child holds the pipe', function () {
+    if (!\function_exists('posix_kill')) {
+        $this->markTestSkipped('posix_kill not available');
+    }
+
+    $start = \microtime(true);
+    $r     = \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
+        ['command' => '(sleep 5) >/dev/null 2>&1 & echo $!'],
+        callFor()
+    ));
+    $elapsed = \microtime(true) - $start;
+
+    expect($elapsed)->toBeLessThan(0.5)
+        ->and($r->content[0]->text)->toContain('Exit code 0');
+
+    if (\preg_match('/Exit code 0\n(\d+)/', $r->content[0]->text, $m)) {
+        $pid = (int) $m[1];
+        expect($pid)->toBeGreaterThan(0);
+
+        // The group gets SIGKILL'd promptly, but the killed grandchild is reparented (its own
+        // parent, the backgrounded subshell, is dead too) and lingers as a zombie until whatever
+        // reaps it gets around to it - a race the Shell tool does not control. Poll briefly
+        // instead of checking once: a single immediate check is flaky under load (observed
+        // failing when the whole suite runs, though it passes every time alone).
+        $dead = false;
+        for ($i = 0; $i < 20; ++$i) {
+            if (!\posix_kill($pid, 0)) {
+                $dead = true;
+                break;
+            }
+            \usleep(50000);
+        }
+        expect($dead)->toBeTrue();
+    }
+});

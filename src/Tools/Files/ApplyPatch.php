@@ -49,11 +49,13 @@ final readonly class ApplyPatch implements Tool
             [$report, $fileWrites, $fileDeletes] = match ($section->kind) {
                 SectionKind::Add    => $this->planAdd($section),
                 SectionKind::Delete => $this->planDelete($section),
-                SectionKind::Update => $this->planUpdate($section),
+                SectionKind::Update => $this->planUpdate($section, $writes),
             };
             $reports[] = $report;
-            $writes    = $writes + $fileWrites;
-            $deletes   = [...$deletes, ...$fileDeletes];
+            foreach ($fileWrites as $abs => $content) {
+                $writes[$abs] = $content; // a later section for the same file continues from the earlier one's result
+            }
+            $deletes = [...$deletes, ...$fileDeletes];
         }
 
         foreach ($deletes as $abs) {
@@ -101,15 +103,20 @@ final readonly class ApplyPatch implements Tool
     }
 
     /** @return array{0: string, 1: array<string, string>, 2: list<string>} */
-    private function planUpdate(Section $section): array
+    /** @param array<string, string> $pending content already planned for a path by an earlier section */
+    private function planUpdate(Section $section, array $pending): array
     {
         $abs = $this->root->resolve($section->path);
-        if (!\is_file($abs)) {
-            throw new \RuntimeException("'{$section->path}' does not exist");
-        }
-        $content = \file_get_contents($abs);
-        if (false === $content) {
-            throw new \RuntimeException("'{$section->path}' could not be read");
+        if (isset($pending[$abs])) {
+            $content = $pending[$abs];
+        } else {
+            if (!\is_file($abs)) {
+                throw new \RuntimeException("'{$section->path}' does not exist");
+            }
+            $content = \file_get_contents($abs);
+            if (false === $content) {
+                throw new \RuntimeException("'{$section->path}' could not be read");
+            }
         }
 
         $added   = 0;

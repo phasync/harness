@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use Harness\Http\Response;
+use Harness\Mcp\HttpConnection;
 use Harness\Mcp\McpException;
 use Harness\Mcp\McpServer;
 use Harness\Mcp\StdioConnection;
+use Harness\Testing\FakeTransport;
 
 it('rejects StdioConnection with empty command list', function () {
     expect(fn () => new StdioConnection([]))->toThrow(InvalidArgumentException::class, 'non-empty list');
@@ -29,4 +32,15 @@ it('throws McpException for a nonexistent command without leaking a PHP warning'
         \restore_error_handler();
     }
     expect($warnings)->toBe([]);
+});
+
+it('throws when HttpConnection receives a 500 response instead of JSON', function () {
+    $json      = fn (array $result) => fn ($url, $headers, $body) => new Response(200, ['content-type' => 'application/json'], [\json_encode(['jsonrpc' => '2.0', 'id' => \json_decode($body, true)['id'], 'result' => $result])]);
+    $transport = new FakeTransport(
+        $json(['resultType' => 'complete', 'supportedVersions' => ['2026-07-28'], 'capabilities' => ['tools' => []]]),
+        fn () => new Response(500, ['content-type' => 'text/plain'], ['Internal Server Error'])
+    );
+    $server = new McpServer(new HttpConnection($transport, 'https://example.com/mcp'));
+    expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
+        ->toThrow(McpException::class, 'HTTP 500');
 });

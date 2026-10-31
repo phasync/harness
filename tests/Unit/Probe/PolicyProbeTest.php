@@ -40,3 +40,12 @@ it('detects double semicolon (case statement) as unparseable', function () {
     expect($verdict)->toBe(Verdict::Ask)
         ->and($reason)->toContain(';;');
 });
+
+it('validates flags with = value syntax against the allow rule flag list', function () {
+    // --stat=value should be allowed (--stat is in the allowed flags list)
+    expect(verdictOfProbe('git status --stat=file.txt'))->toBe(Verdict::Allow)
+        // --oneline=custom should be allowed (--oneline is in the allowed flags list)
+        ->and(verdictOfProbe('git diff --oneline=no'))->toBe(Verdict::Allow)
+        // --unknown=value should ask (--unknown is not in the allowed flags list)
+        ->and(verdictOfProbe('git status --unknown=value'))->toBe(Verdict::Ask);
+});

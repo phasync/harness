@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Harness\Testing\FakeTransport;
+use Harness\Tools\Web\Html;
 use Harness\Tools\Web\WebFetch;
 
 it('refuses IPv6 localhost address ::1 as SSRF guard', function () {
@@ -30,4 +31,9 @@ it('refuses host localhost. (trailing dot) as SSRF guard', function () {
     $fetch = new WebFetch(new FakeTransport(), 'agent');
     expect(fn () => $fetch->call(['url' => 'http://localhost./internal'], callFor()))
         ->toThrow(RuntimeException::class, 'SSRF guard');
+});
+
+it('renders a table with nested inline tags in cells', function () {
+    expect(Html::extract('<table><tr><td>Text <b>bold</b> here</td><td><a href="http://x">link</a></td></tr></table>'))
+        ->toBe('Text bold here | link (http://x)');
 });
