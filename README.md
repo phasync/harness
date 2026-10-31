@@ -162,8 +162,9 @@ one of two ways, each landing with an `Interjected(message, delivery)` event:
 
 Those that cannot land before the turn ends (it stopped, paused, failed or was cancelled) are in
 `Ended::$queued`, the steering ones first. With no turn running it throws: use `turn()`.
-[`examples/chat.php`](examples/chat.php) steers with a line typed while a reply streams and queues
-one that starts with `/queue`.
+[`examples/chat.php`](examples/chat.php) steers with a line typed while a reply streams; one ended
+with Alt+Enter or starting with `/queue` (terminals differ in what they send for Alt+Enter) queues
+instead.
 
 ### The context window
 
@@ -487,6 +488,12 @@ Each lives in its own namespace; the core never imports one.
 
 `Options::$provider` is keyed by the provider module's lowercase name (`openai`, `anthropic`); a
 third-party provider documents its own key.
+
+A thinking model spends its output tokens on reasoning first: a `Run` with a tight
+`maxOutputTokens` against a thinking-capable provider ends `Done` with finish `Length` and no text
+unless thinking is turned off explicitly, through that provider's knob in `Options::$provider`
+(`Harness\Compact`'s `summarizerOptions` does this for its side call; see
+[docs/compact.md](docs/compact.md)).
 
 Porting a hand-written `Model` from an earlier beta, check:
 

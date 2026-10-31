@@ -9,7 +9,9 @@ namespace Harness\Compact;
  * and its latest `Checkpoint`s, newest first, one per conversation it serves (at most 8). A JSON
  * value: a host that builds a `Compact` per request persists `toArray()` next to the conversation
  * and passes `State::fromArray()` to the next one, which then starts calibrated and serves the
- * checkpoint it has without a side call.
+ * checkpoint it has without a side call. That saves a side call outright only while the restored
+ * checkpoint's view still fits the request's budget; further over budget it still saves work, by
+ * costing one UPDATE call rather than a from-scratch summary.
  */
 final readonly class State implements \JsonSerializable
 {

@@ -42,3 +42,10 @@ $model  = new FakeModel([new TextDelta('ok'), new Finish(FinishReason::Stop)]);
 $deltas = [...$compact->stream(TestPrompt::make('sys', $messages), fn (Prompt $p) => $model->stream($p))];
 assert($model->prompts[0]->messages !== $messages);   // what the middleware handed on
 ```
+
+## Event fields a test reads
+
+- `Event\ToolEnded::$outcome` is the bare `Result` (or the `\Throwable` it threw), not wrapped: a
+  test asserts on it directly (`assert($event->outcome instanceof Result)`).
+- `Event\StepStarted::$n` and `Event\StepEnded::$n` are the step number, so a test can assert how
+  many model calls a turn made, or that a resumed turn's first step is `0`.

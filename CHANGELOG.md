@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.1.0 (unreleased)
+
+phasync/harness is the runtime between a model and an application: the tool loop, a typed event
+stream, one pause-and-resume contract for input and interruption, and two middleware seams
+(`ModelMiddleware`, `ToolMiddleware`). It renders nothing and speaks no protocol in its core.
+Modules over the core's interfaces add providers (OpenAI Chat Completions and Responses, Anthropic
+Messages with thinking), file tools, a shell tool, MCP client support, sub-agents, a transcript,
+a context-budget `Compact` middleware that folds the conversation into a sectioned checkpoint, a
+`Policy` for tool approval including parsed-shell rules, fakes for testing without a model, and an
+Agent Client Protocol agent for editors. Concurrency goes through `fiber-interop/api` only; the
+suite runs identically under the `fiber-interop/phasync` and `fiber-interop/revolt` adapters.
+
+## 0.0.1-beta7
+
+Implements SPEC.md revision 7, the polish round before 0.1.0: round 6's five users called the
+harness complete and found no defect, so this release changes no behaviour beyond one default, and
+closes the documentation gaps the round-6 users named.
+
+### Changed
+
+- **`Compact`'s default `summarizerOptions` becomes `maxOutputTokens: 2048`** (from 1,024): live on
+  black at the old default, round 6's readers wrote checkpoints of 2.2 to 3.0 KB and 7 of 22 runs
+  failed on a checkpoint cut twice at the output limit.
+
+### Docs
+
+- README: the thinking-off idiom (a thinking model spends output tokens on reasoning first; turn it
+  off through the provider's knob in `Options::$provider`, as `Compact`'s `summarizerOptions` does),
+  next to where `Options::$provider` is introduced; Alt+Enter restored next to `/queue` in the
+  steering section, to match the beta6 entry's wording.
+- docs/agents.md: the same thinking-off idiom for a sub-agent's own `Run`, and the empty-Done case
+  (finish `Stop`, so the cut-off line below does not fire; the parent sees `(the agent gave no
+  text)`).
+- docs/compact.md: the four facts about `State`, checkpoints and the overflow ladder from SPEC.md
+  revision 7's Compact section, also stated in one sentence each on `Checkpoint` and `State`.
+- `Event\TurnEnded` docblock: `error` carries the `ErrorKind` only; the exception's message is on
+  `Ended::$error`, read once the turn's generator is drained.
+- docs/testing.md: the event fields a test reads (`ToolEnded::$outcome` is the bare `Result`;
+  `StepStarted::$n`, `StepEnded::$n`).
+- docs/acp.md: one client-side exchange (`initialize`, `session/new` with `mcpServers: []`,
+  `session/prompt`, a `session/request_permission` answer); a session's `mcpServers` stay
+  unconnected in 0.1, noted under Not used.
+
 ## 0.0.1-beta6
 
 Implements SPEC.md revision 6: Compact's summary becomes a checkpoint that is updated rather than

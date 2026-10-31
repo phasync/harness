@@ -58,11 +58,34 @@ rejection reaches the model as `Denied: <reason>`. The answers resume the run, a
 on. An outcome `cancelled` denies the rest and cancels the prompt. A `Question` is declined with
 `Decision::deny()`, since ACP has no way to ask one.
 
+## A client-side exchange
+
+A minimal client, one request at a time (newline-delimited JSON-RPC over the agent's stdio):
+
+```
+--> {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}
+<-- {"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true},"authMethods":[]}}
+
+--> {"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/abs/project","mcpServers":[]}}
+<-- {"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess_..."}}
+
+--> {"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"sess_...","prompt":[{"type":"text","text":"delete the build directory"}]}}
+<-- {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess_...","update":{"sessionUpdate":"tool_call","toolCallId":"c1","kind":"execute",...}}}
+<-- {"jsonrpc":"2.0","id":4,"method":"session/request_permission","params":{"sessionId":"sess_...","toolCall":{"toolCallId":"c1"},"options":[{"optionId":"allow_once","kind":"allow_once"},...]}}
+--> {"jsonrpc":"2.0","id":4,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}}
+<-- {"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
+```
+
+`session/new`'s `mcpServers` is required by the protocol even when empty: this agent accepts the
+field but never connects to the servers it names (see Not used), so `[]` and a populated list
+behave the same.
+
 ## Not used
 
 The client's `fs/*` and `terminal/*` methods: the harness's own tools read, write and run commands
 in the agent's process, so `shell` output is text content, not a `terminal` (which would need the
-client's terminal). Session modes, plans and slash commands are not sent.
+client's terminal). Session modes, plans and slash commands are not sent. A session's `mcpServers`
+stay unconnected in 0.1: the agent's own tools run instead.
 
 ## Testing
 

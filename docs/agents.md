@@ -21,6 +21,11 @@ $parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Read
 - `AgentTool::spec()` derives the hints from the child's tools each time it is called: `readOnly`
   when every child tool is read-only (so several sub-agents run concurrently), `destructive` and
   `openWorld` when any child tool is; `idempotent` is false.
+- A thinking child needs the same idiom as the README's: turn thinking off through the provider's
+  knob in the child `Run`'s own `Options::$provider`, or a tight `maxOutputTokens` is spent on
+  reasoning with nothing left to answer with. When that happens anyway, the child still ends
+  `Done` (finish `Stop`, not `Length`, so the cut-off line below does not fire) with an empty
+  message, and the parent's model sees `(the agent gave no text)` in the tool result.
 
 ## Nested pauses
 

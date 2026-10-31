@@ -61,8 +61,8 @@ $log = new class extends AbstractLogger {
 };
 // The side call gets its own options: llama.cpp and vLLM turn a thinking model's reasoning off with
 // chat_template_kwargs, so its output tokens go to the summary (drop it for a backend without it).
+// maxOutputTokens is left at the default (2048): see it in the logged checkpoint sizes below.
 $compact = new Compact($model, $budget, log: $log, summarizerOptions: new Options(
-    maxOutputTokens: 1024,
     provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]],
 ));
 $run     = new Run(

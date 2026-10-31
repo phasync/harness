@@ -84,7 +84,7 @@ $model = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL
 $compact = new Compact(
     $model,
     null,
-    summarizerOptions: new Options(maxOutputTokens: 1024, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]),
+    summarizerOptions: new Options(provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]),
     state: null === ($state['compact'] ?? null) ? null : State::fromArray($state['compact']),
 );
 

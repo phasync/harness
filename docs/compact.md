@@ -5,7 +5,7 @@ older messages into a checkpoint: a sectioned record of the task, what was done 
 which the agent continues from.
 
 ```php
-$summarizerOptions = new Options(maxOutputTokens: 1024, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]);
+$summarizerOptions = new Options(maxOutputTokens: 2048, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]);
 $compact = new Compact($summarizer, budgetTokens: 24000, log: $logger, summarizerOptions: $summarizerOptions);
 $run     = new Run($model, $tools, middleware: [$compact]);
 ```
@@ -15,7 +15,7 @@ and returns no checkpoint, or one cut at the limit.
 
 ```php
 new Compact(Model $summarizer, ?int $budgetTokens = null, ?Closure $count = null, int $keepFirst = 1,
-            ?LoggerInterface $log = null, Options $summarizerOptions = new Options(maxOutputTokens: 1024),
+            ?LoggerInterface $log = null, Options $summarizerOptions = new Options(maxOutputTokens: 2048),
             ?State $state = null, ?int $keepRecentTokens = null)
 ```
 
@@ -66,6 +66,9 @@ When the prompt counts over the budget:
   instruction to keep every fact it holds (every entry under Done, Decisions and Known), move
   finished work to Done and add what the new messages establish. A checkpoint is never
   summarized from scratch.
+- A checkpoint's *Next* and *Known* can look one action behind for the steps still in the kept-recent
+  tail, since it is updated only on the next fold: the model sees those steps verbatim, so this is
+  correct, not stale.
 - When the checkpoint and the step in flight alone are over the budget, the prompt goes on and a
   warning is logged ("nothing more to summarize"). A round whose checkpoint would count no less
   than what it replaces is dropped with the same warning, and its size remembered: a later round
@@ -101,6 +104,10 @@ retry as a warning; a target that leaves the prompt as it was is skipped. After 
 error and rethrows, and the turn fails `ContextTooLong`. Any other error, or one after the first
 delta, is rethrown at once.
 
+A declared `Options::$contextWindow` far above the server's real limit defeats the ladder: none of
+85 %, 70 %, 50 % or 35 % of a budget taken from the wrong window shrinks the prompt enough, each
+rung logs "nothing more to fold", and the step fails loudly rather than retry quietly forever.
+
 ## Counting
 
 `Compact::approximate(Prompt): int` is the default counter: bytes / 4 over the system text, text and
@@ -133,14 +140,20 @@ budget throws too. A `\LogicException` ends the turn `Failed` and is rethrown, i
 report) and the latest `Checkpoint`s, newest first, at most 8. A checkpoint is keyed by a content
 hash of the messages it covers, so it is found for equal messages whether they are the same objects
 or rebuilt from arrays. `state()` returns it and the constructor takes one, so a host that builds a
-`Compact` per request (the web idiom) persists it next to the conversation and never writes a
-checkpoint it already has ([`examples/web.php`](../examples/web.php)):
+`Compact` per request (the web idiom) persists it next to the conversation
+([`examples/web.php`](../examples/web.php)):
 
 ```php
 $compact = new Compact($model, null, state: isset($saved['compact']) ? State::fromArray($saved['compact']) : null);
 // ... the turn ...
 $saved['compact'] = $compact->state()->toArray();   // {"calibration": {...}|null, "checkpoints": [{"hash", "covered", "kept", "lifted", "text", ...}]}
 ```
+
+(a) A persisted `State` saves a side call only while the restored checkpoint's view (its text plus
+the kept-recent tail) still fits the request's budget; once a request goes further over it, the
+restored checkpoint still saves work by costing one UPDATE call, never a from-scratch summary.
+(b) A conversation keeps only its most-covering checkpoint: a fold evicts the ones it supersedes, so
+branching the conversation from an earlier point costs a side call again.
 
 One instance may serve several conversations at once, each with its own checkpoint: the forks
 `Agents\AgentTool` runs share the template's middleware. Beyond 8 conversations compacting at once,

@@ -13,7 +13,8 @@ use Harness\FinishReason;
  * index of the latest user message when the cut fell after it: that message is folded into the
  * checkpoint and also kept verbatim right after it. `previousBytes` is the size of the checkpoint
  * this one updated (null for the first), `finish` how its side call ended. A JSON value, part of
- * `State`.
+ * `State`. A conversation keeps only its most-covering checkpoint: one with a higher `covered` for
+ * the same conversation (the same `hash` lineage) supersedes and evicts the rest on the next fold.
  */
 final readonly class Checkpoint implements \JsonSerializable
 {
