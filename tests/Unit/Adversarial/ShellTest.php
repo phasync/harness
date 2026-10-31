@@ -591,7 +591,7 @@ it('kills a command promptly even for a timeout small enough to race the setsid 
 it('cancels a command promptly too, not just a timeout, even when the kill races the setsid startup', function () {
     for ($i = 0; $i < 20; ++$i) {
         $run  = null;
-        $tool = tool('shell', function (array $in, \Harness\Call $call) use (&$run) {
+        $tool = tool('shell', function (array $in, Harness\Call $call) use (&$run) {
             $run->cancel(); // $run->running is already true: this cancellation takes effect
 
             return (new ShellTool(\sys_get_temp_dir()))->call(['command' => 'sleep 3', 'timeout' => 10.0], $call);
