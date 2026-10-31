@@ -43,6 +43,7 @@ final readonly class ApplyPatch implements Tool
         $sections = PatchParser::parse($patch);
 
         $writes  = [];   // abs => final content
+        $writers = [];   // abs => the section path that produced it
         $deletes = [];   // list<abs>
         $reports = [];
         foreach ($sections as $section) {
@@ -53,7 +54,13 @@ final readonly class ApplyPatch implements Tool
             };
             $reports[] = $report;
             foreach ($fileWrites as $abs => $content) {
-                $writes[$abs] = $content; // a later section for the same file continues from the earlier one's result
+                // a later section for the same file continues from the earlier one's result; two sections
+                // landing different files on one target would keep only the last, so that fails the patch
+                if (isset($writers[$abs]) && $writers[$abs] !== $section->path && $this->root->resolve($section->path) !== $abs) {
+                    throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' is written by two sections, from '{$writers[$abs]}' and from '{$section->path}'");
+                }
+                $writes[$abs]  = $content;
+                $writers[$abs] = $section->path;
             }
             $deletes = [...$deletes, ...$fileDeletes];
         }
@@ -92,6 +99,9 @@ final readonly class ApplyPatch implements Tool
         $abs = $this->root->resolve($section->path);
         if (\is_dir($abs)) {
             throw new \RuntimeException("'{$section->path}' is a directory");
+        }
+        if (\is_file($abs)) {
+            throw new \RuntimeException("'{$section->path}' exists; change it with *** Update File, or delete it first");
         }
         $content = (string) $section->content;
         $lines   = Lines::count($content);
@@ -154,7 +164,10 @@ final readonly class ApplyPatch implements Tool
             $removed += $hunk->removed;
         }
 
-        $target  = $this->root->resolve($section->moveTo ?? $section->path);
+        $target = $this->root->resolve($section->moveTo ?? $section->path);
+        if ($target !== $abs && \is_file($target)) {
+            throw new \RuntimeException("cannot move '{$section->path}' to '{$section->moveTo}': it exists; delete it first, or update it instead");
+        }
         $summary = null === $section->moveTo
             ? "Updated '{$section->path}' (+$added -$removed):"
             : "Moved '{$section->path}' to '{$section->moveTo}' (+$added -$removed):";

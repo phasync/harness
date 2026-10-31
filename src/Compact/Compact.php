@@ -482,8 +482,15 @@ final class Compact implements ModelMiddleware
         $bytes  = null === $previous ? null : \strlen($previous);
         for ($attempt = 1;; ++$attempt) {
             $acc = new Accumulator();
-            foreach ($this->summarizer->stream($prompt) as $delta) {
-                $acc->add($delta);
+            try {
+                foreach ($this->summarizer->stream($prompt) as $delta) {
+                    $acc->add($delta);
+                }
+            } catch (ModelException $e) {
+                if (ErrorKind::ContextTooLong === $e->kind) { // the summarizer's own window, not the conversation's: Compact is misconfigured
+                    throw new \RuntimeException("Compact's summarizer cannot take the messages it was asked to fold (" . \strlen($ask) . ' bytes): ' . $e->getMessage(), 0, $e);
+                }
+                throw $e;
             }
             $text = '';
             foreach ($acc->message()->parts as $part) {

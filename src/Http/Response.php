@@ -59,7 +59,12 @@ final class Response
             return $scheme . ':' . $location;
         }
         $base = $scheme . '://' . ($parts['host'] ?? '') . (isset($parts['port']) ? ':' . $parts['port'] : '');
-        $path = \str_starts_with($location, '/') ? $location : \rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location;
+        $path = match (true) {
+            \str_starts_with($location, '/')                            => $location,
+            '' === $location                                            => ($parts['path'] ?? '/') . (isset($parts['query']) ? '?' . $parts['query'] : ''),
+            '?' === $location[0] || '#' === $location[0]                => ($parts['path'] ?? '/') . $location, // an empty path keeps the base's (RFC 3986 §5.3)
+            default                                                     => \rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location,
+        };
 
         return $base . self::removeDotSegments($path);
     }

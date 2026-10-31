@@ -434,3 +434,23 @@ it('resolves a scheme-relative Location to the host it names, not the original h
     expect($response->redirectTarget('https://original.example.com/start/here'))
         ->toBe('https://other.example.com/page');
 }); // #64: joined onto the original host as a path
+
+/*
+ * `redirectTarget()`'s relative branch always "merges" a Location that doesn't start with `/`
+ * onto the base's directory: `\rtrim(\dirname($parts['path'] ?? '/'), '/') . '/' . $location`.
+ * RFC 3986 §5.3 (reference resolution) is explicit that a reference whose own path component is
+ * EMPTY -- a Location that is only a query string (`?sort=desc`), only a fragment (`#frag`), or
+ * the empty string itself -- must keep the BASE's path unchanged, replacing only the query (and
+ * fragment). This is an everyday redirect shape: "re-sort this same listing", "cache-bust this
+ * same page", "redirect to the same document". Because the code always merges, it treats the
+ * base's full path as a directory and discards its last segment (the actual filename/resource
+ * name), landing on a different, nonexistent resource instead of the same one with a new query.
+ */
+it('keeps the base path when a Location is only a query string', function () {
+    $response = new Response(302, ['location' => '?sort=desc'], []);
+
+    // Today: this is 'https://example.com/products/?sort=desc' -- "list" (the real resource)
+    // is dropped entirely, as if the whole original path were a directory.
+    expect($response->redirectTarget('https://example.com/products/list'))
+        ->toBe('https://example.com/products/list?sort=desc');
+}); // #73: merged onto the directory, dropping 'list'

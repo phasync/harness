@@ -84,7 +84,9 @@ allowed. Hunks are located by their context and removed lines through `edit_file
 1-4 only (exact, indentation-flexible, line-trimmed, whitespace-normalized — not the block-anchor level),
 never by line numbers. The whole patch is built in memory first: a hunk whose context is not found,
 or matches more than once, fails the **whole patch** with an error naming the file, the hunk's
-index and the context, and no file is changed. The result lists each file with the lines added and
+index and the context, and no file is changed. So does an `Add File` or `Move to` whose target
+exists (change a file with `Update File`, or delete it first), a target that is a directory, and
+two sections landing different files on one target. The result lists each file with the lines added and
 removed, and for an updated file, the edited region of each hunk as `edit_file` reports one.
 
 ## Journal

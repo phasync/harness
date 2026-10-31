@@ -147,6 +147,14 @@
 - `apply_patch` refuses, before writing anything, a `Move to` or `Add File` whose target is an
   existing directory; the source was deleted first and the content lost (#69).
 - `shell` keeps exactly `maxOutput` bytes when it is odd; one byte was cut too many (#70).
+- `apply_patch` fails, before writing anything, when two sections land different files on one
+  target; the later one silently replaced the earlier and both sources were deleted (#71). An
+  `Add File` or `Move to` whose target is an existing file is refused too (#72).
+- A redirect `Location` that is only a query string, a fragment or empty keeps the base path (#73).
+- Chat Completions maps an error code `rate_limit_exceeded`/`insufficient_quota` to `RateLimited`
+  whatever the HTTP status, as Responses does (#74).
+- A summarizer's own `ContextTooLong` is a `RuntimeException` naming the summarizer, a
+  `MiddlewareError` of the turn, instead of the conversation's `ContextTooLong` (#75).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

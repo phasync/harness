@@ -308,3 +308,31 @@ it('leaves the source file untouched when a Move target is an existing directory
     // source file is permanently lost (with no Journal) even though the whole call reports failure.
     expect(\is_file($this->dir . '/a.txt'))->toBeTrue();
 }); // #69: the source was unlinked before the target was found to be a directory
+
+/*
+ * Round 13, attacking the #69 fix and its siblings. The planning loop #69 added only compares each
+ * write target's path against the filesystem (an existing directory) -- it never compares write
+ * targets against *each other*. `planUpdate()`'s pending-continuation check (`#8`'s fix) detects
+ * two sections updating the *same source path* in a row, but it keys on each section's own source
+ * path, not on where a `Move to:` sends it. Two sections moving two *different* source files onto
+ * the *same* target produce two separate entries in the per-section `$fileWrites`, both keyed by
+ * that one target path; the main loop folds them into `$writes` with a plain `$writes[$abs] =
+ * $content` assignment, so the second section's content silently clobbers the first's. Both
+ * sources are unlinked (both are in `$deletes`), the call reports *both* moves as having succeeded
+ * ("Moved 'a.txt' to 'target.txt'" and "Moved 'b.txt' to 'target.txt'"), and the first source's
+ * content is gone from disk entirely -- worse than #69's case, since there is no error at all, not
+ * even one after partial damage: the whole call reports a confident, complete success.
+ */
+it('does not silently discard one file when two sections move different sources onto the same target', function () {
+    \file_put_contents($this->dir . '/a.txt', "CONTENT FROM A\n");
+    \file_put_contents($this->dir . '/b.txt', "CONTENT FROM B\n");
+    $patch = new ApplyPatch($this->root);
+    $p     = "*** Begin Patch\n"
+        . "*** Update File: a.txt\n*** Move to: target.txt\n@@\n CONTENT FROM A\n"
+        . "*** Update File: b.txt\n*** Move to: target.txt\n@@\n CONTENT FROM B\n"
+        . '*** End Patch';
+
+    // BUG: today this succeeds with no exception, reporting both moves done, while a.txt's content
+    // is permanently gone (only b.txt's content survives at target.txt).
+    expect(fn () => $patch->call(['patch' => $p], callFor()))->toThrow(RuntimeException::class);
+}); // #71: the later write replaced the earlier; both sources deleted, both moves reported

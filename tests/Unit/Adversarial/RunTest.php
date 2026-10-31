@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Harness\Approval;
 use Harness\Call;
 use Harness\ClosureTool;
+use Harness\Compact\Compact;
 use Harness\Delivery;
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
@@ -15,8 +16,11 @@ use Harness\ErrorKind;
 use Harness\FinishReason;
 use Harness\Hints;
 use Harness\Message;
+use Harness\ModelException;
 use Harness\ModelMiddleware;
 use Harness\Part\Text;
+use Harness\Part\ToolCall;
+use Harness\Part\ToolResult;
 use Harness\Prompt;
 use Harness\Reason;
 use Harness\Result;
@@ -681,3 +685,60 @@ it('ends the parent turn Failed with a child\'s misuse exception, which is the h
         ->and($parent->ended()->reason)->toBe(Reason::Failed)
         ->and($parent->ended()->error)->toBe($threw);
 }); // #68: docs/agents.md promised an error result for every child failure
+
+/*
+ * Round 13: Compact's side call (the summarizer) rejecting its OWN prompt as too long is
+ * indistinguishable, from the host's side, from the MAIN conversation model rejecting the
+ * conversation itself.
+ *
+ * `Compact::compact()` -- which calls `summarize()`, which drives `$this->summarizer->stream($prompt)`
+ * -- runs entirely OUTSIDE the `try { ...; foreach ($next($compacted) as $delta) {...}; } catch
+ * (ModelException $e) { if (ErrorKind::ContextTooLong !== $e->kind || $started) { throw $e; } ...
+ * }` block in `Compact::stream()` (Compact.php): that catch, and the whole 85/70/50/35 % retry
+ * ladder docs/compact.md describes under "A prompt the provider rejects", wraps only the call to
+ * `$next($compacted)` -- the MAIN model, further down `modelChain()`. `[$compacted, ...] =
+ * $this->compact($prompt, $share);` sits one line above the try, unprotected. So when the
+ * summarizer itself throws a `ModelException` with `ErrorKind::ContextTooLong` -- its own context
+ * window too small for the chunk `Compact` asked it to fold -- that exception propagates straight
+ * out of `Compact::stream()`, skipping the retry ladder entirely, and reaches `Run::modelStep()`'s
+ * catch, which (Run.php) does not mark a `ModelException` at all: `if (!isset($this->origin[$e])
+ * && !$e instanceof ModelException && ...) { $this->mark($e, 'middleware'); }` -- explicitly
+ * skipped because it already IS a `ModelException`. `Run::loop()`'s `$kind` match then takes
+ * `$e instanceof ModelException => $e->kind` first, giving `ErrorKind::ContextTooLong`.
+ *
+ * The result: a host that branches on `errorKind === ErrorKind::ContextTooLong` to mean "the
+ * conversation itself needs trimming, raise Options::$contextWindow or budgetTokens" gets exactly
+ * that signal for a problem with a completely different cause and fix -- the summarizer's own
+ * window, not the main model's or the conversation's -- with no way to tell the two apart from
+ * `Ended::$errorKind` alone.
+ *
+ * Verified directly against the real code with both adapters: a conversation whose prompt is
+ * genuinely over `Compact`'s budget (so it tries to fold a large tool result), paired with a
+ * summarizer that rejects the side-call prompt with `ModelException(ErrorKind::ContextTooLong)`,
+ * ends the turn `Reason::Failed` with `ErrorKind::ContextTooLong` -- identical to what the MAIN
+ * model rejecting the real conversation would report.
+ */
+it('does not report the summarizer\'s own ContextTooLong as the conversation\'s', function () {
+    $bigResult = \str_repeat('x', 20000);
+    $messages  = [
+        new Message(Role::User, [new Text('look something up')]),
+        new Message(Role::Assistant, [new ToolCall('c1', 'lookup', [])]),
+        new Message(Role::User, [new ToolResult('c1', [new Text($bigResult)])]),
+        new Message(Role::Assistant, [new Text('found it')]),
+        new Message(Role::User, [new Text('continue, please, this is the latest message')]),
+    ];
+    $summarizer = new FakeModel(static function () {
+        throw new ModelException(ErrorKind::ContextTooLong, "the summarizer's own context window is too small for this chunk");
+    });
+    $compact   = new Compact($summarizer, budgetTokens: 200, keepFirst: 0, keepRecentTokens: 5);
+    $mainModel = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
+    $run       = new Harness\Run($mainModel, new Tools(), messages: $messages, middleware: [$compact]);
+
+    turn($run, user('next'));
+
+    // Today: errorKind is ContextTooLong, exactly as if the MAIN model had rejected the real
+    // conversation -- even though the actual conversation prompt was never sent anywhere; only
+    // the summarizer's own, much smaller side-call prompt was rejected, by the summarizer.
+    expect($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError);
+}); // #75: the summarizer's ContextTooLong was the turn's ErrorKind

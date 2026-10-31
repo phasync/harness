@@ -665,3 +665,61 @@ it('reads a non-SSE JSON error body on a 200 response, not just non-200 statuses
             ->and($e->getMessage())->toContain('temporarily overloaded');
     }
 }); // #65: Sse::parse() saw no events and the stream 'ended before message_stop'
+
+/*
+ * Round 13's attack on #65/#66/#67 and a sweep of the three providers' error paths:
+ *
+ * - `text/event-stream; charset=utf-8`: `Sse::isEventStream()` already splits on `;` and trims
+ *   before comparing, so the parameter is ignored and this passes as a real event stream.
+ *   Confirmed, not a defect.
+ * - `application/x-ndjson` / `text/plain` with an SSE-shaped body: correctly takes the error path
+ *   now (any non-`text/event-stream` content-type on a 200 is treated as an error body per #65) --
+ *   right per docs, which never promised tolerance for a non-standard content-type on a streaming
+ *   endpoint.
+ * - A non-JSON (HTML) error body: the message quotes up to 2000 characters of it in all three
+ *   providers (`substr($body/$text, 0, 2000)`) -- plain, working as intended; a host logging the
+ *   exception sees enough of the page to diagnose a misconfigured proxy, not a defect.
+ * - 200 JSON error body classification, `insufficient_quota`/`rate_limit_exceeded`/
+ *   `context_length_exceeded`: `Responses::error()` takes the body's own `error.code` and checks
+ *   `'rate_limit_exceeded' === $code` and `'context_length_exceeded' === $code` *regardless* of
+ *   `$status` -- so it still correctly reports `RateLimited`/`ContextTooLong` even when the error
+ *   arrived on a 200 (a proxy that normalizes every upstream failure to 200, which is exactly how
+ *   this whole error path is reached here). `ChatCompletions::error()`, in the very same module,
+ *   has no such code-based fallback at all: its match is `429 === $status` for `RateLimited` and a
+ *   handful of *substring* checks on the raw body text for `ContextTooLong`, with nothing
+ *   equivalent for rate limiting. The identical JSON body, `{"error":{"code":
+ *   "rate_limit_exceeded",...}}`, delivered on the identical 200-with-wrong-content-type shape,
+ *   is correctly classified `RateLimited` by `Responses` and wrongly classified the generic
+ *   `ModelError` by `ChatCompletions` -- an asymmetry between the two OpenAI providers in this same
+ *   module, the same bug *shape* as #65/#66/#67 (one provider's error path handles a case the
+ *   sibling provider's does not) but in the classification logic rather than the content-type or
+ *   retry-after plumbing those fixed.
+ *
+ * MCP, not pursued as the defect (checked, correct): a tool whose `inputSchema` is missing or not
+ * an object -- `McpServer::spec()` falls back to `['type' => 'object']` only when `inputSchema` is
+ * entirely absent; a present-but-non-object schema is passed through as-is, which is the server's
+ * own spec violation, already covered by the same reasoning as #14-era conclusions about doing no
+ * better than the server's own contract allows. A tool name with characters a provider rejects
+ * (`search.web`, or 70 characters): `McpServer::spec()` already sanitizes via
+ * `preg_replace('/[^a-zA-Z0-9_-]/', '_', ...)` and caps at `substr(..., 0, 64)` *before* any request
+ * is built, matching OpenAI's `^[a-zA-Z0-9_-]{1,64}$` -- refused (rewritten) before the request,
+ * never a provider 400 after. Not a defect.
+ *
+ * Verified directly against the real code (both adapters): the identical 200 response with
+ * `content-type: application/json` and body `{"error":{"code":"rate_limit_exceeded","message":
+ * "Rate limit reached, please slow down"}}` is `ErrorKind::RateLimited` through `Responses` and
+ * `ErrorKind::ModelError` through `ChatCompletions`.
+ */
+it('classifies a rate-limit error code the same way Chat Completions and Responses do', function () {
+    $body  = \json_encode(['error' => ['code' => 'rate_limit_exceeded', 'message' => 'Rate limit reached, please slow down']]);
+    $model = new ChatCompletions(new FakeTransport(new Response(200, ['content-type' => 'application/json'], [$body])), 'http://h/v1', 'm');
+
+    try {
+        [...$model->stream(new Prompt(null, [], [], new Options(), live()))];
+        $this->fail('no exception');
+    } catch (ModelException $e) {
+        // Today: ModelError -- ChatCompletions::error() never looks at the body's own error code,
+        // unlike Responses::error() in the same module, which correctly reports RateLimited here.
+        expect($e->kind)->toBe(ErrorKind::RateLimited);
+    }
+}); // #74: ModelError; only HTTP 429 was looked at

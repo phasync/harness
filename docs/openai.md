@@ -28,8 +28,9 @@ $model = new ChatCompletions(
   `Options::$provider['openai']` (the key is the module's lowercase name) is merged into the request body last, so it sets anything else
   (`max_completion_tokens`, `top_p`, `chat_template_kwargs`, ...). `Required` or `Tool` with no tools
   throws `UnsupportedOptionException`.
-- HTTP 429 → `RateLimited` (with `retryAfter`), a context-length error → `ContextTooLong`, anything
-  else → `ModelError`; an `error` object inside the stream → `ModelError`.
+- HTTP 429 or an error code `rate_limit_exceeded`/`insufficient_quota` (whatever the status) →
+  `RateLimited` (with `retryAfter`), a context-length error → `ContextTooLong`, anything else →
+  `ModelError`; an `error` object inside the stream → `ModelError`.
 - A `Prompt::$continue` (a `Resume`) sends the assistant message to continue last, its reasoning
   as `reasoning_content` for the same model. llama.cpp and exl3 continue it as they are; vLLM
   needs `Options::$provider['openai']` set to `['continue_final_message' => true,

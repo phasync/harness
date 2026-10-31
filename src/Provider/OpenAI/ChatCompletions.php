@@ -290,10 +290,12 @@ final readonly class ChatCompletions implements Model
     {
         $message = "Chat Completions returned HTTP $status: " . \substr($body, 0, 2000);
         $lower   = \strtolower($body);
+        $error   = \json_decode($body, true)['error'] ?? [];
+        $code    = \is_array($error) ? \strtolower((string) ($error['code'] ?? $error['type'] ?? '')) : '';
         $kind    = match (true) {
-            429 === $status                                                                                                                                                                     => ErrorKind::RateLimited,
-            \str_contains($lower, 'context_length_exceeded') || \str_contains($lower, 'context length') || \str_contains($lower, 'maximum context') || \str_contains($lower, 'too many tokens') => ErrorKind::ContextTooLong,
-            default                                                                                                                                                                             => ErrorKind::ModelError,
+            429 === $status || \in_array($code, ['rate_limit_exceeded', 'rate_limit_error', 'insufficient_quota'], true)                                                                            => ErrorKind::RateLimited,
+            \str_contains($lower, 'context_length_exceeded') || \str_contains($lower, 'context length') || \str_contains($lower, 'maximum context') || \str_contains($lower, 'too many tokens')     => ErrorKind::ContextTooLong,
+            default                                                                                                                                                                                 => ErrorKind::ModelError,
         };
 
         return new ModelException($kind, $message, null !== $retryAfter && \is_numeric($retryAfter) ? (float) $retryAfter : null);

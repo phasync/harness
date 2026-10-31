@@ -91,7 +91,10 @@ named, not sent. Any `Model` can summarize; a smaller one is the usual choice.
 A checkpoint that comes back empty, cut at the output token limit (`FinishReason::Length`), or
 shorter than a quarter of the checkpoint it updates, is a collapse: asked for once more (logged as a
 warning; a checkpoint cut at the limit is asked for in 60 % of the words), and a second collapse
-fails the step with a `RuntimeException` naming what happened. A checkpoint is longer than a prose
+fails the step with a `RuntimeException` naming what happened. So does a summarizer whose own
+window cannot take what it is asked to fold (its `ContextTooLong` is Compact's misconfiguration, a
+`MiddlewareError` of the turn, never reported as the conversation's); its other failures pass
+through with their kind. A checkpoint is longer than a prose
 summary: give the summarizer output tokens to match (in a 2,000-token budget with 800 output tokens,
 round 6's live readers wrote checkpoints of 2.2 to 2.9 KB, and some were cut).
 
