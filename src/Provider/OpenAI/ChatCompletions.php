@@ -84,6 +84,9 @@ final readonly class ChatCompletions implements Model
                 );
             }
             foreach ($chunk['choices'] ?? [] as $choice) {
+                if (0 !== ($choice['index'] ?? 0)) {
+                    throw new ModelException(ErrorKind::ModelError, 'The stream carries a second choice; Chat Completions is asked for one reply (n = 1)');
+                }
                 yield from $this->delta($choice['delta'] ?? [], $ids);
                 if (isset($choice['finish_reason'])) {
                     $finish = $choice['finish_reason'];
@@ -161,6 +164,10 @@ final readonly class ChatCompletions implements Model
         }
         if (null !== $o->temperature) {
             $request['temperature'] = $o->temperature;
+        }
+
+        if (1 !== ($o->provider['openai']['n'] ?? 1)) {
+            throw new UnsupportedOptionException('Chat Completions streams one reply; n must be 1');
         }
 
         return \array_replace($request, $o->provider['openai'] ?? []);

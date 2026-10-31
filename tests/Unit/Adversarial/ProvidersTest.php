@@ -2,11 +2,13 @@
 
 declare(strict_types=1);
 
+use Harness\Accumulator;
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
 use Harness\FinishReason;
 use Harness\Http\Response;
 use Harness\Message;
+use Harness\ModelException;
 use Harness\Options;
 use Harness\Part\Text;
 use Harness\Part\ToolCall;
@@ -17,6 +19,7 @@ use Harness\Provider\OpenAI\ChatCompletions;
 use Harness\Role;
 use Harness\Testing\FakeTransport;
 use Harness\ToolSpec;
+use Harness\UnsupportedOptionException;
 
 /*
  * Mcp\McpTool::result() builds a `Result` straight from `content ?? []` and `structuredContent ??
@@ -104,4 +107,47 @@ it('reports the model\'s refusal text, not just that it refused', function () {
     // #17: only the Finish came out; the refusal text is the reply and is yielded as text
     expect($deltas)->toContainEqual(new TextDelta("I can't help with that."))
         ->and($deltas)->toContainEqual(new Finish(FinishReason::Refusal));
+});
+
+/*
+ * `ChatCompletions::stream()` reads `$chunk['choices'] ?? []` and processes EVERY choice in it
+ * (src/Provider/OpenAI/ChatCompletions.php): `foreach ($chunk['choices'] ?? [] as $choice) { yield
+ * from $this->delta($choice['delta'] ?? [], $ids); ... }`, with no filtering by `choice['index']`.
+ * `Options::$provider['openai']` is documented to be "merged into the request body last, so it can
+ * set anything" (docs/openai.md) -- including `n` (OpenAI's "how many choices to generate"), and a
+ * server asked for `n > 1` streams each choice's deltas interleaved by `choices[].index`, exactly
+ * like tool-call argument fragments are interleaved by `tool_calls[].index` (a case this module
+ * handles correctly via `$ids`). But `Model::stream()`'s contract (and `Accumulator`'s: "Folds the
+ * deltas of one reply into the assistant `Message`") is ONE reply. With `n > 1`, text from
+ * choice 1 lands in the very same `Accumulator` as choice 0's -- consecutive `TextDelta`s extend
+ * whatever text part is last, regardless of which independent choice produced them -- so two
+ * unrelated completions are silently spliced into one assistant message with no error at all; the
+ * same missing index check would just as well splice two different choices' tool calls together
+ * (a shared index across choices colliding in `$ids`).
+ *
+ * Verified directly against the real code (both adapters): two choices (`index: 0` streaming
+ * "Hello", `index: 1` streaming "Goodbye") fold, through the real `Accumulator`, into one `Text`
+ * part reading "HelloGoodbye" -- not an error, not two separate replies, not even choice 0 alone.
+ */
+it('fails loudly when the server streams a second choice instead of splicing it into the reply', function () {
+    $body = 'data: ' . \json_encode(['choices' => [
+        ['index' => 0, 'delta' => ['content' => 'Hello'], 'finish_reason' => null],
+        ['index' => 1, 'delta' => ['content' => 'Goodbye'], 'finish_reason' => null],
+    ]]) . "\n\n"
+          . 'data: ' . \json_encode(['choices' => [
+              ['index' => 0, 'delta' => [], 'finish_reason' => 'stop'],
+              ['index' => 1, 'delta' => [], 'finish_reason' => 'stop'],
+          ]]) . "\n\n"
+          . "data: [DONE]\n\n";
+    $model = new ChatCompletions(new FakeTransport(new Response(200, [], \str_split($body, 23))), 'http://h/v1', 'm');
+    // #20: this folded choice 1 into choice 0 as "HelloGoodbye"; a second choice breaks the one-reply contract
+    expect(fn () => [...$model->stream(new Prompt(null, [], [], new Options(), live()))])
+        ->toThrow(ModelException::class, 'second choice');
+});
+
+it('refuses n other than 1 before the request is sent', function () {
+    $t = new FakeTransport();
+    expect(fn () => [...(new ChatCompletions($t, 'http://h/v1', 'm'))->stream(new Prompt(null, [user('hi')], [], new Options(provider: ['openai' => ['n' => 2]]), live()))])
+        ->toThrow(UnsupportedOptionException::class, 'n must be 1')
+        ->and($t->requests)->toBe([]);
 });

@@ -54,6 +54,13 @@
 - `Provider\OpenAI\ChatCompletions`: a refusal's text (`delta.refusal`) is yielded as text, as the
   Responses provider does, not dropped on the way to `Finish(Refusal)` (#17).
 - docs/shell.md: a killed call's `Result::$value` is null, not an exit code it never had (#18).
+- `Http\StreamTransport`: a malformed `Content-Length` (negative, non-numeric, two joined values) is
+  a `TransportException`, not an empty body with status 200 (#19).
+- `Provider\OpenAI\ChatCompletions`: a second choice in the stream is a `ModelException`, and
+  `n` other than 1 in the provider options is refused before the request (#20).
+- `Stop` and `interject()` docs: predicates are checked after every step the turn continues past,
+  including one that only continued for a steered or queued message; a queued message a predicate
+  cut off is handed back in `Ended::$queued` (#21).
 
 ### Changed (breaking)
 

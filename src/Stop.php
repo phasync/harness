@@ -5,8 +5,9 @@ declare(strict_types=1);
 namespace Harness;
 
 /**
- * Stop predicates: closures `fn (Step $step): bool`, checked after every step that called tools,
- * OR'd. A true one ends the turn with `Reason::Stopped`.
+ * Stop predicates: closures `fn (Step $step): bool`, checked after every step the turn continues
+ * past (one that called tools, or one that a steered or queued message continues), OR'd. A true one
+ * ends the turn with `Reason::Stopped`; an interjection it cut off is in `Ended::$queued`.
  */
 final class Stop
 {

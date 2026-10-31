@@ -2,6 +2,12 @@
 
 declare(strict_types=1);
 
+use function fiber\go;
+use function fiber\readable;
+use function fiber\writable;
+use Harness\Cancel;
+use Harness\Http\StreamTransport;
+use Harness\Http\TransportException;
 use Harness\Tools\Web\Html;
 
 /*
@@ -48,3 +54,38 @@ it('does not swallow a literal Private Use Area character from the page text', f
     // sentinel; the sentinels are NUL-based now, which no page text can contain
     expect(Html::extract($html))->toBe("Hello \u{E002} World");
 });
+
+/*
+ * StreamTransport::body() (Http/StreamTransport.php) validates a chunked body's chunk-size line
+ * strictly -- `preg_match('/^[0-9a-fA-F]{1,15}$/', $hex)`, throwing TransportException on anything
+ * that doesn't match -- but the content-length path has no such check: `$remaining = (int)
+ * $headers['content-length'];` casts whatever the server sent, and `while ($remaining > 0)` just
+ * never runs for a negative (or non-numeric, or empty) value. The generator falls straight to its
+ * `finally { fclose($socket); }` and returns with no chunks yielded and no error -- a response
+ * whose server actually sent a body is silently turned into an empty one instead of a
+ * TransportException naming the malformed header, which is what every other malformed-metadata
+ * case in this file does (malformed chunk size, malformed status line, malformed header line).
+ */
+it('rejects a negative Content-Length instead of silently returning an empty body', function () {
+    // Today: no exception is thrown -- [...$r->body()] comes back as [] and the 'hello' the
+    // server actually sent is silently lost, instead of a TransportException naming the header
+    // the way a malformed chunk size or status line does elsewhere in this class.
+    expect(function () {
+        \fiber\run(function () {
+            $server = \stream_socket_server('tcp://127.0.0.1:0');
+            $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+            go(function () use ($server) {
+                $conn    = \stream_socket_accept(readable($server), 0);
+                $request = '';
+                while (!\str_contains($request, "\r\n\r\n")) {
+                    $request .= \fread(readable($conn), 65536);
+                }
+                \fwrite(writable($conn), "HTTP/1.1 200 OK\r\nContent-Length: -1\r\n\r\nhello");
+                \fclose($conn);
+                \fclose($server);
+            });
+            $r = (new StreamTransport())->get("http://127.0.0.1:$port/", [], new Cancel(static fn () => false));
+            [...$r->body()];
+        });
+    })->toThrow(TransportException::class, 'Content-Length');
+}); // #19: this returned status 200 with an empty body and no error

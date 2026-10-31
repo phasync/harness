@@ -230,6 +230,9 @@ final class StreamTransport implements Transport
                 }
             }
             if (isset($headers['content-length'])) {
+                if (1 !== \preg_match('/^\d{1,15}$/', $headers['content-length'])) { // two joined values or junk: never guess a length
+                    throw new TransportException("Malformed Content-Length '{$headers['content-length']}' in the response");
+                }
                 $remaining = (int) $headers['content-length'];
                 while ($remaining > 0) {
                     if ('' === $buffer) {
