@@ -696,3 +696,39 @@ it('reads a declared shift_jis charset as windows-31j, as browsers alias it', fu
     expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
         ->toBe("A\u{FF5E}B");
 }); // #107: only the Latin-1 family was aliased; shift_jis decoded as strict JIS X 0208
+
+/*
+ * The class docblock promises `offset` "continues from where the previous call left off", and the
+ * continuation note itself ("pass offset=N to read on") implies the same document is still being
+ * read. But `call()` has no notion of a document identity across calls: when `cacheDir` is set and
+ * the cache entry expires between two calls, a non-zero `offset` is validated only against the
+ * NEW fetch's length (`$offset > $total`, checked after the fresh fetch) -- there is no check that
+ * the new body is in any way related to whatever produced that offset. A page that changes between
+ * a first call and a later continuation call (the ordinary case the cache/TTL design exists to
+ * tolerate) silently splices the agent into the middle of the NEW, unrelated page's text, with no
+ * error, no warning, and no way for the caller to tell the "continuation" is not one.
+ */
+it('continues an offset from the cached page it started, however old the cache entry', function () {
+    $dir       = \sys_get_temp_dir() . '/harness-web-' . \bin2hex(\random_bytes(4));
+    $bodyA     = '<html><body><p>' . \str_repeat('A', 30) . '</p></body></html>';
+    $bodyB     = '<html><body><p>' . \str_repeat('B', 30) . '</p></body></html>';
+    $transport = new FakeTransport(
+        new Response(200, ['content-type' => 'text/html'], [$bodyA]),
+        new Response(200, ['content-type' => 'text/html'], [$bodyB]),
+    );
+    $fetch = new WebFetch($transport, 'agent', cacheDir: $dir, maxChars: 10);
+    try {
+        $first = $fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text;
+        \preg_match('/offset=(\d+)/', $first, $m);
+
+        // the cache entry is now stale: the next call does a fresh fetch, of a page that changed
+        \touch($dir . '/' . \hash('sha256', 'https://example.com/'), \time() - 4000);
+
+        $second = $fetch->call(['url' => 'https://example.com/', 'offset' => (int) $m[1]], TestCall::make())->content[0]->text;
+
+        expect($first)->toBe("AAAAAAAAAA\n[20 more characters; pass offset=10 to read on]")
+            ->and($second)->toBe("AAAAAAAAAA\n[10 more characters; pass offset=20 to read on]"); // the same page, continued -- not spliced into a different one
+    } finally {
+        \exec('rm -rf ' . \escapeshellarg($dir));
+    }
+}); // #110: the offset was applied to a fresh fetch of a changed page

@@ -69,7 +69,9 @@ the next request.
 ## Cache
 
 An optional `cacheDir` constructor argument stores a fetched page's extracted text under
-`sha256(url)` and reuses it for `cacheTtl` seconds (default 3600) without a new request.
+`sha256(url)` and reuses it for `cacheTtl` seconds (default 3600) without a new request. A continuation
+(`offset` > 0) reads the cached text however old, so it continues the page it started; without `cacheDir`
+a continuation fetches the page again and reads it as it is now.
 
 ## Running SearXNG
 

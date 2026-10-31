@@ -34,7 +34,10 @@ use Harness\ToolSpec;
  * private-network or non-http(s) URL (`localhost`, `127/8`, `10/8`, `172.16/12`, `192.168/16`,
  * `169.254/16`, `::1`, `fc00::/7`, `file:`, `ftp:`, ...) is refused as an SSRF guard unless
  * `allowPrivate` is true (default false). When `cacheDir` is set, a fetched page's text is stored
- * by `sha256(url)` and reused for `cacheTtl` seconds (default 3600) without a new request.
+ * by `sha256(url)` and reused for `cacheTtl` seconds (default 3600) without a new request; a
+ * continuation (`offset` > 0) reads it however old, so it continues the page it started. Without
+ * `cacheDir` a continuation fetches the page again, and a page that changed in between is read as
+ * it is now.
  */
 final readonly class WebFetch implements Tool
 {
@@ -83,7 +86,8 @@ final readonly class WebFetch implements Tool
         $this->guard($url);
 
         $cacheFile = null !== $this->cacheDir ? $this->cacheDir . '/' . \hash('sha256', $url) : null;
-        if (null !== $cacheFile && \is_file($cacheFile) && \filemtime($cacheFile) > \time() - $this->cacheTtl) {
+        // a continuation (offset > 0) reads the cached text however old: it continues the page it started, not a changed one
+        if (null !== $cacheFile && \is_file($cacheFile) && ($offset > 0 || \filemtime($cacheFile) > \time() - $this->cacheTtl)) {
             $text = (string) \file_get_contents($cacheFile);
         } else {
             [$contentType, $charset, $body] = $this->fetch($url, $call);

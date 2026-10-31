@@ -661,3 +661,54 @@ it('refuses a change to a file the Journal cannot read, and undo() still restore
         ->and(\file_get_contents($this->dir . '/good.txt'))->toBe("GOOD_ORIGINAL\n")
         ->and(\file_get_contents($this->dir . '/bad.txt'))->toBe("BAD_ORIGINAL\n");
 }); // #109: record() stored false and leaked the warning; undo() died with a TypeError before good.txt
+
+/*
+ * Round 23. Tried and ruled out, by executing against the real code rather than reasoning alone:
+ * - `record()` of a directory, or a symlink to a directory: WriteFile/EditFile/ApplyPatch all call
+ *   `is_dir($abs)` (WriteFile, ApplyPatch's planAdd/planUpdate) or require `is_file($abs)`
+ *   (EditFile, ApplyPatch's planDelete/planUpdate) and throw *before* `record()` ever runs; both
+ *   functions follow symlinks, so a symlink-to-directory is refused the same way. `record()` never
+ *   sees a directory.
+ * - `record()` of a dangling symlink: confirmed by running it -- `Root::resolve()`'s own
+ *   containment probe (`while (!file_exists($probe) && !is_link($probe)) ...` then
+ *   `realpath($probe)`) stops at the dangling symlink itself and `realpath()` on it is `false`,
+ *   so every tool refuses it as "leads outside the root through a symlink" before `record()` is
+ *   reachable at all.
+ * - ApplyPatch's split delete-loop/write-loop vs section order: traced every interacting case
+ *   (plain move, delete-then-readd of the same path, add-then-delete of the same path) by hand --
+ *   each loop re-checks the *current*, final `$plan[$abs]` value at iteration time, so a path that
+ *   ends up re-added is silently skipped by the delete loop (never recorded, never unlinked, and
+ *   its one `record()` call in the write loop still reads the true pre-patch disk content, not an
+ *   intermediate one), and a path only ever planned and never on disk skips both loops entirely.
+ *   No case produces a wrong recorded state or a wrong undo order.
+ * - `undo()` right after `clear()`: `$order` is empty, so it is a plain no-op -- `[]` back, no
+ *   exception. Too trivial to be the round's pin.
+ *
+ * What *did* survive execution, and is worth pinning: a tool that calls `record()` and then has
+ * its own write fail (the file was writable when `record()` ran, read-only by the time `Fs::write`
+ * runs) leaves the path in the journal even though the file was never actually touched -- `record()`
+ * only promises to run "before it writes or deletes", not "before a successful write". Running it:
+ * the file keeps its original content the whole time (the failed write never touched it), and a
+ * later `undo()`, once the file is writable again, writes that same original content back over
+ * itself and reports the path as restored. Harmless by construction -- `undo()` can only ever put
+ * back the content it first read, so "restoring" a file that never changed is a no-op, not data
+ * loss or a lie about the file's *content* (only about whether a change ever happened).
+ */
+it('leaves a never-actually-changed path in the Journal when its own write fails, and undo() harmlessly rewrites it', function () {
+    \file_put_contents($this->dir . '/a.txt', "ORIGINAL\n");
+    \chmod($this->dir . '/a.txt', 0444); // readable, so record() succeeds; not writable, so Fs::write() fails
+    $journal = new Journal();
+    $w       = new WriteFile($this->root, journal: $journal);
+
+    try {
+        expect(fn () => $w->call(['path' => 'a.txt', 'content' => 'NEVER WRITTEN'], callFor()))
+            ->toThrow(RuntimeException::class, "Could not write 'a.txt': Permission denied");
+    } finally {
+        \chmod($this->dir . '/a.txt', 0644);
+    }
+
+    expect($journal->changed())->toBe([$this->dir . '/a.txt']) // recorded even though the write never happened
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("ORIGINAL\n") // untouched by the failed write
+        ->and($journal->undo())->toBe([$this->dir . '/a.txt']) // reported as restored
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("ORIGINAL\n"); // still correct: a no-op, not a lie
+});
