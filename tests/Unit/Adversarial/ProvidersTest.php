@@ -211,9 +211,8 @@ it('does not replay a thinking block whose signature never arrived', function ()
     )));
     [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(null, [user('go'), $assistant], [], new Options(), live()))];
     $sent     = \json_decode($t->requests[0]['body'], true);
-    $thinking = \array_values(\array_filter($sent['messages'][1]['content'], static fn ($b) => 'thinking' === $b['type']));
-
-    // Today: the empty signature is replayed verbatim, which the real Messages API rejects.
-    expect($thinking)->toHaveCount(1)
-        ->and($thinking[0]['signature'])->not->toBe('');
+    // #24: the empty signature was replayed verbatim, which the API rejects; the block is dropped,
+    // and this reply had nothing else, so the assistant turn goes with it
+    expect($sent['messages'])->toHaveCount(1)
+        ->and(\json_encode($sent))->not->toContain('"thinking"');
 }); // #24: the unsigned block was replayed verbatim; the API rejects an empty signature

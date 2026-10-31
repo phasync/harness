@@ -56,6 +56,7 @@ final class Run
     private int $turns         = 0;
     private bool $running      = false;
     private bool $cancelled    = false;
+    private Accumulator $shadow;
     private bool $interrupted  = false;
     /** The interrupted reply, as delivered when the turn's model stream stopped. */
     private ?Message $partial  = null;
@@ -529,16 +530,17 @@ final class Run
     {
         $id = 'msg_' . \bin2hex(\random_bytes(8));
         $emit(null === $seed ? new MessageStarted($turn, $parent, $id) : new MessageResumed($turn, $parent, $id));
-        $acc = new Accumulator($seed);
+        $acc          = new Accumulator($seed);
+        $this->shadow = new Accumulator($seed); // callModel() validates the raw stream with it, so a fault here is a middleware's
         try {
             foreach ($this->modelChain(0, $prompt) as $delta) {
                 if (!$delta instanceof Delta) {
-                    throw $this->mark(new \LogicException('A model yielded ' . \get_debug_type($delta) . ', not a Harness\Delta'), 'model');
+                    throw $this->mark(new \LogicException('A middleware yielded ' . \get_debug_type($delta) . ', not a Harness\Delta'), 'middleware');
                 }
                 try {
                     $acc->add($delta);
                 } catch (\LogicException $e) {
-                    throw $this->mark($e, 'model');
+                    throw $this->mark($e, 'middleware');
                 }
                 match (true) {
                     $delta instanceof Delta\TextDelta      => $emit(new TextEvent($turn, $parent, $id, $delta->text)),
@@ -601,7 +603,13 @@ final class Run
             $this->offered[$spec->name] = true;
         }
         try {
-            yield from $this->model->stream($prompt);
+            foreach ($this->model->stream($prompt) as $delta) {
+                if (!$delta instanceof Delta) {
+                    throw new \LogicException('A model yielded ' . \get_debug_type($delta) . ', not a Harness\Delta');
+                }
+                $this->shadow->add($delta); // a malformed sequence is the provider's fault; the middleware chain has not seen it yet
+                yield $delta;
+            }
         } catch (\Throwable $e) {
             throw $this->mark($e, 'model');
         }

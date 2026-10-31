@@ -8,6 +8,7 @@ use Harness\Call;
 use Harness\Cancel;
 use Harness\Hints;
 use Harness\Http\Transport;
+use Harness\Internal\Utf8;
 use Harness\Result;
 use Harness\Tool;
 use Harness\Tools\Input;
@@ -203,12 +204,13 @@ final readonly class WebFetch implements Tool
 
     private static function tail(string $text, int $offset, int $maxChars): string
     {
-        $total = \strlen($text);
+        $text  = Utf8::scrub($text);
+        $total = Utf8::length($text);
         if ($offset > $total) {
             throw new \RuntimeException("The fetched text is $total characters; offset $offset is past the end");
         }
-        $slice = \substr($text, $offset, $maxChars);
-        $end   = $offset + \strlen($slice);
+        $slice = Utf8::slice($text, $offset, $maxChars);
+        $end   = $offset + Utf8::length($slice);
         if ($end < $total) {
             $slice .= "\n[" . ($total - $end) . ' more characters; pass offset=' . $end . ' to read on]';
         }

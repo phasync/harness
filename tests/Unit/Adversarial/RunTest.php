@@ -12,12 +12,10 @@ use Harness\Delta\ToolInputDelta;
 use Harness\ErrorKind;
 use Harness\FinishReason;
 use Harness\Hints;
-use Harness\Message;
 use Harness\ModelMiddleware;
 use Harness\Prompt;
 use Harness\Reason;
 use Harness\Result;
-use Harness\Role;
 use Harness\Stop;
 use Harness\Testing\FakeModel;
 use Harness\Tools;
@@ -111,3 +109,61 @@ it('does not blame the model for a Stop predicate that throws', function () {
     expect($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError);
 });
+
+/*
+ * Round 4: a `ModelMiddleware` that corrupts the delta stream it wraps (here, duplicating a
+ * `ToolCallStart`) rather than the underlying `Model` misbehaving.
+ *
+ * `Run::modelStep()` folds every delta into the `Accumulator` inside a nested try/catch:
+ * `try { $acc->add($delta); } catch (\LogicException $e) { throw $this->mark($e, 'model'); }`
+ * (Run.php). That unconditionally tags the exception 'model' -- before the outer catch even gets
+ * a chance to apply the generic "unmarked => middleware" rule -- regardless of whether the
+ * malformed delta sequence came from the actual `Model` or from a `ModelMiddleware` sitting in
+ * `modelChain()` in front of it. `Accumulator`'s own docblock calls this "a provider bug", but a
+ * buggy `ModelMiddleware` (duplicating, dropping or reordering deltas) triggers the exact same
+ * `\LogicException` ("Tool call X started twice", etc.) without the underlying model doing
+ * anything wrong.
+ *
+ * This is the same shape of bug the round-2/#16 fix just addressed for `Stop` predicates, with the
+ * fix's own reasoning ("host code, like a middleware: not the model's fault") applying just as
+ * much here -- a `ModelMiddleware` is host code too -- but this call site was untouched by that
+ * fix.
+ *
+ * Verified directly against the real code with both adapters: a `ModelMiddleware` that re-yields
+ * one extra `ToolCallStart` makes `Accumulator::add()` throw "Tool call c1 started twice", and the
+ * turn ends Failed with errorKind 'model_error', blaming the `FakeModel`, which only ever yielded
+ * each delta once.
+ */
+it('does not blame the model for a ModelMiddleware that corrupts the delta stream', function () {
+    $buggy = new class implements ModelMiddleware {
+        public function stream(Prompt $prompt, Closure $next): iterable
+        {
+            foreach ($next($prompt) as $delta) {
+                yield $delta;
+                if ($delta instanceof ToolCallStart) {
+                    yield $delta;  // duplicate: the Accumulator sees "started twice"
+                }
+            }
+        }
+    };
+    $model = new FakeModel([
+        new ToolCallStart('c1', 'a'),
+        new ToolInputDelta('c1', '{}'),
+        new ToolCallEnd('c1'),
+        new Usage(10, 5),
+        new Finish(FinishReason::ToolCalls),
+    ]);
+    $run = new Harness\Run($model, new Tools(), middleware: [$buggy]);
+    try {
+        turn($run, user('go'));
+    } catch (LogicException) {
+        // turn()'s own docblock: a LogicException (misuse) is rethrown after TurnEnded, once
+        // ended() already reflects it.
+    }
+
+    // Today: errorKind is ModelError, blaming the FakeModel, which yielded every delta exactly
+    // once; the corruption is entirely the ModelMiddleware's, which should be marked the same way
+    // the #16 fix now marks a throwing Stop predicate.
+    expect($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError);
+}); // #28: this was ModelError; the raw stream is validated before the middleware chain sees it

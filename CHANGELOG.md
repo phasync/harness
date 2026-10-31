@@ -71,6 +71,10 @@
   split by the `maxOutput` cut become U+FFFD (#25).
 - `apply_patch`: a path whose parent is a file fails the whole patch while planning, before any
   write, keeping the all-or-nothing promise (#26).
+- `web_fetch`: `offset` and `maxChars` count characters, as documented, not bytes; a body that is
+  not valid UTF-8 is scrubbed to U+FFFD (#27).
+- `Run`: a malformed delta sequence is `ModelError` only when the model itself produced it; one a
+  `ModelMiddleware` introduced is `MiddlewareError` (#28).
 
 ### Changed (breaking)
 

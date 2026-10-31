@@ -8,6 +8,7 @@ use function fiber\readable;
 use function fiber\sleep;
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Utf8;
 use Harness\Part\Text;
 use Harness\Result;
 use Harness\Tool;
@@ -133,8 +134,7 @@ final readonly class Shell implements Tool
         \proc_close($process);
         $exit   = $status['exitcode'];
         $output = $head . ($total > \strlen($head) + \strlen($tail) ? "\n[" . ($total - \strlen($head) - \strlen($tail)) . " bytes cut]\n" : '') . $tail;
-        // Valid UTF-8 for the model: binary output and a character split by the cut become U+FFFD
-        $output = \html_entity_decode(\htmlspecialchars($output, \ENT_SUBSTITUTE | \ENT_NOQUOTES, 'UTF-8'), \ENT_NOQUOTES | \ENT_HTML5, 'UTF-8');
+        $output = Utf8::scrub($output); // binary output and a character split by the cut become U+FFFD
         $header = null !== $killed ? "Killed: $killed" : "Exit code $exit";
 
         return new Result(

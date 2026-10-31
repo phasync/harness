@@ -114,4 +114,4 @@ it('cuts maxChars by characters, not bytes, so it never splits a multi-byte char
     // continuation note straight onto the dangling first byte -- the result is not even valid
     // UTF-8, let alone the complete 4-character word the maxChars value asked for.
     expect($text)->toBe('café');
-})->group('bug');
+}); // #27: this cut after 4 bytes, 'caf' plus half an é, and promised one more character
