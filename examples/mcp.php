@@ -8,7 +8,7 @@ declare(strict_types=1);
  * asks for input (input_required), the turn ends awaiting input; each need is asked on the terminal
  * (an empty answer declines the form) and the next turn resumes the call with the answers.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/mcp.php ["task"]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/mcp.php ["task"]
  *   HARNESS_MCP_COMMAND='my-mcp-server --flag' ...   # any server speaking revision 2026-07-28
  */
 

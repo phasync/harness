@@ -9,7 +9,7 @@ declare(strict_types=1);
  * printed as they happen (the middleware logs them, the checkpoint in full at debug) and after each
  * turn (Compact::last()). The last question can only be answered from the checkpoint.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/compact.php [budget]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/compact.php [budget]
  */
 
 require __DIR__ . '/../vendor/autoload.php';

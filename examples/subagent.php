@@ -8,7 +8,7 @@ declare(strict_types=1);
  * message and printed a whole line at a time (and the rest at MessageEnded), indented by nesting,
  * so two open messages never mix their characters.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/subagent.php <dir> <question>
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/subagent.php <dir> <question>
  */
 
 require __DIR__ . '/../vendor/autoload.php';

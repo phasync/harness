@@ -29,7 +29,7 @@ use Harness\Provider\OpenAI\ChatCompletions;
 
 fiber\setup(new FiberInterop\Phasync\Adapter());   // once per process: the adapter you installed
 
-$model = new ChatCompletions(new StreamTransport(), 'http://127.0.0.1:8012/v1', 'qwen3.8-27b-exl3-sivert');
+$model = new ChatCompletions(new StreamTransport(), 'http://127.0.0.1:8012/v1', 'qwen3.8');
 
 $clock = new ClosureTool(
     new ToolSpec('clock', 'The current time', ['type' => 'object'], new Hints(readOnly: true)),
@@ -516,7 +516,7 @@ streams NDJSON splits `body()` on newlines itself ([docs/http.md](docs/http.md))
 Each is one file, runnable against any Chat Completions endpoint:
 
 ```bash
-export HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert
+export HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8
 php examples/chat.php                       # streamed conversation; Ctrl-C interrupts a reply to edit it, a line typed meanwhile steers it, /queue queues it
 php examples/files.php ./project "task"     # file tools; writes need approval on the terminal
 php examples/shell.php ./project "task"     # a shell; every command needs approval

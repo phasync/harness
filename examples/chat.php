@@ -9,7 +9,7 @@ declare(strict_types=1);
  * line ended with Alt+Enter, or starting with /queue (terminals differ), is queued instead: the
  * model answers it after the current reply. Ctrl-C at the prompt quits.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/chat.php
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/chat.php
  */
 
 require __DIR__ . '/../vendor/autoload.php';

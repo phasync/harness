@@ -21,7 +21,7 @@ closes the documentation gaps the round-6 users named.
 ### Changed
 
 - **`Compact`'s default `summarizerOptions` becomes `maxOutputTokens: 2048`** (from 1,024): live on
-  black at the old default, round 6's readers wrote checkpoints of 2.2 to 3.0 KB and 7 of 22 runs
+  the test server at the old default, round 6's readers wrote checkpoints of 2.2 to 3.0 KB and 7 of 22 runs
   failed on a checkpoint cut twice at the output limit.
 
 ### Docs
@@ -47,7 +47,7 @@ closes the documentation gaps the round-6 users named.
 
 Implements SPEC.md revision 6: Compact's summary becomes a checkpoint that is updated rather than
 re-summarized, steering gets two delivery modes, the shell tool gets a policy over parsed argv.
-Round 5's research reader looped after many compaction rounds. Live on black with this release (the
+Round 5's research reader looped after many compaction rounds. Live on the test server with this release (the
 research tool's 2,000-token budget, 800 summarizer output tokens), 15 of 22 reader runs over three
 sessions ended `Done` within 4 to 19 steps, every checkpoint listing the files read under Done; the
 other 7 failed loudly on a checkpoint cut twice at the 800 output tokens, which the lead re-delegated.
@@ -105,7 +105,7 @@ other 7 failed loudly on a checkpoint cut twice at the 800 output tokens, which 
 - **Each checkpoint is logged in full at `debug`**, after the `info` line with its sizes.
 - **`Compact` bounds the checkpoint**: the ask says to stay under a quarter of the budget and three
   quarters of `summarizerOptions`' output tokens, in words, and a checkpoint cut at the output limit
-  is asked for again in 60 % of the words. Live on black, 4 of 10 reader checkpoints were cut at
+  is asked for again in 60 % of the words. Live on the test server, 4 of 10 reader checkpoints were cut at
   the research tool's 800 output tokens before this.
 - **`Compact\Checkpoint`**, a checkpoint as a value (`hash`, `covered`, `kept`, `lifted`, `text`,
   `previousBytes`, `finish`; `removed()`, `toArray()`, `fromArray()`).

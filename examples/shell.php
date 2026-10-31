@@ -5,7 +5,7 @@ declare(strict_types=1);
 /*
  * An agent with a shell in a directory. Every command needs your approval; output streams as it runs.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/shell.php <dir> [task]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/shell.php <dir> [task]
  *
  * With a task it runs one turn; without, it asks for tasks until EOF. Ctrl-C cancels a turn (and kills the command).
  */

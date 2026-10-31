@@ -5,7 +5,7 @@ declare(strict_types=1);
 /*
  * An agent with the file tools over a directory. Writes and edits need your approval on the terminal.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/files.php <dir> [task]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/files.php <dir> [task]
  *
  * With a task it runs one turn; without, it asks for tasks until EOF. Ctrl-C cancels a turn.
  */

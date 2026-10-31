@@ -8,7 +8,7 @@ declare(strict_types=1);
  * before it answers at once (the README's inline idiom), so the turn never ends awaiting input. A
  * web host would drop the terminal middleware and answer the pending call in its next request.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/policy.php <dir> [task]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/policy.php <dir> [task]
  */
 
 require __DIR__ . '/../vendor/autoload.php';

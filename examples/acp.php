@@ -9,7 +9,7 @@ declare(strict_types=1);
  * other commands ask the editor's user. Sessions are kept in a directory so the editor can load
  * them again. Nothing is written to stdout but the protocol.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8-27b-exl3-sivert php examples/acp.php [session dir]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/acp.php [session dir]
  *
  * A Zed agent_servers entry: {"command": "php", "args": ["/path/to/examples/acp.php"], "env": {...}}
  */

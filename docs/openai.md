@@ -7,7 +7,7 @@
 $model = new ChatCompletions(
     new StreamTransport(),
     baseUrl: 'http://127.0.0.1:8012/v1',      // up to, not including, /chat/completions
-    model: 'qwen3.8-27b-exl3-sivert',
+    model: 'qwen3.8',
     apiKey: null,                              // sent as Authorization: Bearer
     headers: [],                               // extra request headers
 );
