@@ -70,9 +70,16 @@ it('writes files, creating directories', function () {
         ->and(text($w->call(['path' => 'new/dir/f.txt', 'content' => 'bye'], callFor())))->toStartWith('Replaced');
 });
 
+it('runs write_file\'s check after the write and appends its message', function () {
+    $w = new WriteFile($this->root, check: fn (string $abs): ?string => \str_ends_with($abs, 'bad.txt') ? 'php -l failed' : null);
+    expect(text($w->call(['path' => 'good.txt', 'content' => 'x'], callFor())))->not->toContain('Check:')
+        ->and(text($w->call(['path' => 'bad.txt', 'content' => 'x'], callFor())))->toContain('Check: php -l failed')
+        ->and(\file_get_contents($this->dir . '/bad.txt'))->toBe('x');
+});
+
 it('edits one unique occurrence', function () {
     $e = new EditFile($this->root);
-    expect(text($e->call(['path' => 'src/a.php', 'old' => 'beta', 'new' => 'delta'], callFor())))->toBe("Edited 'src/a.php' at line 3")
+    expect(text($e->call(['path' => 'src/a.php', 'old' => 'beta', 'new' => 'delta'], callFor())))->toBe("Edited 'src/a.php':\n     1\t<?php\n     2\tfunction alpha() {}\n     3\tfunction delta() {}")
         ->and(\file_get_contents($this->dir . '/src/a.php'))->toContain('function delta()')
         ->and(fn () => $e->call(['path' => 'src/a.php', 'old' => 'function', 'new' => 'fn'], callFor()))->toThrow(RuntimeException::class, 'occurs 2 times')
         ->and(fn () => $e->call(['path' => 'src/a.php', 'old' => 'nope', 'new' => 'x'], callFor()))->toThrow(RuntimeException::class, 'not found')

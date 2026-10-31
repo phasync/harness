@@ -11,10 +11,15 @@ use Harness\Tool;
 use Harness\Tools\Input;
 use Harness\ToolSpec;
 
-/** `write_file`: creates or replaces a file with `content`, creating missing parent directories. */
+/**
+ * `write_file`: creates or replaces a file with `content`, creating missing parent directories.
+ * `$check`, when given, runs after a successful write (`fn (string $absolutePath): ?string`, an
+ * error message or null) and its message, if any, is appended to the result; `$journal`, when
+ * given, records the file's previous content (or absence) before the write.
+ */
 final readonly class WriteFile implements Tool
 {
-    public function __construct(private Root $root)
+    public function __construct(private Root $root, private ?\Closure $check = null, private ?Journal $journal = null)
     {
     }
 
@@ -43,10 +48,19 @@ final readonly class WriteFile implements Tool
         if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
             throw new \RuntimeException("Could not create the directory for '$path'");
         }
+        $this->journal?->record($abs);
         if (false === \file_put_contents($abs, $content)) {
             throw new \RuntimeException("Could not write '$path'");
         }
 
-        return Result::text(($existed ? 'Replaced' : 'Created') . " '$path' (" . \strlen($content) . ' bytes)');
+        $text = ($existed ? 'Replaced' : 'Created') . " '$path' (" . \strlen($content) . ' bytes)';
+        if (null !== $this->check) {
+            $message = ($this->check)($abs);
+            if (null !== $message) {
+                $text .= "\nCheck: $message";
+            }
+        }
+
+        return Result::text($text);
     }
 }
