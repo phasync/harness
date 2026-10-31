@@ -57,8 +57,10 @@ final class Run
     private int $turns               = 0;
     private bool $running            = false;
     private bool $open               = false; // a turn() generator exists that has not finished or been released
-    private ?\LogicException $misuse = null; // the last turn's misuse exception, until turn() has thrown it
-    private bool $cancelled          = false;
+    /** @var ?\WeakReference<\Generator> */
+    private ?\WeakReference $generator = null; // that generator, to tell a dropped one from a kept one
+    private ?\LogicException $misuse   = null; // the last turn's misuse exception, until turn() has thrown it
+    private bool $cancelled            = false;
     private Accumulator $shadow;
     private bool $interrupted  = false;
     /** The interrupted reply, as delivered when the turn's model stream stopped. */
@@ -166,15 +168,28 @@ final class Run
      */
     public function turn(Message|Resume|array $input, ?Call $parentCall = null): \Generator
     {
+        // Checked here, at the call, not at the first iteration: a generator runs nothing until then.
         if ($this->running) {
             throw new \LogicException('A turn is already running on this Run; finish iterating it first');
         }
-        if ($this->open) {
+        if ($this->open && null !== $this->generator?->get()) { // a generator dropped before it was iterated released its claim
             throw new \LogicException("The previous turn's generator is still open; exhaust it (TurnEnded is its last event, a misuse exception follows) or release it before starting a new turn");
         }
-        $answers             = $this->checkInput($input);
+        $generator       = $this->events($input, $this->checkInput($input), $parentCall);
+        $this->open      = true;
+        $this->generator = \WeakReference::create($generator);
+
+        return $generator;
+    }
+
+    /**
+     * @param list<Answer> $answers
+     *
+     * @return \Generator<int, Event>
+     */
+    private function events(Message|Resume|array $input, array $answers, ?Call $parentCall): \Generator
+    {
         $this->running       = true;
-        $this->open          = true;
         $this->misuse        = null;
         $this->cancelled     = false;
         $this->interrupted   = false;

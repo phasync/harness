@@ -523,3 +523,26 @@ it('does not count a nested table\'s rows as rows of the outer table', function 
     // Inner-2") is appended again as a spurious extra row of the outer table.
     expect(\substr_count(Html::extract($html), "\n"))->toBe(1);
 }); // #84: getElementsByTagName('tr') reached into the nested table
+
+/*
+ * `inline()`'s sentinels are the byte `\0` followed by a letter ('n' for a line break, 'i' for
+ * list indent, 'v' for a verbatim slot), resolved by `collapse()`'s `trim(preg_replace('/\s+/u',
+ * ' ', $text))` and the regexes right after it. But PHP's `trim()`, with no second argument,
+ * strips `" \t\n\r\0\x0B"` from both ends -- and `\0` is in that default set. Whenever a
+ * sentinel ends up as the very first (or last) byte of the buffer `collapse()` is given --
+ * which happens any time an element that emits a sentinel (`<br>`, a nested list, a nested
+ * table, a verbatim `<pre>`) is the first or only thing inside its parent, with nothing ahead of
+ * it to keep the sentinel away from the edge -- `trim()` eats the leading `\0` on its own,
+ * before the "\0n"-to-"\n" regex ever runs, and leaves the sentinel's bare letter standing as
+ * ordinary visible text. This is not specific to the #84 nested-table fix; the simplest possible
+ * case is a `<p>` that starts with a `<br>`.
+ */
+it('does not leak a stray sentinel letter when a <br> is the first thing in its block', function () {
+    // Today: Html::extract() returns 'nAfter' -- a bare 'n' where the leading line break's
+    // sentinel had its NUL byte eaten by trim()'s default character list, exposing the letter.
+    expect(Html::extract('<p><br>After</p>'))->toBe('After');
+}); // #90: trim() ate the NUL and left the 'n'
+
+it('keeps a nested list that opens its item intact, with its indentation', function () {
+    expect(Html::extract('<ul><li><ul><li>inner</li></ul></li><li>second</li></ul>'))->toBe("-   - inner\n- second");
+}); // #90, the \0i sentinel at the start of an item lost its NUL the same way

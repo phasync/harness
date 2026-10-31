@@ -781,61 +781,35 @@ it('reports a second collapsed checkpoint as the turn\'s MiddlewareError, not Mo
 });
 
 /*
- * Round 15. `turn()`'s docblock, and every guard it describes ("A turn is already running on this
- * Run", "The previous turn's generator is still open"), read as if calling `turn()` a second time
- * while a first is outstanding is caught at once. But `turn()` is declared `: \Generator` and its
- * body itself contains the `yield`s, so by PHP's own rule NONE of its code -- not the guard
- * checks, not checkInput()'s validation, not setting $this->running -- runs until the returned
- * generator is first iterated. Simply calling `$run->turn($input)` and holding onto the generator
- * for later (an entirely ordinary thing to do: queue it, pass it around, iterate it in a moment)
- * does nothing at all yet.
+ * Round 15. `turn()`'s docblock, and the #41 fix's own description ("Run keeps an $open flag from
+ * turn() until its generator finishes or is released; a second turn() while it is open throws"),
+ * read as if making a second `turn()` call while a first is outstanding is caught at once, simply
+ * by calling it. But `turn()` is declared `: \Generator` and its body itself contains the `yield`s,
+ * so by PHP's own rule NONE of its code -- not the "already running"/"still open" guards, not
+ * checkInput()'s validation, not setting $this->running or $this->open -- runs until the returned
+ * generator is actually iterated for the first time. Simply calling `$run->turn($input)` and
+ * holding onto the generator for later (an entirely ordinary thing to do: queue it, pass it
+ * around, start iterating it in a moment) runs none of this yet, so the guard has nothing to catch
+ * against.
  *
- * That means two `turn()` calls can be made back to back, neither iterated, and both guards stay
- * silent: there is nothing yet for them to catch. If the second generator is then iterated to
- * completion before the first is ever touched, it runs an entire turn start to finish with
- * $this->running/$this->open never having been set by the still-dormant first call. When the first
- * generator is iterated afterwards, its own guard checks now run for the first time too -- and find
- * the run idle again (the second turn finished and reset it) -- so they pass it through as well.
- * Both turns execute, unguarded, and their user messages and model replies interleave on the one
- * shared Run: no exception anywhere, but the second turn's prompt silently got the first turn's
- * model reply as its answer, and vice versa.
+ * This is checked here in its simplest form: two `turn()` calls, back to back, neither one
+ * iterated at all. Per the docblock and the #41 fix, the second call should find the Run already
+ * open and throw `A turn is already running on this Run` (or the "still open" message) right there
+ * -- that is the whole point of a guard meant to catch misuse "at once". It does not.
  */
-it('lets two turns interleave unguarded when neither generator is iterated before the next is made', function () {
-    $model = new FakeModel(
-        [new TextDelta('first'), new Usage(1, 1), new Finish(FinishReason::Stop)],
-        [new TextDelta('second'), new Usage(1, 1), new Finish(FinishReason::Stop)],
-    );
-    $run = new Harness\Run($model, new Tools());
+it('refuses a second turn() at the call while the first generator is kept, and allows it once that is dropped', function () {
+    $model = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
+    $run   = new Harness\Run($model, new Tools());
 
-    // Neither generator is iterated here: per the docblock, the second call should find the first
-    // turn "already running" and throw. Today, nothing has run yet, so nothing throws.
     $gen1 = $run->turn(new Message(Role::User, [new Text('one')]));
-    $gen2 = $run->turn(new Message(Role::User, [new Text('two')]));
 
-    $threw = null;
-    \fiber\run(function () use ($gen1, $gen2, &$threw) {
-        // The later-made turn runs to completion first, entirely unaware of the dormant first one.
-        foreach ($gen2 as $e) {
-        }
-        try {
-            // The first turn's guards finally run now -- against a Run that is idle again.
-            foreach ($gen1 as $e) {
-            }
-        } catch (\Throwable $e) {
-            $threw = $e;
+    // The first turn() claimed the Run at the call; the second is refused while that generator is kept.
+    expect(fn () => $run->turn(new Message(Role::User, [new Text('two')])))
+        ->toThrow(LogicException::class, 'still open');
+    $gen1 = null; // dropped before it was iterated: the claim goes with it
+    \fiber\run(function () use ($run) {
+        foreach ($run->turn(new Message(Role::User, [new Text('two')])) as $e) {
         }
     });
-
-    // Today: neither guard ever fires, and the two turns' content is cross-wired -- turn 2's user
-    // message is immediately followed by turn 1's model reply, and vice versa.
-    expect($threw)->toBeNull();
-    $texts = [];
-    foreach ($run->messages() as $m) {
-        foreach ($m->parts as $p) {
-            if ($p instanceof Text) {
-                $texts[] = $p->text;
-            }
-        }
-    }
-    expect($texts)->toBe(['two', 'first', 'one', 'second']);
-})->group('bug');
+    expect($run->ended()->reason)->toBe(Reason::Done);
+}); // #92: the guards sat inside the generator body and ran only at the first iteration

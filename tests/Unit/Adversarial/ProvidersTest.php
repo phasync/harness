@@ -12,6 +12,7 @@ use Harness\Http\Response;
 use Harness\Mcp\Connection;
 use Harness\Mcp\McpException;
 use Harness\Mcp\McpServer;
+use Harness\Mcp\StdioConnection;
 use Harness\Message;
 use Harness\ModelException;
 use Harness\Options;
@@ -982,3 +983,47 @@ it('refuses a conversation that opens with an assistant message before the reque
         ->toThrow(UnsupportedContentException::class, 'opens with an assistant message')
         ->and($t->requests)->toBe([]);
 }); // #89: sent as-is, a 400 the model cannot fix
+
+/*
+ * Round 18, MCP, first item reached: `StdioConnection::dispatch()` (src/Mcp/StdioConnection.php)
+ * decides whether a decoded line is a response with:
+ *   if (isset($message['id']) && (\array_key_exists('result', $message) || isset($message['error'])))
+ * `isset()` is `false` for a JSON `null` value, so a response whose `id` is literally `null` --
+ * which JSON-RPC uses specifically for "something went wrong and I could not determine which
+ * request this was for" (a parse error, say) -- fails this check entirely. It then falls through
+ * both the notification branch (`isset($message['method'])` is false; there is no `method` on a
+ * response) and the server-to-client-request branch (same reason), so `dispatch()` does nothing
+ * with it: the message is silently discarded, and whatever request was waiting (keyed by its real
+ * integer id) is never told anything arrived.
+ *
+ * If the server then stays alive, the waiting `request()` call loops in `receive()` forever --
+ * nothing bounds it except the process dying (`feof`) or the caller's own `Cancel`; this is the
+ * "hang" category this module's charter names explicitly. If the server instead exits right after
+ * (as it reasonably might, having just reported its own parse error), `alive()` reports the ONLY
+ * fact it has -- "The MCP server exited" -- a plain, truthful, but misleading message: the server
+ * did not crash silently, it answered, with the one signal JSON-RPC reserves for "an error
+ * happened, I don't know which request this was for" -- and that specific signal is thrown away
+ * before the caller ever sees it.
+ *
+ * Verified directly against the real code (both adapters): a one-line stdio server that reads one
+ * request and replies `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse
+ * error"}}` then exits makes `request()` throw `McpException('The MCP server exited (status 0): ...')`
+ * -- not an exception naming the actual `id: null` response the server sent.
+ */
+it('reports a response with id null, not just that the server later exited', function () {
+    // The injected server source itself must not contain the words the assertion below checks
+    // for, or a match on the exception's embedded "...: <command>" tail would prove nothing.
+    $serverCode = 'fgets(STDIN); fwrite(STDOUT, json_encode(["jsonrpc" => "2.0", "zzz" => null, "error" => ["code" => -32700, "message" => "oops"]]) . "\n");';
+    $conn       = new StdioConnection([\PHP_BINARY, '-r', \str_replace('zzz', 'id', $serverCode)]);
+
+    // Today: "The MCP server exited (status 0): ..." -- plain death, with no mention that a
+    // response naming no usable id was actually sent and silently dropped by dispatch().
+    $message = null;
+    try {
+        \fiber\run(fn () => $conn->request('server/discover', [], live()));
+        $this->fail('no exception');
+    } catch (McpException $e) {
+        $message = $e->getMessage();
+    }
+    expect($message)->not->toContain('exited');
+}); // #93: the response matched no branch of dispatch() and was dropped

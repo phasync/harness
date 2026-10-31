@@ -464,3 +464,27 @@ it('matches case-insensitively on a non-ASCII letter, not just ASCII ones', func
     // against 'é' because the regex is missing PCRE's 'u' (UTF-8) modifier.
     expect($result->content[0]->text)->toContain('café content here');
 }); // #88: the i modifier without u folds ASCII only
+
+/*
+ * Round 18, attacking the #88 fix. `Grep::call()`'s regex now always carries PCRE's `u` modifier
+ * (case folding and `.` need it to reach beyond ASCII). But `u` applies to the *subject* too: when
+ * a line is not valid UTF-8, `preg_match($regex, $line)` returns `false` (a PCRE error,
+ * PREG_BAD_UTF8_ERROR), not `0`. The loop only checks `1 === \preg_match(...)`, so a `false` result
+ * is treated exactly like "no match" -- the line is silently dropped from the results, with
+ * nothing like the "[N binary files skipped]" counter to say so. The file as a whole is still
+ * scanned (it isn't flagged binary -- that check only looks for a NUL byte in the first 8192
+ * bytes, which this line doesn't have), so a model searching a file that happens to contain one
+ * line of invalid UTF-8 (stray Latin-1 bytes, a truncated multi-byte sequence) gets back fewer
+ * matches than actually exist, with no indication anything was skipped. `Utf8::scrub()` is only
+ * applied to a line *after* it already matched, which is too late to let an otherwise-matching but
+ * invalid line be found at all.
+ */
+it('still finds a match on a line that is not valid UTF-8, in an otherwise text file', function () {
+    $content = "needle on a clean line\nneedle next to invalid bytes: \xA9\xA9\nend\n";
+    \file_put_contents($this->dir . '/f.txt', $content);
+    $result = (new Grep($this->root))->call(['pattern' => 'needle', 'path' => 'f.txt'], callFor());
+
+    // BUG: today only line 1 is reported; line 2 (also containing "needle") is silently dropped
+    // because preg_match() with the 'u' modifier returns false, not 0, on an invalid-UTF-8 subject.
+    expect($result->meta['count'])->toBe(2);
+}); // #91: preg_match returned false under u and the line was taken as no match

@@ -18,7 +18,8 @@ namespace Harness\Tools\Web;
  */
 final class Html
 {
-    private const DROP = ['script', 'style', 'noscript', 'svg', 'nav', 'footer', 'header', 'aside', 'form'];
+    private const DROP  = ['script', 'style', 'noscript', 'svg', 'nav', 'footer', 'header', 'aside', 'form'];
+    private const SPACE = " \t\n\r\x0B";
 
     public static function extract(string $html): string
     {
@@ -151,7 +152,7 @@ final class Html
         // collapse; extract() turns the indentation into spaces once the nesting is complete
         $text = \preg_replace('/ ?\x00n ?/', "\n", self::collapse($out)) ?? '';
 
-        return \trim(\preg_replace_callback('/\x00v/', static fn (): string => \array_shift($verbatim) ?? '', $text) ?? '');
+        return \trim(\preg_replace_callback('/\x00v/', static fn (): string => \array_shift($verbatim) ?? '', $text) ?? '', self::SPACE);
     }
 
     /** One line per `tr`, its `td`/`th` cells joined with `" | "`. */
@@ -180,6 +181,6 @@ final class Html
 
     private static function collapse(string $text): string
     {
-        return \trim(\preg_replace('/\s+/u', ' ', $text) ?? '');
+        return \trim(\preg_replace('/\s+/u', ' ', $text) ?? '', self::SPACE); // whitespace only: trim()'s default set holds NUL, the sentinels' lead byte
     }
 }

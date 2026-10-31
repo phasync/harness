@@ -206,6 +206,14 @@ final class StdioConnection implements Connection
 
             return;
         }
+        if (\array_key_exists('id', $message) && null === $message['id'] && isset($message['error'])) {
+            // JSON-RPC: the server could not tell which request this answers (a parse error, say); every open request hears it
+            foreach (\array_keys($this->open) as $id) {
+                $this->responses[$id] = ['id' => $id] + $message;
+            }
+
+            return;
+        }
         if (isset($message['method']) && !isset($message['id'])) {
             $token = $message['params']['progressToken'] ?? null;
             if (\is_string($token) && isset($this->progress[$token])) {

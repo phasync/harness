@@ -177,6 +177,15 @@
   command running for up to a second (#87).
 - `grep`'s `ignore_case` folds non-ASCII letters too (the `u` modifier) (#88).
 - Anthropic refuses, before the request, a conversation that opens with an assistant message (#89).
+- `web_fetch` no longer leaks a stray letter when a `<br>`, nested list, nested table or `<pre>` opens
+  its block (#90).
+- `grep` matches a line that is not valid UTF-8 after scrubbing it, instead of dropping it without a
+  word (#91).
+- `turn()` checks its input and claims the `Run` when it is called, not when its generator is first
+  iterated: a second `turn()` made before the first is iterated is refused, and a bad input is
+  reported at the call (#92).
+- An MCP error response with `id: null` (the server could not tell which request it answers) fails
+  every open request with its message, instead of being dropped (#93).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

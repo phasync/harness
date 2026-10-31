@@ -555,3 +555,55 @@ it('kills a command promptly even for a timeout small enough to race the setsid 
             ->and($r->content[0]->text)->toStartWith('Killed: timed out after 0.001 s');
     }
 }); // #87: the group kill was a silent ESRCH before setsid ran, retried only after deadline + 1 s
+
+/*
+ * Round 15 attacked #87's fix (the setsid-startup race: group kill races the forked child's own
+ * `setsid()`, the retry now happens at every 10 ms poll instead of waiting a full extra second).
+ * `call()` reaches that retry loop through one `$killed` variable set identically by a timeout
+ * (`$left <= 0`) and a cancellation (`$call->isCancelled()`) -- the fix should cover both the
+ * same way, but nothing in the suite had ever driven Shell::call() under a *real* `Run`
+ * cancellation (only a timeout) to check the generalization held.
+ *
+ * Also attacked this round and found already correct, not reported:
+ *  - `proc_open`'s direct child is, per `setsid(1)`'s own man page, only ever a process group
+ *    leader itself (forcing `setsid` to fork internally rather than exec in place) when it was
+ *    already one before `setsid` ran. Verified directly that in this process tree `proc_open`'s
+ *    child never starts as its own group leader (it inherits the ordinary, already-running
+ *    group), so `setsid` always takes the no-fork path and `$status['pid']` really does become
+ *    the real command's own pid and new pgid once `setsid()` completes -- the fallback-pid-kill
+ *    branch for an already-forked `setsid` is correctly unreachable here, not a live gap.
+ *  - The result text and `value` for a near-zero timeout (`0.001` s) stayed `"Killed: timed out
+ *    after 0.001 s..."` / `null` across 30 trials, even though a good share of them still hit the
+ *    race internally (the retry just resolves it inside ~10-20 ms now instead of leaving it wrong).
+ *  - A character straddling the internal head/tail split point (not a real cut: total output ==
+ *    `maxOutput` exactly, post-#70) reconstructs byte-for-byte, because `$head` and `$tail` are
+ *    contiguous substrings of the same bytes when no `"[N bytes cut]"` marker is spliced between
+ *    them; `Utf8::scrub()` runs on the rejoined whole, not on `$head`/`$tail` separately.
+ *  - A command writing 50 MB far faster than `maxOutput: 1000` keeps it: `$head`/`$tail`/`$carry`
+ *    stay bounded regardless of how much flows past them (`memory_get_peak_usage()` unchanged
+ *    across the run), and it completes in a fraction of a second.
+ *
+ * Verified directly: a tool that calls `$run->cancel()` (the run is already marked "running", so
+ * it takes effect) immediately before handing off to `Shell::call()` with a 10 s timeout -- long
+ * enough that the timeout branch can never be what ends the call -- returns in ~10-25 ms every
+ * time, 20 independent trials, never the ~1 s an unretried, raced kill used to cost.
+ */
+it('cancels a command promptly too, not just a timeout, even when the kill races the setsid startup', function () {
+    for ($i = 0; $i < 20; ++$i) {
+        $run  = null;
+        $tool = tool('shell', function (array $in, \Harness\Call $call) use (&$run) {
+            $run->cancel(); // $run->running is already true: this cancellation takes effect
+
+            return (new ShellTool(\sys_get_temp_dir()))->call(['command' => 'sleep 3', 'timeout' => 10.0], $call);
+        });
+        $run = new Harness\Run(new Harness\Testing\FakeModel(calls(['c1', 'shell', []])), new Harness\Tools($tool));
+
+        $start   = \microtime(true);
+        turn($run, user('go'));
+        $elapsed = \microtime(true) - $start;
+        $result  = $run->messages()[2]->parts[0];
+
+        expect($elapsed)->toBeLessThan(0.5) // comfortably above a plain kill's ~10-25 ms, comfortably below the old ~1 s raced fallback
+            ->and($result->content[0]->text)->toStartWith('Killed: cancelled');
+    }
+}); // regression: round 15 found no new defect; this pins #87's fix generalizing to cancel(), not just timeout
