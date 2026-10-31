@@ -18,7 +18,8 @@ namespace Harness;
  * `partial` is set only for `Reason::Interrupted` while the model streamed: the assistant message
  * as delivered so far (its text as streamed, its reasoning, the tool calls that were complete),
  * which is nowhere else; `finish` is null then. `queued` holds the messages given to
- * `Run::interject()` that did not land because the turn ended before another model call.
+ * `Run::interject()` that did not land because the turn ended before another model call, the
+ * steering ones first, then the queued ones, each in the order given.
  */
 final readonly class Ended
 {

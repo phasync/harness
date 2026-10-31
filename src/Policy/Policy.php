@@ -30,7 +30,7 @@ final readonly class Policy implements ToolMiddleware
     {
         foreach ($rules as $rule) {
             if (!$rule instanceof Rule) {
-                throw new \InvalidArgumentException('Policy takes a list of Rule (Rule::tool(), Rule::hints(), Rule::when()), got ' . \get_debug_type($rule));
+                throw new \InvalidArgumentException('Policy takes a list of Rule (Rule::tool(), Rule::hints(), Rule::shell(), Rule::when()), got ' . \get_debug_type($rule));
             }
         }
         $this->rules = \array_values($rules);
@@ -43,8 +43,8 @@ final readonly class Policy implements ToolMiddleware
         }
         [$verdict, $text] = [$this->default, 'any other tool'];
         foreach ($this->rules as $rule) {
-            if ($rule->matches($call, $context)) {
-                [$verdict, $text] = [$rule->verdict, $rule->text];
+            if (null !== ($decided = $rule->decide($call, $context))) {
+                [$verdict, $text] = [$decided->verdict, $decided->text];
                 break;
             }
         }

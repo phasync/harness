@@ -42,7 +42,7 @@ final class Events
             'step_ended'        => new StepEnded($t, $p, $data['n']),
             'message_started'   => new MessageStarted($t, $p, $data['id']),
             'message_resumed'   => new MessageResumed($t, $p, $data['id']),
-            'interjected'       => new Interjected($t, $p, Message::fromArray($data['message'])),
+            'interjected'       => new Interjected($t, $p, Message::fromArray($data['message']), Delivery::from($data['delivery'] ?? throw new \InvalidArgumentException('An interjected event array needs "delivery"'))),
             'text_delta'        => new TextDelta($t, $p, $data['id'], $data['text']),
             'reasoning_delta'   => new ReasoningDelta($t, $p, $data['id'], $data['text']),
             'tool_call_started' => new ToolCallStarted($t, $p, $data['id'], $data['name']),

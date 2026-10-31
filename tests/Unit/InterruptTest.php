@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Harness\Agents\AgentTool;
 use Harness\Approval;
 use Harness\Call;
+use Harness\Delivery;
 use Harness\Delta\Finish;
 use Harness\Delta\ReasoningDelta;
 use Harness\Delta\TextDelta;
@@ -225,6 +226,7 @@ it('lands an interjection after the step\'s tool results, before the next model 
         ->and(\array_slice(types($events), 8, 4))->toBe(['step_ended', 'interjected', 'interjected', 'step_started'])
         ->and($events[9])->toBeInstanceOf(Interjected::class)
         ->and($events[9]->message)->toEqual(user('actually, stop'))
+        ->and($events[9]->delivery)->toBe(Delivery::Steer)
         ->and($run->ended()->reason)->toBe(Reason::Done)
         ->and($run->ended()->queued)->toBe([]);
 });
@@ -250,12 +252,92 @@ it('leaves interjections that could not land in Ended::$queued', function () {
     $run = new Run(new FakeModel(calls(['c1', 'w', []])), new Tools($ask));
     turnActing($run, user('go'), function (Run $run, Event $e) {
         if ($e instanceof Event\ToolCallReady) {
-            $run->interject(user('later'));
+            $run->interject(user('later'), Delivery::Queue);   // a steer would skip the call
         }
     });
     expect($run->ended()->reason)->toBe(Reason::AwaitingInput)
         ->and($run->ended()->queued)->toEqual([user('later')])
         ->and($run->messages())->toHaveCount(2);
+});
+
+it('skips the step\'s tool calls that have not started when the user steers, each with a paired error result', function () {
+    $model = new FakeModel(calls(['c1', 'first', []], ['c2', 'second', []], ['c3', 'third', []]), says('Changing course.'));
+    $run   = null;
+    $ran   = [];
+    $first = tool('first', function () use (&$run, &$ran) {
+        $ran[] = 'first';
+        $run->interject(user('stop, do something else'));
+        \fiber\sleep(0.005);
+
+        return Result::text('first done');
+    });
+    $other  = fn (string $name) => tool($name, function () use ($name, &$ran) {
+        $ran[] = $name;
+
+        return Result::text("$name done");
+    });
+    $run    = new Run($model, new Tools($first, $other('second'), $other('third')));
+    $events = turn($run, user('go'));
+    $m      = $run->messages();
+    $skip   = [new Text('Skipped: the user sent a message')];
+    expect($ran)->toBe(['first'])
+        ->and($m[2]->parts)->toEqual([new ToolResult('c1', [new Text('first done')]), new ToolResult('c2', $skip, true), new ToolResult('c3', $skip, true)])
+        ->and($m[3])->toEqual(user('stop, do something else'))
+        ->and($model->prompts[1]->messages)->toEqual(\array_slice($m, 0, 4))
+        ->and(\array_values(\array_filter($events, fn ($e) => $e instanceof Event\ToolEnded && $e->outcome->error)))->toHaveCount(2)
+        ->and($run->ended()->reason)->toBe(Reason::Done);
+});
+
+it('skips the tool calls of a reply that streamed while the user steered', function () {
+    $model  = new FakeModel(calls(['c1', 'write', []]), says('Ok.'));
+    $write  = tool('write', fn () => throw new RuntimeException('must not run'));
+    $run    = new Run($model, new Tools($write));
+    turnActing($run, user('go'), function (Run $run, Event $e) {
+        if ($e instanceof Event\ToolCallStarted) {
+            $run->interject(user('wait, no'));
+        }
+    });
+    expect($run->messages()[2]->parts)->toEqual([new ToolResult('c1', [new Text('Skipped: the user sent a message')], true)])
+        ->and($run->messages()[3])->toEqual(user('wait, no'));
+});
+
+it('lands a queued message only when the turn would end Done, one step each, in order', function () {
+    $model = new FakeModel(calls(['c1', 'slow', []]), says('Answer one.'), says('Answer two.'), says('Answer three.'));
+    $run   = null;
+    $slow  = tool('slow', function () use (&$run) {
+        $run->interject(user('then this'), Delivery::Queue);
+        $run->interject(user('and this'), Delivery::Queue);
+
+        return Result::text('done');
+    });
+    $run    = new Run($model, new Tools($slow));
+    $events = turn($run, user('go'));
+    $m      = $run->messages();
+    $landed = \array_values(\array_filter($events, fn ($e) => $e instanceof Interjected));
+    expect($model->prompts)->toHaveCount(4)
+        // Not after the tool results: the model answered the first message first.
+        ->and($model->prompts[1]->messages)->toEqual(\array_slice($m, 0, 3))
+        ->and(textOf($m[3]))->toBe('Answer one.')
+        ->and($m[4])->toEqual(user('then this'))
+        ->and(textOf($m[5]))->toBe('Answer two.')
+        ->and($m[6])->toEqual(user('and this'))
+        ->and(textOf($m[7]))->toBe('Answer three.')
+        ->and(\array_map(fn ($e) => [$e->message, $e->delivery], $landed))->toEqual([[user('then this'), Delivery::Queue], [user('and this'), Delivery::Queue]])
+        ->and(\array_slice(types($events), \array_search('interjected', types($events), true) - 1, 3))->toBe(['step_ended', 'interjected', 'step_started'])
+        ->and($run->ended()->reason)->toBe(Reason::Done)
+        ->and($run->ended()->queued)->toBe([]);
+});
+
+it('leaves steered and queued messages that could not land in Ended::$queued, steered first', function () {
+    $run = new Run(new FakeModel(says('ok')), new Tools(), stop: [fn () => true]);
+    turnActing($run, user('go'), function (Run $run, Event $e) {
+        if ($e instanceof Event\TextDelta) {
+            $run->interject(user('queued'), Delivery::Queue);
+            $run->interject(user('steered'));
+        }
+    });
+    expect($run->ended()->reason)->toBe(Reason::Stopped)
+        ->and($run->ended()->queued)->toEqual([user('steered'), user('queued')]);
 });
 
 it('refuses an interjection with no turn running, or one that is not a plain user message', function () {
@@ -266,7 +348,7 @@ it('refuses an interjection with no turn running, or one that is not a plain use
 });
 
 it('rebuilds MessageResumed and Interjected from their arrays', function () {
-    foreach ([new MessageResumed(2, 'p1', 'msg_1'), new Interjected(1, null, user('hey'))] as $e) {
+    foreach ([new MessageResumed(2, 'p1', 'msg_1'), new Interjected(1, null, user('hey'), Delivery::Queue)] as $e) {
         expect(Events::fromArray(\json_decode(\json_encode($e), true)))->toEqual($e);
     }
 });

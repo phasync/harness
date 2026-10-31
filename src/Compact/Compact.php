@@ -357,7 +357,7 @@ final class Compact implements ModelMiddleware
                 : $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
         }
         $previous       = null === $checkpoint ? null : \strlen($checkpoint->text);
-        [$text, $finish] = $this->summarize($prompt->system, \array_slice($messages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel);
+        [$text, $finish] = $this->summarize($prompt->system, \array_slice($messages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel, $budget);
         $lifted         = null !== $latest && $latest >= $kept && $latest < $cut ? $latest : null;
         $new            = new Checkpoint($hashes[$cut], $cut, $kept, $lifted, $text, $previous, $finish);
         $next           = self::view($messages, $new);
@@ -444,16 +444,24 @@ final class Compact implements ModelMiddleware
     /**
      * The checkpoint for `$segment` and how its side call ended: a new one, or `$previous` updated
      * with it. The agent's instructions and the `$kept` first messages go along as context (the
-     * task, in the terms the instructions use). A collapsed one (empty, cut at the token limit, or
-     * under a quarter of `$previous`) is asked for once more, and fails the step the second time.
+     * task, in the terms the instructions use). It is asked to stay under a quarter of the budget
+     * and three quarters of the summarizer's output tokens, in words. A collapsed one (empty, cut at
+     * the token limit, or under a quarter of `$previous`) is asked for once more, and fails the step
+     * the second time.
      *
      * @param list<Message> $kept
      * @param list<Message> $segment
      *
      * @return array{0: string, 1: FinishReason}
      */
-    private function summarize(?string $system, array $kept, ?string $previous, array $segment, Cancel $cancel): array
+    private function summarize(?string $system, array $kept, ?string $previous, array $segment, Cancel $cancel, int $budget): array
     {
+        // The checkpoint must fit beside the fixed part and the reserve, and in the side call's output.
+        $tokens = \intdiv($budget, 4);
+        if (null !== $this->summarizerOptions->maxOutputTokens) {
+            $tokens = \min($tokens, \intdiv(3 * $this->summarizerOptions->maxOutputTokens, 4));
+        }
+        $words  = \max(50, (int) (0.7 * $tokens));
         $context = '';
         foreach ($kept as $message) {
             $context .= self::render($message);
@@ -469,6 +477,7 @@ final class Compact implements ModelMiddleware
         $ask .= null === $previous
             ? "The messages to fold into a new checkpoint:\n\n{$transcript}Write the checkpoint."
             : "The current checkpoint:\n\n$previous\n\nThe messages since the checkpoint, to fold into it:\n\n$transcript" . self::UPDATE;
+        $ask .= " Keep it under $words words: when it would not fit, shorten the wording and merge entries, but drop no resource from Done and no fact from Known.";
         $prompt = new Prompt(self::PROMPT, [new Message(Role::User, [new Text($ask)])], [], $this->summarizerOptions, $cancel);
         $bytes  = null === $previous ? null : \strlen($previous);
         for ($attempt = 1;; ++$attempt) {

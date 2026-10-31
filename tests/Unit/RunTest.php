@@ -452,3 +452,34 @@ it('says so when iterated outside fiber\\run(), and stays usable', function () {
     turn($run, user('go'));
     expect($run->ended()->reason)->toBe(Reason::Done);
 });
+
+it('lets a model middleware shape the tool list of a step; a call to a tool it left out is an unknown tool', function () {
+    // A planning phase: no writes on the first step; the second step is offered everything.
+    $phase = new class implements ModelMiddleware {
+        public int $step = 0;
+
+        public function stream(Prompt $prompt, Closure $next): iterable
+        {
+            $tools = 1 === ++$this->step ? \array_values(\array_filter($prompt->tools, fn (Harness\ToolSpec $t) => 'write' !== $t->name)) : $prompt->tools;
+
+            return $next(new Prompt($prompt->system, $prompt->messages, $tools, $prompt->options, $prompt->cancel, $prompt->continue));
+        }
+    };
+    $writes = [];
+    $write  = tool('write', function (array $in) use (&$writes) {
+        $writes[] = $in['text'];
+
+        return Result::text('written');
+    });
+    $read  = tool('read', fn () => Result::text('the plan'), new Hints(readOnly: true));
+    $model = new FakeModel(calls(['c1', 'read', []], ['c2', 'write', ['text' => 'early']]), calls(['c3', 'write', ['text' => 'late']]), says('done'));
+    $run   = new Run($model, new Tools($read, $write), middleware: [$phase]);
+    turn($run, user('go'));
+    $m = $run->messages();
+    expect(\array_map(fn (Harness\ToolSpec $t) => $t->name, $model->prompts[0]->tools))->toBe(['read'])
+        ->and(\array_map(fn (Harness\ToolSpec $t) => $t->name, $model->prompts[1]->tools))->toBe(['read', 'write'])
+        ->and($m[2]->parts[0])->toEqual(new ToolResult('c1', [new Text('the plan')]))
+        ->and($m[2]->parts[1])->toEqual(new ToolResult('c2', [new Text("Unknown tool 'write'; the tools are: read")], true))
+        ->and($writes)->toBe(['late'])
+        ->and($run->ended()->reason)->toBe(Reason::Done);
+});

@@ -59,8 +59,10 @@ final class Run
     private bool $interrupted  = false;
     /** The interrupted reply, as delivered when the turn's model stream stopped. */
     private ?Message $partial  = null;
-    /** @var list<Message> user messages given to interject(), not yet landed */
-    private array $interjections = [];
+    /** @var list<Message> user messages given to interject() to steer, not yet landed */
+    private array $steer = [];
+    /** @var list<Message> user messages given to interject() to queue, not yet landed */
+    private array $queue = [];
     /** The tool call this run's current turn is nested in, if any. */
     private ?Call $parentCall  = null;
     private ?Ended $ended      = null;
@@ -68,6 +70,8 @@ final class Run
     private \WeakMap $origin;
     /** @var array<string, Tool> the tools of the current step, by name */
     private array $stepTools = [];
+    /** @var array<string, true>|null the tool names the model was offered this step, after middleware; null: all */
+    private ?array $offered = null;
 
     /**
      * @param list<ModelMiddleware|ToolMiddleware> $middleware outermost first
@@ -160,7 +164,8 @@ final class Run
         $this->cancelled     = false;
         $this->interrupted   = false;
         $this->partial       = null;
-        $this->interjections = [];
+        $this->steer         = [];
+        $this->queue         = [];
         $this->parentCall    = $parentCall;
         $this->ended         = null;
         $parent              = $parentCall?->id;
@@ -236,14 +241,16 @@ final class Run
     }
 
     /**
-     * Queues a user message for the running turn: it is appended at the next step boundary, after
-     * the step's tool results and before the next model call, with an `Interjected` event, so the
-     * host redirects a long turn without losing the step in flight. Several land in order. A reply
-     * without tool calls does not end the turn while interjections wait: the model answers them.
-     * Those that cannot land before the turn ends (it stopped, paused, failed or was cancelled)
-     * are in `Ended::$queued`. Throws when no turn is running: start one with `turn()`.
+     * Gives the running turn a user message, landing with an `Interjected` event. `Steer`: at the
+     * next step boundary, after the step's tool results and before the next model call; the step's
+     * tool calls that have not started yet are skipped, each with the error result "Skipped: the
+     * user sent a message", while running ones finish, and a reply without tool calls does not end
+     * the turn while one waits. `Queue`: when the turn would otherwise end `Done`, starting another
+     * step with it, one queued message per step. Several land in the order given. Those that cannot
+     * land before the turn ends (it stopped, paused, failed or was cancelled) are in
+     * `Ended::$queued`, steered ones first. Throws when no turn is running: start one with `turn()`.
      */
-    public function interject(Message $user): void
+    public function interject(Message $user, Delivery $delivery = Delivery::Steer): void
     {
         if (Role::User !== $user->role) {
             throw new \InvalidArgumentException('An interjection is a user message');
@@ -256,7 +263,11 @@ final class Run
         if (!$this->running) {
             throw new \LogicException('No turn is running to interject in; start one with turn()');
         }
-        $this->interjections[] = $user;
+        if (Delivery::Steer === $delivery) {
+            $this->steer[] = $user;
+        } else {
+            $this->queue[] = $user;
+        }
     }
 
     /**
@@ -379,6 +390,7 @@ final class Run
             } elseif (\is_array($input)) {
                 $emit(new StepStarted($turn, $parent, 0));
                 $this->stepTools     = $this->readTools();
+                $this->offered       = null;
                 [$results, $pending] = $this->runCalls(\array_map(static fn (Pending $p) => $p->call, $this->pending), $answers, [], $turn, $parent, $emit, $retries);
                 $this->pending       = [];
                 if ([] !== $results) {
@@ -398,15 +410,16 @@ final class Run
                     break;
                 }
                 if (null === $seed) {
-                    // The step boundary: interjections land after the last step's results.
-                    while ([] !== $this->interjections) {
-                        $this->messages[] = $user = \array_shift($this->interjections);
+                    // The step boundary: steering lands after the last step's results.
+                    while ([] !== $this->steer) {
+                        $this->messages[] = $user = \array_shift($this->steer);
                         $complete         = \count($this->messages);
-                        $emit(new Interjected($turn, $parent, $user));
+                        $emit(new Interjected($turn, $parent, $user, Delivery::Steer));
                     }
                 }
                 $emit(new StepStarted($turn, $parent, $n));
                 $this->stepTools = $this->readTools();
+                $this->offered   = null;
                 $specs           = \array_values(\array_map(static fn (Tool $t) => $t->spec(), $this->stepTools));
                 $prompt          = null === $seed
                     ? new Prompt($this->system, $this->messages, $specs, $this->options, $cancel)
@@ -426,9 +439,15 @@ final class Run
                 if ([] === $calls) {
                     $complete = \count($this->messages);
                     $emit(new StepEnded($turn, $parent, $n));
-                    if ([] === $this->interjections) {
-                        $reason = Reason::Done;
-                        break;
+                    if ([] === $this->steer) {
+                        if ([] === $this->queue) {
+                            $reason = Reason::Done;
+                            break;
+                        }
+                        // The turn would end Done: the next queued message starts another step.
+                        $this->messages[] = $user = \array_shift($this->queue);
+                        $complete         = \count($this->messages);
+                        $emit(new Interjected($turn, $parent, $user, Delivery::Queue));
                     }
                 } else {
                     [$results, $pending] = $this->runCalls($calls, [], $invalid, $turn, $parent, $emit, $retries);
@@ -480,8 +499,9 @@ final class Run
             $finish  = null;
         }
         $this->pending       = $pending;
-        $this->ended         = new Ended($reason, \array_slice($this->messages, $start), $pending, $usage, $error, $kind, $finish, $partial, $this->interjections);
-        $this->interjections = [];
+        $this->ended         = new Ended($reason, \array_slice($this->messages, $start), $pending, $usage, $error, $kind, $finish, $partial, [...$this->steer, ...$this->queue]);
+        $this->steer         = [];
+        $this->queue         = [];
         if ([] !== $pending) {
             $emit(new InputRequested($turn, $parent, $pending));
         }
@@ -569,6 +589,11 @@ final class Run
     /** @return \Generator<int, Delta> */
     private function callModel(Prompt $prompt): \Generator
     {
+        // What the model may call: a middleware may have shaped the list.
+        $this->offered = [];
+        foreach ($prompt->tools as $spec) {
+            $this->offered[$spec->name] = true;
+        }
         try {
             yield from $this->model->stream($prompt);
         } catch (\Throwable $e) {
@@ -583,15 +608,22 @@ final class Run
                 return $this->middleware[$i]->call($call, $context, fn (ToolCall $c, Call $ctx): Result => $this->toolChain($i + 1, $c, $ctx));
             }
         }
-        $tool = $this->stepTools[$call->name] ?? null;
+        $tool = $this->stepTool($call->name);
         if (null === $tool) {
-            throw $this->mark(new Retry("Unknown tool '{$call->name}'; the tools are: " . \implode(', ', \array_keys($this->stepTools))), 'tool');
+            $names = \array_keys(null === $this->offered ? $this->stepTools : \array_intersect_key($this->stepTools, $this->offered));
+            throw $this->mark(new Retry("Unknown tool '{$call->name}'; the tools are: " . \implode(', ', $names)), 'tool');
         }
         try {
             return $tool->call($call->input, $context);
         } catch (\Throwable $e) {
             throw $this->mark($e, 'tool');
         }
+    }
+
+    /** The step's tool of that name, when the model was offered it. */
+    private function stepTool(string $name): ?Tool
+    {
+        return null === $this->offered || isset($this->offered[$name]) ? $this->stepTools[$name] ?? null : null;
     }
 
     /** @return array<string, Tool> */
@@ -625,7 +657,7 @@ final class Run
     private function runCalls(array $calls, array $answers, array $invalid, int $turn, ?string $parent, \Closure $emit, int &$retries): array
     {
         // Calls that cannot run (malformed input, unknown tool) have no side effects either.
-        $together = fn (ToolCall $c): bool => isset($invalid[$c->id]) || !isset($this->stepTools[$c->name]) || $this->stepTools[$c->name]->spec()->hints->readOnly;
+        $together = fn (ToolCall $c): bool => isset($invalid[$c->id]) || null === $this->stepTool($c->name) || $this->stepTool($c->name)->spec()->hints->readOnly;
         // A closure, not fn: $retries is shared by reference with every call's fiber.
         $start = function (ToolCall $call) use ($answers, $invalid, $turn, $parent, $emit, &$retries): object {
             return go(function () use ($call, $answers, $invalid, $turn, $parent, $emit, &$retries) {
@@ -660,8 +692,8 @@ final class Run
 
     private function runCall(ToolCall $call, ?Answer $answer, ?string $invalid, int $turn, ?string $parent, \Closure $emit, int &$retries): ToolResult|Pending
     {
-        if ($this->isCancelled()) {
-            $result = new Result([new Text('Cancelled before it ran')], error: true);
+        if ($this->isCancelled() || [] !== $this->steer) {
+            $result = new Result([new Text($this->isCancelled() ? 'Cancelled before it ran' : 'Skipped: the user sent a message')], error: true);
             $emit(new ToolEnded($turn, $parent, $call->id, $result));
 
             return new ToolResult($call->id, $result->content, true);
@@ -703,7 +735,7 @@ final class Run
             $call->id,
             $this,
             $this->context,
-            ($this->stepTools[$call->name] ?? null)?->spec(),
+            $this->stepTool($call->name)?->spec(),
             $call,
             $turn,
             $parent,
