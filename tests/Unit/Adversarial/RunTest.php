@@ -863,3 +863,77 @@ it('lets interject() land a message called right after turn(), before the first 
     }
     expect($texts)->toContain('steer!');
 }); // #97: the state was set at the first iteration; isRunning() was false and interject() threw
+
+/*
+ * Round 17, attacking the #97 fix. Five angles were tried against it; all held correctly:
+ *
+ * - interject() right after turn(), then dropping that generator before any iteration, then a
+ *   fresh turn(): the steer does not leak -- turn()'s eager reset (`$this->steer = []`) runs again
+ *   at the second call and clears it, exactly as the code reads.
+ * - cancel() right after turn(), before the first iteration, then iterating: the turn ends
+ *   `Cancelled` having never called the model at all (the for loop's `isCancelled()` check is its
+ *   first statement, before `modelStep()`).
+ * - interrupt() in that same window: the turn ends `Interrupted` with `Ended::$partial` null, since
+ *   the model was never actually streaming yet to have a partial reply -- consistent with the
+ *   docblock's "when the model was streaming".
+ * - a nested run's `isCancelled()`, read through its `parentCall`, before the child's own first
+ *   iteration: correctly true, since `$parentCall` is now one of the fields `turn()` sets eagerly.
+ *
+ * The subtlest of the five, and the one pinned here: a generator dropped *mid*-iteration (after
+ * its first event, not before any), while its task is still mid-step. Unlike the never-iterated
+ * case, `$this->running` is not reset by dropping alone -- only `loop()` reaching `TurnEnded` does
+ * that -- so `isRunning()` stays true for as long as the abandoned task takes to actually notice
+ * its own cancellation and finish. A `turn()` call placed in that window is correctly refused as
+ * "already running" even though the generator that was supposedly holding the Run open has already
+ * been dropped; only once the task has actually run to completion does the Run free up again.
+ */
+it('keeps a dropped mid-iteration turn "already running" until its abandoned task actually finishes', function () {
+    $model = new FakeModel(static function () {
+        yield new TextDelta('a');
+        \fiber\sleep(0.1); // real time: the abandoned task is still in here when the next turn() is tried
+        yield new TextDelta('b');
+        yield new Usage(1, 1);
+        yield new Finish(FinishReason::Stop);
+    });
+    $run = new Harness\Run($model, new Tools());
+
+    $tooSoon                 = null;
+    $isRunningRightAfterDrop = null;
+    $isRunningAfterWaiting   = null;
+    \fiber\run(function () use ($run, &$tooSoon, &$isRunningRightAfterDrop, &$isRunningAfterWaiting) {
+        $gen = $run->turn(new Message(Role::User, [new Text('one')]));
+        foreach ($gen as $e) {
+            break; // drop after the very first event (TurnStarted): the model has not been called yet
+        }
+        $gen                     = null;
+        $isRunningRightAfterDrop = $run->isRunning();
+        try {
+            $run->turn(new Message(Role::User, [new Text('too soon')]));
+        } catch (LogicException $e) {
+            $tooSoon = $e;
+        }
+        \fiber\sleep(0.3); // long enough for the abandoned task's own fiber\sleep(0.1) to pass
+        $isRunningAfterWaiting = $run->isRunning();
+        foreach ($run->turn(new Message(Role::User, [new Text('two')])) as $e) {
+        }
+    });
+
+    expect($isRunningRightAfterDrop)->toBeTrue()
+        ->and($tooSoon)->toBeInstanceOf(LogicException::class)
+        ->and($tooSoon->getMessage())->toContain('already running')
+        ->and($isRunningAfterWaiting)->toBeFalse()
+        ->and($run->ended()->reason)->toBe(Reason::Done);
+
+    // The first ("one") turn's model call never ran at all -- it was cancelled before modelStep()
+    // -- so it contributes no assistant message; the second real turn ("two") is the one that
+    // consumed the FakeModel's single scripted reply.
+    $texts = [];
+    foreach ($run->messages() as $m) {
+        foreach ($m->parts as $p) {
+            if ($p instanceof Text) {
+                $texts[] = $p->text;
+            }
+        }
+    }
+    expect($texts)->toBe(['one', 'two', 'ab']);
+});
