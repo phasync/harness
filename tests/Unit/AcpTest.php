@@ -113,7 +113,7 @@ it('maps tool calls with their kind, locations and diffs, and permissions with t
 
     // Two approvals asked at once; the write is allowed always, the edit rejected once.
     expect($client->permissions)->toHaveCount(2)
-        ->and($client->permissions[0]['toolCall'])->toBe(['toolCallId' => 'w1', 'title' => "the tool 'write_file'", 'kind' => 'edit', 'status' => 'pending', 'rawInput' => ['path' => 'a.txt', 'content' => "new\n"]])
+        ->and($client->permissions[0]['toolCall'])->toBe(['toolCallId' => 'w1', 'title' => "write_file a.txt: the tool 'write_file'", 'kind' => 'edit', 'status' => 'pending', 'rawInput' => ['path' => 'a.txt', 'content' => "new\n"]])
         ->and(\array_column($client->permissions[0]['options'], 'kind'))->toBe(['allow_once', 'allow_always', 'reject_once', 'reject_always'])
         ->and(updatesOf($client, 'w1')[0]['content'])->toBe([['type' => 'diff', 'path' => $abs('a.txt'), 'oldText' => "old\n", 'newText' => "new\n"]])
         ->and(updatesOf($client, 'e1')[0]['content'])->toBe([['type' => 'diff', 'path' => $abs('b.txt'), 'oldText' => 'one', 'newText' => 'two']])
@@ -134,7 +134,7 @@ it('flattens a sub-agent\'s pause into a permission request, and shows its calls
     expect($result)->toBe(['stopReason' => 'end_turn'])
         ->and($client->permissions)->toHaveCount(1)
         ->and($client->permissions[0]['toolCall']['toolCallId'])->toBe('a1')
-        ->and($client->permissions[0]['toolCall']['title'])->toBe("the tool 'write_file'")
+        ->and($client->permissions[0]['toolCall']['title'])->toBe("writer {\"prompt\":\"write the note\"}: the tool 'write_file'")
         ->and(updatesOf($client, 'a1/cw')[0]['title'])->toBe('write_file note.txt')
         ->and(lastOf($client, 'a1/cw')['status'])->toBe('completed')
         ->and(lastOf($client, 'a1')['status'])->toBe('completed')

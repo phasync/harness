@@ -4,8 +4,10 @@
 
 Implements SPEC.md revision 6: Compact's summary becomes a checkpoint that is updated rather than
 re-summarized, steering gets two delivery modes, the shell tool gets a policy over parsed argv.
-Round 5's research reader looped after many compaction rounds; with these changes the live readers
-finish (see "Compact" below).
+Round 5's research reader looped after many compaction rounds. Live on black with this release (the
+research tool's 2,000-token budget, 800 summarizer output tokens), 15 of 22 reader runs over three
+sessions ended `Done` within 4 to 19 steps, every checkpoint listing the files read under Done; the
+other 7 failed loudly on a checkpoint cut twice at the 800 output tokens, which the lead re-delegated.
 
 ### Changed (breaking)
 

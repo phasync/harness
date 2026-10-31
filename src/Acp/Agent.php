@@ -255,7 +255,7 @@ final class Agent
         $call   = $this->toolCall($session, $p->call->id, $name, $p->call->input, $tool);
         $result = $this->channel->request('session/request_permission', [
             'sessionId' => $session->id,
-            'toolCall'  => ['toolCallId' => $call['toolCallId'], 'title' => $need->reason ?? $call['title'], 'kind' => $call['kind'], 'status' => 'pending', 'rawInput' => $call['rawInput']],
+            'toolCall'  => ['toolCallId' => $call['toolCallId'], 'title' => null === $need->reason ? $call['title'] : "{$call['title']}: {$need->reason}", 'kind' => $call['kind'], 'status' => 'pending', 'rawInput' => $call['rawInput']],
             'options'   => [
                 ['optionId' => 'allow_once', 'name' => 'Allow', 'kind' => 'allow_once'],
                 ['optionId' => 'allow_always', 'name' => "Always allow $name", 'kind' => 'allow_always'],

@@ -51,7 +51,7 @@ are `cancelled`.
 
 A turn that ends `AwaitingInput` does not end the prompt. Each `Approval` of each pending call (a
 `Policy` `Ask`, and a sub-agent's, whose needs come up flattened under the parent's call) becomes a
-`session/request_permission` for that call, titled with the approval's reason, with the options
+`session/request_permission` for that call, titled with the call and the approval's reason, with the options
 `allow_once`, `allow_always`, `reject_once` and `reject_always`. The "always" options are kept for
 the session by tool name: the next approval for that tool is answered without asking. A
 rejection reaches the model as `Denied: <reason>`. The answers resume the run, and the prompt goes

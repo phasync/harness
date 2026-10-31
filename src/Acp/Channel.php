@@ -96,7 +96,11 @@ final class Channel
         return \is_array($message['result'] ?? null) ? $message['result'] : throw new AcpError(-32603, "The client answered $method without a result object");
     }
 
-    /** @param array<string, mixed> $params */
+    /**
+     * Sends a notification, which has no response.
+     *
+     * @param array<string, mixed> $params
+     */
     public function notify(string $method, array $params): void
     {
         $this->send(['jsonrpc' => '2.0', 'method' => $method, 'params' => $params]);
