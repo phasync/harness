@@ -57,9 +57,11 @@ each is matched, the first matching `Shell` rule deciding it:
   Other arguments are free; a word with an unquoted glob never matches a list of flags, since it
   could expand to any option.
 - `Shell::deny($program)` matches the program by its base name (`rm`, `/bin/rm`, `'r'm`, `r\m`),
-  whatever its arguments.
-- The wrappers `env`, `nice`, `timeout`, `sudo`, `nohup` and `xargs` are peeled with their options,
-  and the wrapped command is matched (`env rm`, `sudo -u root rm`, `ls | xargs rm` are `rm`).
+  whatever its arguments. A program spelled with an unquoted glob (`r[m]`, `r?`) is denied outright,
+  whatever the rules: it runs whatever the directory holds.
+- The wrappers `env`, `nice`, `timeout`, `sudo`, `nohup`, `xargs`, `command`, `builtin` and `exec`
+  are peeled with their options, and the wrapped command is matched (`env rm`, `sudo -u root rm`,
+  `ls | xargs rm`, `command rm` are `rm`).
 
 The line is denied when any command matches a deny rule, allowed when every command matches an
 allow rule, and otherwise gets `$otherwise` (`Ask`, or `Deny`). It is asked about, whatever

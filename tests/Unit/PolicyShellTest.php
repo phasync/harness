@@ -46,6 +46,7 @@ it('denies a line in which any simple command matches a deny rule, wrappers peel
     'rm -rf /', '/bin/rm x', 'env rm -rf /', 'git status; rm -rf /', 'git status && rm -rf x', 'ls || rm x',
     'ls | xargs rm', 'sudo rm x', 'sudo -u root rm x', 'timeout -s KILL 5 rm x', 'nice -n 10 rm x', 'nice -10 rm x',
     'nohup rm x &', 'env -i -- rm x', 'r\\m -rf /', "'rm' -rf /", '"r"m -rf /', 'xargs -n 1 rm', 'ls; rm x 2>/dev/null',
+    'l*', 'r[m] -rf /', 'command rm x', 'builtin rm x', 'exec rm x',
 ]);
 
 it('asks about anything it cannot parse or that no rule allows', function (string $line, string $why) {
@@ -75,7 +76,6 @@ it('asks about anything it cannot parse or that no rule allows', function (strin
     ['git log *', "'git log' matches no allow rule"],
     ['composer require evil/pkg', "'composer require' matches no allow rule"],
     ['/tmp/x/ls', "'/tmp/x/ls' matches no allow rule"],
-    ['l*', "'l*' matches no allow rule"],
     ['bash -c ls', "'bash -c' matches no allow rule"],
     ["ls 'unterminated", 'unterminated single quote'],
     ['ls && ', 'an operator without a command on each side'],

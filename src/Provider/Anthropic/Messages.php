@@ -293,7 +293,7 @@ final readonly class Messages implements Model
                 $results[] = [
                     'type'        => 'tool_result',
                     'tool_use_id' => $part->callId,
-                    'content'     => \array_map($this->block(...), $part->content),
+                    'content'     => [] === $part->content ? [['type' => 'text', 'text' => $part->error ? 'Error' : '(no output)']] : \array_map($this->block(...), $part->content), // the API rejects an empty list
                     'is_error'    => $part->error,
                 ];
             } else {

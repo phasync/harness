@@ -7,7 +7,7 @@
 - **`Harness\Tools\Web`**: `WebSearch` and `WebFetch` tools, a `Search` interface with a `SearXng`
   implementation over a self-hosted instance's JSON API, and a dependency-free HTML-to-text
   extractor (a `<br>` is a line break; a nested list's items are indented under their parent
-  item, #2). `WebFetch` guards against SSRF (private-network and non-http(s) URLs refused unless
+  item, #2; a `pre` inside a list item or paragraph stays verbatim on its own lines, #10). `WebFetch` guards against SSRF (private-network and non-http(s) URLs refused unless
   `allowPrivate`), caches a fetched page by `sha256(url)` when `cacheDir` is set, and cuts long
   text with the files tools' tail idiom. docs/web.md, examples/search.php.
 - **`Harness\Tools\Plan`**: `Plan` (a `Step` list the `plan_set` and `plan_update` tools change),
@@ -20,7 +20,8 @@
   accepted only when it alone matches exactly once; a level matching more than once is the
   ambiguous error, naming every candidate line, and the cascade never falls through to a looser
   level once that happens. Every line-based match re-indents `new` by the delta between `old`'s
-  common indent and the matched block's (#9). A successful edit's result now shows the edited
+  common indent and the matched block's (#9), translating the indentation beyond it line by line so
+  a tab-indented file stays tabs when `old` and `new` were written with spaces (#13). A successful edit's result now shows the edited
   region with 3 lines of context, as `read_file` numbers them; the replacement always keeps the
   file's line ending style. A failed edit quotes the closest region by similarity.
 - **`EditFile` and `WriteFile` take an optional `?\Closure $check`**, run after a successful write;
@@ -36,6 +37,16 @@
   `?Journal $journal` and record a changed or deleted path's previous content (or absence) the
   first time they touch it; `Journal::undo()` restores every recorded path, in reverse order, and
   `Journal::changed()`/`clear()` round it out. The host decides the scope (a turn, a session).
+
+### Fixed
+
+- `Run::cancel()` while a tool asks for input: the call gets a "cancelled" error result and the
+  turn ends `Cancelled`, as promised, instead of `AwaitingInput` with a stale pending call (#11).
+- `Policy\Shell`: a program spelled with an unquoted glob (`r[m]`) is denied outright (#12), and
+  `command`, `builtin` and `exec` are peeled like the other wrappers so a deny rule reaches the
+  wrapped program (#4).
+- `Provider\Anthropic\Messages`: a `ToolResult` with no content is sent as a one-line text block
+  (`Error` or `(no output)`), not the empty list the API rejects (#14).
 
 ### Changed (breaking)
 

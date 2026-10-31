@@ -20,7 +20,7 @@ namespace Harness\Policy;
  */
 final readonly class Shell
 {
-    private const WRAPPERS = ['env', 'nice', 'timeout', 'sudo', 'nohup', 'xargs'];
+    private const WRAPPERS = ['env', 'nice', 'timeout', 'sudo', 'nohup', 'xargs', 'command', 'builtin', 'exec'];
 
     /**
      * @param list<string>|null $subcommands
@@ -137,7 +137,10 @@ final readonly class Shell
                 continue;
             }
             [$argv, $globbed] = $peeled;
-            $rule             = null;
+            if ($globbed[0]) { // 'r[m]' expands to whatever the cwd holds: no rule can judge it
+                return [Verdict::Deny, "the shell command '{$argv[0]}' names its program with a glob; it is never run"];
+            }
+            $rule = null;
             foreach ($rules as $r) {
                 if ($r->matches($argv, $globbed)) {
                     $rule = $r;
@@ -191,6 +194,9 @@ final readonly class Shell
                 'timeout' => [['--preserve-status', '--foreground', '-v', '--verbose'], ['-s', '--signal', '-k', '--kill-after'], []],
                 'sudo'    => [['-E', '-H', '-n', '-S', '-b', '-k', '-P', '-A', '--preserve-env', '--set-home', '--non-interactive', '--stdin', '--background', '--askpass'], ['-u', '--user', '-g', '--group', '-C', '-h', '--host', '-p', '--prompt', '-r', '-t', '-U', '-D', '--chdir', '-R', '--chroot', '-T', '--command-timeout'], ['-i', '--login', '-s', '--shell', '-e', '--edit', '-l', '--list', '-v', '--validate', '-K']],
                 'nohup'   => [[], [], []],
+                'command' => [['-p', '-v', '-V'], [], []],
+                'builtin' => [[], [], []],
+                'exec'    => [['-c', '-l'], ['-a'], []],
                 'xargs'   => [['-0', '--null', '-r', '--no-run-if-empty', '-t', '--verbose', '-p', '--interactive', '-x', '--exit', '-o', '--open-tty'], ['-n', '--max-args', '-I', '--replace', '-L', '--max-lines', '-P', '--max-procs', '-d', '--delimiter', '-E', '--eof', '-s', '--max-chars', '-a', '--arg-file'], []],
             };
             $i = 1;

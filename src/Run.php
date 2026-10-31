@@ -214,8 +214,9 @@ final class Run
     /**
      * Asks the running turn to stop: the model stream is abandoned (the transport sees the turn's
      * `Cancel` signal within its poll interval, 250 ms for `Http\StreamTransport`), tool calls not
-     * yet started get a "cancelled" error result, running ones see `Call::isCancelled()`, nested
-     * runs are cancelled with it. The turn ends `Reason::Cancelled`, without the partial assistant
+     * yet started get a "cancelled" error result, running ones see `Call::isCancelled()` and one
+     * that still asks for input gets that error result instead of pausing the turn, nested runs
+     * are cancelled with it. The turn ends `Reason::Cancelled`, without the partial assistant
      * message. Has no effect when no turn is running.
      */
     public function cancel(): void
@@ -680,6 +681,11 @@ final class Run
         $results = [];
         $pending = [];
         foreach ($outcomes as $outcome) {
+            if ($outcome instanceof Pending && $this->isCancelled()) { // asked after cancel(): the turn ends Cancelled with every call answered, not AwaitingInput
+                $result = new Result([new Text('Cancelled while asking for input')], error: true);
+                $emit(new ToolEnded($turn, $parent, $outcome->call->id, $result));
+                $outcome = new ToolResult($outcome->call->id, $result->content, true);
+            }
             if ($outcome instanceof Pending) {
                 $pending[] = $outcome;
             } else {

@@ -54,7 +54,7 @@ final class Matcher
             }
             $hits = self::search($fileLines, $oldLines, self::predicate($level));
             if (1 === \count($hits)) {
-                return self::window($content, $fileLines, $hits[0], $n, $level, self::commonIndent($oldLines));
+                return self::window($content, $fileLines, $hits[0], $n, $level, $oldLines);
             }
             if ([] !== $hits) {
                 return new Ambiguous($level, \array_map(static fn (int $i) => $i + 1, $hits));
@@ -64,20 +64,46 @@ final class Matcher
         return self::closest($fileLines, $oldLines);
     }
 
-    /** `$new`, re-indented from `$fromIndent` to `$toIndent` (a no-op when they are equal). */
-    public static function reindent(string $new, string $fromIndent, string $toIndent): string
+    /**
+     * `$new`, re-indented for the block it replaces: each line's common indent `$fromIndent` becomes
+     * `$toIndent`, and the indentation beyond it is translated by `$indentMap` (`old`'s relative
+     * indents to the matched block's, as `Located::$indentMap` holds them), so a file indented with
+     * tabs stays tabs when `old` and `$new` were written with spaces. A relative indent the map does
+     * not know is scaled by the map's smallest step; one that is not a multiple of it is kept.
+     *
+     * @param array<string, string> $indentMap
+     */
+    public static function reindent(string $new, string $fromIndent, string $toIndent, array $indentMap = []): string
     {
-        if ($fromIndent === $toIndent) {
+        $same = true;
+        foreach ($indentMap as $from => $to) {
+            if ($from !== $to) {
+                $same = false;
+            }
+        }
+        if ($fromIndent === $toIndent && $same) {
             return $new;
+        }
+        $unit = null; // the smallest known relative step, [from, to]
+        foreach ($indentMap as $from => $to) {
+            if ('' !== $from && (null === $unit || \strlen($from) < \strlen($unit[0]))) {
+                $unit = [(string) $from, $to];
+            }
         }
         $lines = \explode("\n", $new);
         foreach ($lines as &$line) {
-            if ('' === \trim($line)) {
+            if ('' === \trim($line) || !\str_starts_with($line, $fromIndent)) {
                 continue;
             }
-            if (\str_starts_with($line, $fromIndent)) {
-                $line = $toIndent . \substr($line, \strlen($fromIndent));
+            \preg_match('/^[ \t]*/', \substr($line, \strlen($fromIndent)), $m);
+            $relative = $m[0];
+            $rest     = \substr($line, \strlen($fromIndent) + \strlen($relative));
+            if (isset($indentMap[$relative])) {
+                $relative = $indentMap[$relative];
+            } elseif (null !== $unit && '' !== $relative && 0 === \strlen($relative) % \strlen($unit[0]) && \str_repeat($unit[0], \intdiv(\strlen($relative), \strlen($unit[0]))) === $relative) {
+                $relative = \str_repeat($unit[1], \intdiv(\strlen($relative), \strlen($unit[0])));
             }
+            $line = $toIndent . $relative . $rest;
         }
 
         return \implode("\n", $lines);
@@ -118,14 +144,26 @@ final class Matcher
     }
 
     /** A window of `$n` lines of `$fileLines` starting at `$i`, as a `Located` (byte range reconstructed by re-joining). */
-    private static function window(string $content, array $fileLines, int $i, int $n, int $level, string $fromIndent): Located
+    /** @param list<string> $fileLines @param list<string> $oldLines */
+    private static function window(string $content, array $fileLines, int $i, int $n, int $level, array $oldLines): Located
     {
         $before = \implode("\n", \array_slice($fileLines, 0, $i));
         $offset = \strlen($before) + ($i > 0 ? 1 : 0);
         $window = \array_slice($fileLines, $i, $n);
         $text   = \implode("\n", $window);
+        $from   = self::commonIndent($oldLines);
+        $to     = self::commonIndent($window);
+        $map    = [];
+        foreach ($oldLines as $k => $line) { // old's relative indents → the block's, line by line
+            if ('' === \trim($line) || !\str_starts_with($line, $from) || !\str_starts_with($window[$k], $to)) {
+                continue;
+            }
+            \preg_match('/^[ \t]*/', \substr($line, \strlen($from)), $o);
+            \preg_match('/^[ \t]*/', \substr($window[$k], \strlen($to)), $w);
+            $map[$o[0]] ??= $w[0];
+        }
 
-        return new Located($level, $offset, \strlen($text), $i + 1, $i + $n, $text, $fromIndent, self::commonIndent($window));
+        return new Located($level, $offset, \strlen($text), $i + 1, $i + $n, $text, $from, $to, $map);
     }
 
     /**
