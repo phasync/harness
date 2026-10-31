@@ -32,6 +32,9 @@ shell tool is the one place where arguments decide, and `Rule::shell()` matches 
 
 ## Shell commands
 
+`Harness\Policy\Shell` (the rules below) and `Harness\Tools\Shell\Shell` (the tool) share a name:
+a file that uses both aliases one, `use Harness\Policy\Shell as ShellRule;`.
+
 ```php
 $policy = new Policy([
     Rule::shell([

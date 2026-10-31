@@ -4,7 +4,10 @@ Fakes for testing hosts, tools, middleware and providers without a model.
 
 `FakeModel` plays scripted replies, one per model call: a list of deltas, or a closure
 `fn (Prompt $prompt): iterable<Delta>` that may `fiber\sleep()` or throw. `$model->prompts` records
-what each call was given. Running out of replies throws.
+what each call was given. Running out of replies throws. The deltas are `Harness\Delta\*`
+(`TextDelta`, `ReasoningDelta`, `ToolCallStart`, `ToolInputDelta`, `ToolCallEnd`, `Finish`): what a
+provider emits, carrying only the payload. They are not the `Harness\Event\*` classes of the same
+names that a host receives, which carry the turn, parent and id as well.
 
 ```php
 $model = new FakeModel(

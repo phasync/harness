@@ -6,6 +6,9 @@
 new Shell(cwd: '/srv/project', timeout: 120.0, maxTimeout: 600.0, maxOutput: 30000);
 ```
 
+Gate its commands with `Rule::shell()` ([policy.md](policy.md)); its rule class `Harness\Policy\Shell`
+shares the name, so a file that uses both aliases one (`use Harness\Policy\Shell as ShellRule;`).
+
 - Input: `command`, optional `timeout` in seconds (capped at `maxTimeout`).
 - stdout and stderr are merged; stdin is empty. Output is reported as it arrives through
   `Call::progress()` (`ToolProgress` events), and the model gets `Exit code N` and the output, the

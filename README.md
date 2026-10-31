@@ -161,7 +161,11 @@ one of two ways, each landing with an `Interjected(message, delivery)` event:
   then starts another step with it; several queue in order, one step each.
 
 Those that cannot land before the turn ends (it stopped, paused, failed or was cancelled) are in
-`Ended::$queued`, the steering ones first. With no turn running it throws: use `turn()`.
+`Ended::$queued`, the steering ones first. With no turn running it throws: use `turn()`. A turn
+runs from the first iteration of `turn()`, not from the call, so a host without a reader fiber
+(a request that carries two messages, one to queue) interjects from inside the loop, on the first
+event; a task scheduled with `fiber\go()` before the loop runs only when the turn first waits,
+which a turn without I/O never does.
 [`examples/chat.php`](examples/chat.php) steers with a line typed while a reply streams; one ended
 with Alt+Enter or starting with `/queue` (terminals differ in what they send for Alt+Enter) queues
 instead.
