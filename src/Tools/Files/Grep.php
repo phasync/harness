@@ -72,7 +72,7 @@ final readonly class Grep implements Tool
                 continue;
             }
             $name = $this->root->relative($base . '/' . $rel);
-            foreach (\explode("\n", $content) as $no => $line) {
+            foreach (\explode("\n", \str_ends_with($content, "\n") ? \substr($content, 0, -1) : $content) as $no => $line) { // the trailing newline is not one more line, as read_file counts
                 if (1 === \preg_match($regex, $line)) {
                     $lines[] = $name . ':' . ($no + 1) . ': ' . (\strlen($line) > $this->maxLineLength ? \substr($line, 0, $this->maxLineLength) . ' [cut]' : $line);
                 }

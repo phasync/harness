@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Harness\Tools\Files\EditFile;
+use Harness\Tools\Files\Grep;
 use Harness\Tools\Files\Root;
 
 beforeEach(function () {
@@ -72,4 +73,24 @@ it('translates each occurrence of a relative indent by its own position, not the
     // #13, round 2: the second body came out as "\t\tTWO();", the first body's style; a line of new
     // at the position of a line of old with the same relative indent now keeps that file line's own
     expect(\file_get_contents($this->dir . '/a.php'))->toBe("function f() {\n\tif (a) {\n\t\tone();\n\t}\n\tif (b) {\n\t\t\tTWO();\n\t}\n}\n");
+});
+
+/*
+ * Round 3. `Grep::call()` splits a file's whole content on "\n" (`\explode("\n", $content)`)
+ * without stripping a trailing newline first. `read_file` does strip it before splitting -- its
+ * own docblock (`Lines::count()`) says explicitly "a trailing newline does not count as one more
+ * empty line" -- so a normal file ending in "\n" has one more element in Grep's line array than
+ * `read_file` reports as its line count: a phantom, nonexistent last "line" that is always empty.
+ * A pattern that can match an empty string (an ordinary way to find blank lines, "^$") matches that
+ * phantom line too, so `grep` reports a `file:line:` the model can never find by reading the file.
+ */
+it('does not report a match on the phantom line past a file\'s trailing newline', function () {
+    \file_put_contents($this->dir . '/f.txt', "alpha\n\nbeta\n");
+    $g      = new Grep($this->root);
+    $result = $g->call(['pattern' => '^$', 'path' => 'f.txt'], callFor());
+
+    // BUG: today this is "f.txt:2: \nf.txt:4: " -- a second match on line 4, which does not exist;
+    // the file has 3 lines (alpha, "", beta), as read_file's own line count agrees.
+    // #22: this also reported f.txt:4 on a three-line file
+    expect($result->content[0]->text)->toBe('f.txt:2: ');
 });

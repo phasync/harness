@@ -61,6 +61,8 @@
 - `Stop` and `interject()` docs: predicates are checked after every step the turn continues past,
   including one that only continued for a steered or queued message; a queued message a predicate
   cut off is handed back in `Ended::$queued` (#21).
+- `Tools\Files\Grep`: a file's trailing newline is not a line, so `^$` no longer reports a match
+  one past the end (#22).
 
 ### Changed (breaking)
 

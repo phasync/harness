@@ -83,3 +83,49 @@ it('gives a killed call a Result without a value, since a killed process has no 
         ->and($r->content[0]->text)->toStartWith('Killed: timed out after 0.2 s')
         ->and($r->value)->toBeNull();
 });
+
+/*
+ * Shell's constructor takes `$cwd` and only ever checks `is_dir($cwd)` once, at construction
+ * time, then keeps the given string verbatim in `private string $cwd`. `call()` later hands that
+ * same string to `proc_open()` as the 4th argument (the child's working directory). Nothing in
+ * the class ever resolves `$cwd` to an absolute path.
+ *
+ * docs/shell.md's own example constructs it with an absolute path (`cwd: '/srv/project'`), but
+ * the constructor places no such requirement on the caller, and `is_dir()` happily accepts and
+ * validates a relative one. A host is a long-running process (the whole point of a PHP agent
+ * harness): many unrelated things can run between when one `Shell` instance is built and when
+ * one of its calls actually executes -- another tool, another library, anything that calls
+ * `chdir()` for its own purposes. If `$cwd` was relative, the *directory it resolves to* silently
+ * depends on whatever the process's current directory happens to be at call time, not at
+ * construction time, even though `is_dir($cwd)` gave every appearance of having pinned it down.
+ *
+ * Verified directly: constructing `new Shell('sub')` next to an existing `sub/` directory passes
+ * the is_dir() check and runs correctly once; after the process `chdir()`s anywhere else (not
+ * touching the Shell object at all), the *same* instance's next call() does not just run in the
+ * wrong directory -- proc_open() fails outright ("posix_spawn(): No such file or directory") and
+ * Shell::call() lets an uncaught RuntimeException ("Could not start bash") escape, instead of the
+ * Result every other failure path in this class returns. One relative Shell tool anywhere in a
+ * host's toolset is one unrelated chdir() elsewhere in the process away from crashing the run.
+ */
+it('keeps running commands in the directory it was built with, even after the process chdir()s elsewhere', function () {
+    $base = \sys_get_temp_dir() . '/harness-shell-relcwd-' . \bin2hex(\random_bytes(4));
+    \mkdir($base . '/sub', 0777, true);
+    $resolved = \realpath($base . '/sub');
+    $started  = \getcwd();
+    try {
+        \chdir($base);
+        $shell = new ShellTool('sub'); // relative: valid right now, resolved against the cwd of this moment
+
+        \chdir(\sys_get_temp_dir()); // something else in the process moves on, unrelated to $shell
+
+        // Today: this throws an uncaught RuntimeException('Could not start bash') instead of
+        // returning a Result, because 'sub' no longer exists relative to the new cwd.
+        $r = \fiber\run(fn () => $shell->call(['command' => 'pwd'], callFor()));
+
+        expect($r->error)->toBeFalse()
+            ->and(\rtrim($r->content[0]->text, "\n"))->toBe("Exit code 0\n$resolved");
+    } finally {
+        \chdir($started);
+        \exec('rm -rf ' . \escapeshellarg($base));
+    }
+})->group('bug');
