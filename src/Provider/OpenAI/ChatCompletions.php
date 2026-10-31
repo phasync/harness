@@ -195,7 +195,11 @@ final readonly class ChatCompletions implements Model
             $out[] = ['role' => 'system', 'content' => $prompt->system];
         }
         foreach ($prompt->messages as $message) {
-            \array_push($out, ...(Role::User === $message->role ? $this->user($message) : [$this->assistant($message)]));
+            if (Role::User === $message->role) {
+                \array_push($out, ...$this->user($message));
+            } elseif (null !== ($assistant = $this->assistant($message))) {
+                $out[] = $assistant;
+            }
         }
 
         return $out;
@@ -236,7 +240,8 @@ final readonly class ChatCompletions implements Model
     }
 
     /** @return array<string, mixed> */
-    private function assistant(Message $message): array
+    /** Null for a message that maps to nothing, such as reasoning stamped for another model. */
+    private function assistant(Message $message): ?array
     {
         $text      = '';
         $reasoning = '';
@@ -253,6 +258,9 @@ final readonly class ChatCompletions implements Model
                 $part instanceof Reference => $text .= $this->reference($part),
                 default                    => throw new UnsupportedContentException(\get_debug_type($part) . ' in an assistant message is not supported by Chat Completions'),
             };
+        }
+        if ('' === $text && '' === $reasoning && [] === $calls) {
+            return null;
         }
         $out = ['role' => 'assistant', 'content' => '' === $text && [] !== $calls ? null : $text];
         if ('' !== $reasoning) {

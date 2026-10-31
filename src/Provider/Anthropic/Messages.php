@@ -313,10 +313,10 @@ final readonly class Messages implements Model
                 $results[] = [
                     'type'        => 'tool_result',
                     'tool_use_id' => $part->callId,
-                    'content'     => [] === $part->content ? [['type' => 'text', 'text' => $part->error ? 'Error' : '(no output)']] : \array_map($this->block(...), $part->content), // the API rejects an empty list
+                    'content'     => $this->blocks($part->content) ?: [['type' => 'text', 'text' => $part->error ? 'Error' : '(no output)']], // the API rejects an empty list
                     'is_error'    => $part->error,
                 ];
-            } else {
+            } elseif (!($part instanceof Text && '' === $part->text)) { // the API rejects an empty text block
                 $rest[] = $this->block($part);
             }
         }
@@ -359,6 +359,23 @@ final readonly class Messages implements Model
     }
 
     /** @return array<string, mixed> */
+    /**
+     * @param list<\Harness\Part> $parts
+     *
+     * @return list<array<string, mixed>> without empty text blocks, which the API rejects
+     */
+    private function blocks(array $parts): array
+    {
+        $out = [];
+        foreach ($parts as $part) {
+            if (!($part instanceof Text && '' === $part->text)) {
+                $out[] = $this->block($part);
+            }
+        }
+
+        return $out;
+    }
+
     private function block(\Harness\Part $part): array
     {
         if ($part instanceof Text) {

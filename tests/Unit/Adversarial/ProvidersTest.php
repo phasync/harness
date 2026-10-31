@@ -788,3 +788,76 @@ it('refuses a ToolChoice::Tool naming a tool the prompt does not carry, before t
         ->toThrow(UnsupportedOptionException::class, "names 'fetch'")
         ->and($t->requests)->toBe([]);
 }); // #77: sent as-is, a provider 400 the model cannot fix
+
+/*
+ * Round 15's attack on #76/#77 and the reply side:
+ *
+ * - `temperature` exactly `1.0` (Anthropic) / `2.0` (OpenAI), and `-0.0`: the guards are
+ *   `$o->temperature < 0.0 || $o->temperature > 1.0` (and `2.0` for OpenAI) -- inclusive at both
+ *   ends, and `-0.0 < 0.0` is `false` in PHP (IEEE-754 equality), so all three pass as they must.
+ *   Confirmed, not a defect.
+ * - `Options(toolChoice: ToolChoice::Tool, tool: null)`: `Options`'s own constructor already
+ *   throws `InvalidArgumentException` for this combination before any `Prompt` can exist. Not
+ *   reachable at the provider level; not a new gap.
+ * - An assistant message whose parts are only `Reasoning`, stamped for the *same* model: Anthropic
+ *   replays its blocks (or, if unsigned, drops the block and -- per #31/#39's territory -- the
+ *   message as a whole if nothing is left); Responses replays the reasoning items into `input`.
+ *   Both already handled; not new.
+ * - A `ToolResult` whose call id was never in any assistant message, and consecutive user messages:
+ *   traced -- `Messages::messages()` merges consecutive user turns (tool results sorted first) by
+ *   construction, so "consecutive user messages" never reaches the API as two separate turns in
+ *   the first place; an orphaned `ToolResult`'s `tool_use_id` is sent as-is and would 400 same as
+ *   the already-known, already-reported `function_call_output`-for-unknown-`call_id` class from
+ *   round 11 -- not re-reported.
+ * - An empty-string `Text` part in a user message: `Messages::block()` sends `{"type":"text",
+ *   "text":""}` verbatim for a `Text` part regardless of content (only the *assistant*-side helper
+ *   skips empty text, via `'' !== $part->text`); a real gap, but the one below is a cleaner,
+ *   more clearly wrong result and the one this round pins.
+ *
+ * - The one that reproduces: an assistant message whose only part is `Reasoning` stamped for a
+ *   *different* model (the harness's own documented case: thinking is "replayed unchanged to the
+ *   same model and dropped for another") contributes nothing anywhere else in the message either.
+ *   `Anthropic\Messages::messages()` already skips such a message outright (`if ([] === $content)
+ *   { continue; }`), and `Responses::input()` naturally contributes nothing (`array_push($items,
+ *   ...$this->assistant($message))` spreads zero items when `assistant()` returns `[]`). Chat
+ *   Completions has no equivalent: `ChatCompletions::messages()` always pushes exactly one entry
+ *   per assistant message (`[$this->assistant($message)]`), so the very same reasoning-for-another-
+ *   model message becomes a bare `{"role":"assistant","content":""}` -- an assistant turn with no
+ *   text, no reasoning_content, no tool_calls, sent to the API as if it carried something, when the
+ *   other two providers in this same module correctly send nothing for it at all.
+ *
+ * Verified directly against the real code (both adapters): the identical two-message prompt (a
+ * user `Text` and an assistant `Reasoning` stamped `'model' => 'some-other-model'`) produces
+ * `[{"role":"user",...}]` only through Anthropic and Responses, but
+ * `[{"role":"user",...},{"role":"assistant","content":""}]` through Chat Completions -- one extra,
+ * empty assistant turn that carries no information at all.
+ */
+it('does not send a bare empty assistant message for reasoning stamped to another model', function () {
+    $msgs = [
+        new Message(Role::User, [new Text('hi')]),
+        new Message(Role::Assistant, [new Reasoning('secret thought', ['model' => 'some-other-model'])]),
+    ];
+    $body = 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => ['content' => 'x'], 'finish_reason' => 'stop']]]) . "\n\n"
+          . "data: [DONE]\n\n";
+    $t = new FakeTransport(new Response(200, [], \str_split($body, 23)));
+    [...(new ChatCompletions($t, 'http://h/v1', 'm'))->stream(new Prompt(null, $msgs, [], new Options(), live()))];
+    $sent = \json_decode($t->requests[0]['body'], true);
+
+    // Today: a second message is sent, {"role":"assistant","content":""} -- empty, uninformative,
+    // and absent from the equivalent request through Anthropic or Responses for this same prompt.
+    expect($sent['messages'])->toHaveCount(1);
+}); // #82: {role: assistant, content: ''} went out
+
+it('leaves an empty text part out of an Anthropic message, which the API rejects', function () {
+    $respBody = "event: message_start\ndata: " . \json_encode(['message' => ['id' => 'm', 'usage' => ['input_tokens' => 5, 'output_tokens' => 1]]]) . "\n\nevent: message_delta\ndata: " . \json_encode(['delta' => ['stop_reason' => 'end_turn']]) . "\n\nevent: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n";
+    $t        = new FakeTransport(new Response(200, [], \str_split($respBody, 23)));
+    $msgs     = [
+        new Message(Role::User, [new Text(''), new Text('hello')]),
+        new Message(Role::Assistant, [new ToolCall('tu1', 'look', [])]),
+        new Message(Role::User, [new ToolResult('tu1', [new Text('')], false)]),
+    ];
+    [...(new Messages($t, 'key', 'claude-x'))->stream(new Prompt(null, $msgs, [new ToolSpec('look', 'Look', ['type' => 'object'])], new Options(), live()))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body['messages'][0]['content'])->toBe([['type' => 'text', 'text' => 'hello']])
+        ->and($body['messages'][2]['content'][0]['content'])->toBe([['type' => 'text', 'text' => '(no output)']]);
+}); // #83: {type: text, text: ''} went out, a 400 from the API

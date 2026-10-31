@@ -162,6 +162,10 @@
   refused instead of re-reading it from disk (#79), an add or move onto a path deleted earlier in
   the same patch works, and a failed delete is an error.
 - `web_fetch` and `StreamTransport` take the URL scheme case-insensitively (`HTTP://`) (#80).
+- `web_fetch`'s title line is the first `<title>` outside the dropped elements, not an SVG icon's (#81).
+- Chat Completions skips an assistant message that maps to nothing (reasoning stamped for another
+  model) instead of sending an empty one, as the other providers do (#82); Anthropic leaves out
+  empty text parts, which the API rejects (#83).
 - `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
   how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler

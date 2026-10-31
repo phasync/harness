@@ -8,8 +8,8 @@ namespace Harness\Tools\Web;
  * @internal the HTML-to-text extraction behind `WebFetch`; not a stable API
  *
  * `extract()` turns a page into readable text with no dependency beyond ext-dom: script, style,
- * noscript, svg, nav, footer, header, aside, form and comments are dropped; the `<title>` becomes
- * the first line; headings become `"# "`.."######" lines by level; paragraphs and blockquotes are
+ * noscript, svg, nav, footer, header, aside, form and comments are dropped; the first `<title>`
+ * outside them becomes the first line; headings become `"# "`.."######" lines by level; paragraphs and blockquotes are
  * separated by a blank line; `li` becomes a `"- "` line (a list is one block, its items one per
  * line, a nested list's items on their own lines indented two spaces under the parent item); `a` becomes `"text (url)"`
  * only when the link text differs from the URL; `pre` is kept verbatim; a table becomes one row
@@ -28,11 +28,13 @@ final class Html
         \libxml_use_internal_errors($previous);
 
         $lines = [];
-        $title = $dom->getElementsByTagName('title')->item(0);
-        if (null !== $title) {
-            $text = self::collapse($title->textContent);
-            if ('' !== $text) {
-                $lines[] = $text;
+        foreach ($dom->getElementsByTagName('title') as $title) { // the first title outside the dropped elements: an svg icon has its own
+            if (!self::dropped($title)) {
+                $text = self::collapse($title->textContent);
+                if ('' !== $text) {
+                    $lines[] = $text;
+                }
+                break;
             }
         }
         $root = $dom->getElementsByTagName('body')->item(0) ?? $dom->documentElement;
@@ -44,6 +46,18 @@ final class Html
         }
 
         return \implode("\n\n", $lines);
+    }
+
+    /** Whether an ancestor is one of the dropped elements. */
+    private static function dropped(\DOMNode $node): bool
+    {
+        for ($up = $node->parentNode; $up instanceof \DOMElement; $up = $up->parentNode) {
+            if (\in_array(\strtolower($up->tagName), self::DROP, true)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /** @return list<string> one entry per block-level element, text already collapsed */

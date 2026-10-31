@@ -388,3 +388,35 @@ it('refuses to update a file an earlier section of the same patch deleted, and l
     expect(\file_get_contents($this->dir . '/a.txt'))->toBe("b\n")
         ->and(\is_file($this->dir . '/b.txt'))->toBeFalse();
 }); // #79: planUpdate re-read the deleted file from disk; the delete-then-move case was refused
+
+/*
+ * Round 15. Attacked the #78/#79 single-plan rewrite with five ApplyPatch scenarios -- all
+ * verified correct by running them against the real code:
+ * - Add x then Delete x in one patch, x never on disk: reported as both "Added" and "Deleted",
+ *   but no disk write or delete happens at all (the final planned state is null and was never on
+ *   disk, so the delete loop's `is_file || is_link` guard skips it).
+ * - Move a to b then Delete b: a.txt is removed from disk, b.txt never comes into existence (the
+ *   planned state for b lands on null before the write loop runs).
+ * - Delete a then Add a with new content: the file is replaced in place (no unlink/recreate pair;
+ *   the final plan is non-null, so only the write loop touches it), the Journal records exactly
+ *   once -- the true original content -- and undo restores it.
+ * - Update a then Update-and-Move a to b in two sections: b ends up with both edits applied in
+ *   sequence; a is gone.
+ * None of those broke a documented promise, so this pins the subtlest of the two edit_file
+ * invariants the coordinator asked about instead: `old` matching exactly once must be taken
+ * immediately, with the tolerant cascade never even consulted -- not just "not reported as
+ * ambiguous" but structurally skipped, per Matcher::locate()'s early return on a single exact hit.
+ * Checked against tests/: EditFileCascadeTest.php's two ambiguity tests cover exact matching zero
+ * times (falls through to a tolerant level) and exact matching more than once (ambiguous at the
+ * exact level itself) -- neither covers exact matching exactly once while a *different* region
+ * would also match through a tolerant level, which would make that looser level's own search
+ * ambiguous were it ever run.
+ */
+it('takes the single exact match without ever consulting the tolerant cascade', function () {
+    \file_put_contents($this->dir . '/a.txt', "foo(x)\nbar\n  foo( x )\nbaz\n");
+    $e      = new EditFile($this->root);
+    $result = $e->call(['path' => 'a.txt', 'old' => 'foo(x)', 'new' => 'REPLACED'], callFor());
+
+    expect($result->content[0]->text)->not->toContain('matched with')
+        ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("REPLACED\nbar\n  foo( x )\nbaz\n");
+});

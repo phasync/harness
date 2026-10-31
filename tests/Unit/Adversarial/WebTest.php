@@ -480,3 +480,25 @@ it('does not refuse an ordinary public URL as an SSRF risk just because its sche
     expect($fetch->call(['url' => 'HTTP://example.com/page'], TestCall::make())->content[0]->text)
         ->toBe('hi');
 }); // #80: the scheme was compared case-sensitively
+
+/*
+ * Html::extract()'s docblock is explicit that `svg` content is dropped, same as `script`,
+ * `style`, `nav` and the rest of `Html::DROP`. But the title line is picked out with
+ * `$dom->getElementsByTagName('title')->item(0)` -- a document-wide search that makes no
+ * exception for a `<title>` that is itself inside a dropped `<svg>` subtree (an inline icon or
+ * logo's accessibility title, a very ordinary thing to find in real markup, especially on a page
+ * that has no `<head><title>` of its own -- e.g. a single-page app that sets the title via
+ * JavaScript). `blocks()`/`inline()` correctly skip `svg` while walking the body, but the
+ * title-picking code runs independently of that walk and is not filtered the same way, so the
+ * dropped SVG's own title leaks out as the page's first line regardless.
+ */
+it('does not use an SVG icon\'s own title as the page title', function () {
+    // No <head><title> at all; the only <title> element anywhere is an SVG logo's accessibility
+    // title inside a dropped <nav>.
+    $html = '<html><body><nav><svg role="img"><title>Acme Corp logo</title><path d="M0 0"/></svg></nav>'
+          . '<main><h1>Welcome</h1><p>Main content.</p></main></body></html>';
+
+    // Today: the output starts with "Acme Corp logo\n\n# Welcome..." -- the SVG's own title,
+    // content Html::extract's docblock promises to drop entirely, becomes the page's first line.
+    expect(Html::extract($html))->toBe("# Welcome\n\nMain content.");
+})->group('bug');
