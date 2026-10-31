@@ -365,3 +365,52 @@ it('decodes every member of a concatenated multi-member gzip body, not just the 
     // no error and no indication that anything is missing.
     expect($text)->toBe('Hello, World!');
 }); // #54: the read ended at the first member
+
+/*
+ * `Response::redirectTarget()` and `StreamTransport::send()` both pass a `Location` header's
+ * path straight through: `$path = ($parts['path'] ?? '/') . ...` is sent verbatim as the next
+ * request's target. RFC 7230 ss3.1.1 requires a request-line's request-target to contain no raw
+ * space -- it is the delimiter between method, target and HTTP version -- so any octet outside
+ * what a request-target allows must be percent-encoded. A server's `Location` value is not
+ * guaranteed to already be percent-encoded (plenty of real servers emit a raw space, or a
+ * non-ASCII byte, in a redirect path), and nothing here encodes it before using it as the next
+ * hop's target: web_fetch happily builds and sends an HTTP/1.1 request line containing a literal
+ * space, which is not a valid HTTP request at all -- a strictly conforming server will answer it
+ * with 400 Bad Request, silently breaking the redirect follow against exactly the servers most
+ * likely to care about protocol correctness.
+ */
+it('percent-encodes a redirect Location containing a space before sending the next request', function () {
+    $hop2Line = \fiber\run(function () {
+        $server = \stream_socket_server('tcp://127.0.0.1:0');
+        $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+        $task   = go(function () use ($server) {
+            $conn1 = \stream_socket_accept(readable($server), 0);
+            $req1  = '';
+            while (!\str_contains($req1, "\r\n\r\n")) {
+                $req1 .= \fread(readable($conn1), 65536);
+            }
+            \fwrite(writable($conn1), "HTTP/1.1 302 Found\r\nLocation: /a b.html\r\nContent-Length: 0\r\n\r\n");
+            \fclose($conn1);
+
+            $conn2 = \stream_socket_accept(readable($server), 0);
+            $req2  = '';
+            while (!\str_contains($req2, "\r\n\r\n")) {
+                $req2 .= \fread(readable($conn2), 65536);
+            }
+            \fwrite(writable($conn2), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nOK");
+            \fclose($conn2);
+            \fclose($server);
+
+            return \explode("\r\n", $req2)[0];
+        });
+        $fetch = new WebFetch(new StreamTransport(), 'agent', allowPrivate: true);
+        $fetch->call(['url' => "http://127.0.0.1:$port/start"], TestCall::make());
+
+        return \fiber\await($task);
+    });
+
+    // Today: $hop2Line is "GET /a b.html HTTP/1.1" -- a literal space in the request-target,
+    // which is not a valid HTTP/1.1 request line at all (RFC 7230 ss3.1.1); a strictly conforming
+    // server would reject it with 400 Bad Request instead of serving the redirect's target.
+    expect($hop2Line)->toBe('GET /a%20b.html HTTP/1.1');
+}); // #61: 'GET /a b.html HTTP/1.1' went out raw

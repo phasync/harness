@@ -155,8 +155,10 @@ final class Run
      * such as an option the provider cannot honour) is rethrown from the iteration after `TurnEnded`,
      * or from the `break` or release that leaves the generator there, in or after the run. Once
      * `TurnEnded` is out the turn's work is done: the generator may be kept and finished later. A
-     * turn left before `TurnEnded` is cancelled and keeps no exception. The next turn may start once
-     * the generator has finished or been released: not from inside the `TurnEnded` handler.
+     * turn left before `TurnEnded` is cancelled: it finishes what it was doing, `ended()` tells how
+     * that went (`Cancelled`, or `Failed` with the error in `Ended::$error` when the step it was in
+     * failed first), and nothing is rethrown. The next turn may start once the generator has
+     * finished or been released: not from inside the `TurnEnded` handler.
      *
      * @param Message|Resume|list<Answer> $input
      *

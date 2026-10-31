@@ -383,3 +383,37 @@ it('rejects an infinite number, not just NaN, the same way it already screens it
     expect(fn () => Harness\Tools\Input::number(['n' => $value], 'n', 1.0))
         ->toThrow(Harness\Retry::class, 'finite');
 })->with(['1e400', \INF]); // #57: only NaN and values below the minimum were screened
+
+/*
+ * `proc_open()` fails for more reasons than a relative cwd (#23), an unenterable cwd (#44), or a
+ * missing executable -- one more is a `command` too long for the OS to accept as a single argv
+ * element: `execve()`/`posix_spawn()` fail with E2BIG once argv plus envp exceeds `ARG_MAX`
+ * (`getconf ARG_MAX` on this machine: 2 MiB). Every one of those earlier fixes narrowed a
+ * *construction-time* check (cwd resolution, permission), because cwd is fixed once per `Shell`
+ * instance. `command`, by contrast, is the one input the model supplies fresh on every call --
+ * there is no construction-time check that could ever catch this, and it is squarely within a
+ * model's own reach to produce a very long command (a heredoc, a big embedded literal, output
+ * from a previous step pasted back in).
+ *
+ * `Shell::call()` still has exactly one response to `proc_open()` returning `false`: `throw new
+ * \RuntimeException('Could not start bash')`, uncaught, exactly like the two now-fixed cases.
+ * Every *other* way this tool can fail -- a non-zero exit, a timeout, a cancellation -- is
+ * documented and returned as an ordinary error `Result` the model can read and react to; this one
+ * is not, and the model never learns its own command was the problem, let alone that length was
+ * the reason, because the exception never reaches a `Result` at all.
+ *
+ * Verified directly: a `command` of 4 MiB (comfortably past this system's 2 MiB `ARG_MAX`) makes
+ * `proc_open()` emit a `PHP Warning` ("Argument list too long") and return `false`, and
+ * `Shell::call()` lets the `RuntimeException` escape uncaught instead of returning a `Result`.
+ */
+it('returns an error result, not an uncaught exception, when the command is too long for the OS to accept', function () {
+    // Past ARG_MAX (2 MiB on this system; 4 MiB clears any ordinary ceiling). Today: proc_open()
+    // returns false and Shell::call() throws RuntimeException('Could not start bash') uncaught,
+    // the same unhandled-failure shape as #23 and #44, but for an input the model controls on
+    // every call, which no construction-time check can ever guard against.
+    $huge = \str_repeat('a', 4 * 1024 * 1024);
+    $r    = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir()))->call(['command' => "echo $huge"], callFor()));
+
+    expect($r)->toBeInstanceOf(Harness\Result::class)
+        ->and($r->error)->toBeTrue();
+}); // #60: RuntimeException('Could not start bash') plus a PHP warning

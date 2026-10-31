@@ -541,3 +541,66 @@ it('does not fold a second tool call into the first when only its name changes, 
     expect(fn () => [...$model->stream(new Prompt(null, [], [], new Options(), live()))])
         ->toThrow(ModelException::class, "changed its name from 'toolA' to 'toolB'");
 }); // #55: #49 checked the id only; a continuation chunk carries none
+
+/*
+ * Round 11, worked through the coordinator's list in order:
+ *
+ * - Responses `function_call_output` for an unknown `call_id`: traced `Responses::user()` and
+ *   `request()` -- there is no local validation anywhere against the prior assistant message's
+ *   `function_call` items; the mismatched `call_id` is sent as-is. No `LogicException` is thrown
+ *   before the request. It is a provider 400 after the request, mapped by `self::error()` like any
+ *   other `invalid_request_error` (no special-cased code for it, so it falls to the generic
+ *   `ErrorKind::ModelError` default) -- a plain, correctly-classified error, not a new defect.
+ * - MCP elicitation with a field type the client does not know: `McpTool::needs()`'s per-field
+ *   `match` already only branches on `'boolean'` vs. `enum` vs. a default `null` (free text) --
+ *   every other type, known or not, takes the default branch and becomes a free-text `Question`.
+ *   No defect; this is already the correct "don't know, ask as text" fallback.
+ * - MCP `tools/call` `isError: true` with empty content: re-checked against #14's actual fix --
+ *   it lives in `Mcp\McpTool::result()` itself (an empty `content` and no `structuredContent` now
+ *   becomes one `Text` block, `"Error"` or `"(no output)"`), not in any one provider, so every
+ *   provider (including Anthropic's now-guarded `tool_result`) sees non-empty content. Not a new
+ *   defect; #14 is holding.
+ * - A `resource` content item with a `blob` (not `text`): `McpTool::result()`'s `'resource'` branch
+ *   already takes the `isset($c['resource']['text'])` / else-`Media` path correctly -- verified it
+ *   decodes the base64 `blob` into `Media` with the resource's own `mimeType`. Not a defect.
+ *
+ * - The one that reproduces: Anthropic's 529/`overloaded_error` mapping to `ErrorKind::RateLimited`
+ *   is correct (per docs/anthropic.md), but `retryAfter` is dropped on exactly one of this class's
+ *   two paths. The top-level non-200 response path reads it correctly:
+ *     throw self::error($error, $response->status, $response->headers['retry-after'] ?? null);
+ *   but the in-stream `error` event (an `overloaded_error`/`rate_limit_error` arriving as an SSE
+ *   event on an already-started 200 response, which is exactly how a mid-stream overload is
+ *   reported) hardcodes it away:
+ *     case 'error': throw self::error($e['error'], 200, null);
+ *   `$response` is still the very same variable in scope at that point, holding whatever headers the
+ *   200 response carried -- `$response->headers['retry-after'] ?? null` would read it exactly the
+ *   same way the line above it already does. A host that backs off using `ModelException::$retryAfter`
+ *   gets `null` and falls back to its own default/no backoff for this one path, even when the
+ *   server told it precisely how long to wait.
+ *
+ * Verified directly against the real code (both adapters): a 200 response carrying `retry-after:
+ * 30` whose body streams `message_start` then an in-band `error` event (`overloaded_error`) throws
+ * `ModelException` with `kind: RateLimited` but `retryAfter: null` -- the header was right there on
+ * the very `Response` object in scope and was never read.
+ */
+it('reads Retry-After for an in-stream error event, not only a non-200 response', function () {
+    $body = '';
+    foreach ([
+        ['type' => 'message_start', 'message' => ['usage' => []]],
+        ['type' => 'error', 'error' => ['type' => 'overloaded_error', 'message' => 'Overloaded']],
+    ] as $e) {
+        $body .= "event: {$e['type']}\ndata: " . \json_encode($e) . "\n\n";
+    }
+    // The 200 response that starts the stream still carries a Retry-After header.
+    $model = new Messages(new FakeTransport(new Response(200, ['retry-after' => '30'], \str_split($body, 23))), 'k', 'claude-x');
+
+    try {
+        [...$model->stream(new Prompt(null, [], [], new Options(), live()))];
+        $this->fail('no exception');
+    } catch (ModelException $e) {
+        // Today: retryAfter is null -- the in-stream 'error' case hardcodes it, ignoring the
+        // Retry-After header that the very same $response it still has in scope carries.
+        expect($e->kind)->toBe(ErrorKind::RateLimited)
+            ->and($e->retryAfter)->toBe(30.0);
+    }
+}); // #59: the in-stream error path passed null

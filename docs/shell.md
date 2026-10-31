@@ -16,6 +16,8 @@ shares the name, so a file that uses both aliases one (`use Harness\Policy\Shell
   a character split by the cut) become U+FFFD.
 - A non-zero exit, a timeout or a cancellation is an error result; `value` is the exit code, or
   null when the process was killed (a timeout or a cancellation), since a killed process has none.
+  A command the OS refuses to start (longer than `ARG_MAX`, say) is an error result naming the
+  reason and the command's size.
 - The call ends when the shell exits, times out or the run is cancelled; the command's whole process
   group is then killed (on Linux it runs under `setsid`; elsewhere only bash is terminated), so a
   background child (`server &`) does not outlive the call. A host that wants long-running processes

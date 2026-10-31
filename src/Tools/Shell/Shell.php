@@ -69,9 +69,19 @@ final readonly class Shell implements Tool
         $timeout = \min(Input::number($input, 'timeout', $this->timeout, 0.0), $this->maxTimeout);
         $group   = \PHP_OS_FAMILY === 'Linux' && \function_exists('posix_kill');
         $argv    = $group ? ['setsid', 'bash', '-c', $command] : ['bash', '-c', $command];
-        $process = \proc_open($argv, [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, $this->cwd);
-        if (false === $process) {
-            throw new \RuntimeException('Could not start bash');
+        $reason  = '';
+        \set_error_handler(static function (int $no, string $message) use (&$reason): bool {
+            $reason = \preg_replace('/^proc_open\(\): /', '', $message) ?? $message;
+
+            return true;
+        });
+        try {
+            $process = \proc_open($argv, [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, $this->cwd);
+        } finally {
+            \restore_error_handler();
+        }
+        if (false === $process) { // the cwd was checked at construction: this is the command (too long for the OS) or the environment
+            return new Result([new Text("bash could not be started: $reason; the command is " . \strlen($command) . ' bytes')], error: true);
         }
         $out = $pipes[1];
         \stream_set_blocking($out, false);

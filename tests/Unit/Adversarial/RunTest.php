@@ -558,3 +558,61 @@ it('does not let fiber\run() throw a held turn\'s exception before the host fini
             $gen = null;
         })->toThrow(UnsupportedOptionException::class);
 }); // #58: fiber\run() threw it as an unawaited task error
+
+/*
+ * Round 11: attacking the #58 ruling "a turn left before TurnEnded is cancelled and keeps no
+ * exception". The generator's `finally` only takes the rethrow path when `$event instanceof
+ * TurnEnded` (Run.php: `if ($event instanceof TurnEnded && !$finished) { ...; $this->rethrow(); }`)
+ * -- for any earlier event it just treats the break as an ordinary cancel (`$this->cancel();
+ * $queue->detach();`), nothing more. That is exactly right when the host breaks at `TurnStarted`:
+ * `loop()`'s own `if ($this->isCancelled()) { $reason = Reason::Cancelled; break; }` check, at the
+ * top of the step loop, runs before the model is ever called, so a model that would have thrown
+ * never gets the chance to -- `Ended::$reason` is genuinely `Cancelled`, nothing lost.
+ *
+ * But `loop()` has no such check between emitting `StepStarted`/`MessageStarted` and actually
+ * driving the model (`modelStep()`'s `foreach ($this->modelChain(...) as $delta)`). If the host
+ * breaks right after `MessageStarted` instead of `TurnStarted`, the generator's `finally` sees an
+ * event that is not `TurnEnded`, so it still only cancels -- no `rethrow()`. But once `detach()`
+ * wakes the producer back up, `loop()` resumes straight into driving the model, which throws its
+ * `\LogicException` regardless of the cancellation flag (there is nothing checking it between
+ * `MessageStarted` and the model call). `loop()`'s catch block sets `Reason::Failed` with the real
+ * error, unconditionally -- cancellation never overrides an exception that already happened. So
+ * `Ended::$reason` ends up `Failed`, with the real `UnsupportedOptionException` in `Ended::$error`
+ * -- contradicting "a turn left before TurnEnded is cancelled" for a break that happens only one
+ * event later than the case the ruling was verified against, with no way left to retrieve that
+ * exception from the generator (the one `finally` that could have called `rethrow()` already
+ * ran and chose not to, since the last event wasn't `TurnEnded`).
+ *
+ * Verified directly against the real code with both adapters: breaking right after
+ * `MessageStarted` of a turn whose model throws `UnsupportedOptionException` on its first pull
+ * delivers nothing to either the inner or outer try/catch, yet `$run->ended()->reason` is
+ * `Reason::Failed`, not `Reason::Cancelled` as the ruling for "left before TurnEnded" promises.
+ */
+it('keeps the "left before TurnEnded is cancelled" ruling consistent across events', function () {
+    $model = new FakeModel(static function () {
+        throw new UnsupportedOptionException('no temperature here');
+    });
+    $run    = new Harness\Run($model, new Tools());
+    $caught = null;
+
+    try {
+        \fiber\run(function () use ($run, &$caught) {
+            try {
+                foreach ($run->turn(new Message(Role::User, [new Text('go')])) as $e) {
+                    if ($e instanceof Harness\Event\MessageStarted) {
+                        break;  // one event later than TurnStarted, still well before TurnEnded
+                    }
+                }
+            } catch (Throwable $ex) {
+                $caught = $ex;
+            }
+        });
+    } catch (Throwable $ex) {
+        $caught = $caught ?? $ex;
+    }
+
+    // The abandoned turn finished the step it was in, which failed: ended() says so, nothing is rethrown.
+    expect($caught)->toBeNull()
+        ->and($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->ended()->error)->toBeInstanceOf(UnsupportedOptionException::class);
+}); // #63: the docblock promised Cancelled; the step failed first, and that is what ended() tells

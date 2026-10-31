@@ -129,6 +129,15 @@
 - A turn's misuse exception is kept by the `Run` and thrown from the iteration after `TurnEnded`, or
   from the `break` or release of the generator, in or after the run; the turn's task itself never
   fails, so `fiber\run()` no longer throws it as an unawaited error (#58).
+- An Anthropic error event inside a stream carries the response's `Retry-After` like a non-200
+  response does (#59).
+- A command the OS refuses to start (past `ARG_MAX`) is an error result naming the reason and the
+  command's size, instead of "Could not start bash" with a PHP warning (#60).
+- A redirect `Location` holding a space or a non-ASCII byte is percent-encoded before the next
+  request, instead of sent raw in the request line (#61).
+- `glob`'s `**` matches a path holding a newline (#62).
+- `turn()`'s docblock: a turn left before `TurnEnded` finishes what it was doing and `ended()` tells
+  how that went, `Cancelled` or `Failed` with the error; nothing is rethrown (#63, docs only).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 

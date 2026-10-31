@@ -145,7 +145,7 @@ final readonly class Messages implements Model
                     yield $usage;
                     break;
                 case 'error':
-                    throw self::error($e['error'], 200, null);
+                    throw self::error($e['error'], 200, $response->headers['retry-after'] ?? null);
                 case 'message_stop':
                     if ('tool_use' === $stop && !$called) {
                         throw new ModelException(ErrorKind::ModelError, 'The reply ended with stop_reason tool_use but holds no tool_use block');

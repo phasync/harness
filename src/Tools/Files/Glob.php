@@ -128,6 +128,6 @@ final readonly class Glob implements Tool
             }
         }
 
-        return '#^' . $out . '$#';
+        return '#^' . $out . '$#s'; // s: a path may hold a newline, and ** must span it
     }
 }

@@ -55,7 +55,8 @@ error result unless the constructor's `allowPrivate: true` (default `false`): `w
 inside agents that may be on a server with its own internal network, and this is the guard against
 them being used to probe it. The name is resolved once by the guard and again by the transport, so a
 record that changes between the two (DNS rebinding) is not covered; a redirect's target is checked
-by the same guard.
+by the same guard, and a space or non-ASCII byte in a `Location` header is percent-encoded before
+the next request.
 
 ## Cache
 

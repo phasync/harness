@@ -48,6 +48,8 @@ final class Response
         if (null === $location || !\in_array($this->status, [301, 302, 303, 307, 308], true)) {
             return null;
         }
+        // a space or a non-ASCII byte sent raw would break the next request line (RFC 7230 §3.1.1)
+        $location = \preg_replace_callback('/[^\x21-\x7e]/', static fn (array $m): string => \sprintf('%%%02X', \ord($m[0])), $location) ?? $location;
         if (1 === \preg_match('#^https?://#i', $location)) {
             return $location;
         }

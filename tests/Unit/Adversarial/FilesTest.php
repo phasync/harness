@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Harness\Tools\Files\ApplyPatch;
 use Harness\Tools\Files\EditFile;
+use Harness\Tools\Files\Glob;
 use Harness\Tools\Files\Grep;
 use Harness\Tools\Files\ListDir;
 use Harness\Tools\Files\ReadFile;
@@ -255,3 +256,24 @@ it('resolves a directory-prefixed path composed from list_dir\'s quoted basename
     $result = (new ReadFile($this->root))->call(['path' => 'sub/' . $basename], callFor());
     expect($result->content[0]->text)->toContain('secret in sub');
 }); // #56: only a whole-path literal was decoded; sub/"..." was 'does not exist'
+
+/*
+ * Round 11. While attacking the #56 segment-quoting fix (directory form, both-segments-quoted
+ * composition, and a quote-wrapped plain name all round-tripped correctly -- see the report), a
+ * sharper, unrelated defect turned up one level earlier: `glob` can fail to *find* a file whose
+ * path holds a control character at all, before any quoting question even arises.
+ * `Glob::regex('**')` compiles to `#^.*$#` -- PCRE's `.` does not match a newline unless the `s`
+ * (dotall) modifier is set, which this regex never passes. A file whose relative path contains a
+ * newline (exactly the kind of file the quoting feature exists to let the model address) fails to
+ * match its own `**`, the catch-all pattern docs/files.md itself uses as the leading example
+ * (`**` then a slash then `*.php`). Plain `*` and `?` are unaffected (they compile to `[^/]*` and
+ * `[^/]`, character classes that do match `\n`); only the "any depth" `**` form is broken this way.
+ */
+it('matches a file whose path holds a newline with the all-files pattern "**"', function () {
+    \file_put_contents($this->dir . '/' . "evil\nfile.txt", 'x');
+    $result = (new Glob($this->root))->call(['pattern' => '**'], callFor());
+
+    // BUG: today this is "No files match '**'" -- the file's own embedded newline defeats the
+    // catch-all pattern, since Glob::regex('**')'s '.*' cannot cross a '\n' without the 's' modifier.
+    expect($result->content[0]->text)->not->toContain('No files match');
+}); // #62: .* without the s modifier stopped at the newline
