@@ -1,13 +1,14 @@
 # phasync/harness — specification
 
-Revision 5 (2026-10-31). Revisions 1–4 are 0.0.1-beta1–beta4. In round 4 every user called the
-harness complete for their use; what they still found is minor and in Compact. This revision
-fixes those, adds three features the owner asked for (interrupt-edit-resume, steering a running
-turn, a known context window with truncation detection), and closes the last documentation
-gaps. The builder implements this document; sections marked *module* are part of this package
-but live in their own namespace and are never imported by the core.
+Revision 6 (2026-10-31). Revisions 1–5 are 0.0.1-beta1–beta5. Round 5: four of five users call
+the harness complete; the fifth saw a sub-agent loop after many compaction rounds, and a survey of
+pi, OpenCode, Crush, Gemini CLI, Cline/Roo and ACP showed what the mature harnesses do
+differently about compaction and steering. This revision redesigns Compact's summary, splits
+steering into two delivery modes, hardens the shell policy, and names the first adapter module.
+The builder implements this document; sections marked *module* are part of this package but
+live in their own namespace and are never imported by the core.
 
-Changes since revision 4 are marked **[r5]**. Everything not marked is confirmed as built.
+Changes since revision 5 are marked **[r6]**. Everything not marked is confirmed as built.
 
 ## Purpose
 
@@ -27,123 +28,118 @@ Namespace `Harness\`. PHP 8.2+. Dependencies: `fiber-interop/api ^0.3.1`, `psr/l
 `fiber-interop/phasync ^0.4.1`, `fiber-interop/revolt` pinned to a tag if Packagist has one that
 allows scope ^0.5, else `dev-main`.
 
-### Parts, Model, Transport, Tool, Call, Result, Events, Middleware
+### Parts, Model, Transport, Tool, Call, Result, Run, Events, Middleware
 
-As built through revision 4.
+As built through revision 5 (interrupt-edit-resume, interject, `Options::$contextWindow`, a
+tool's `LogicException` fails the turn with `ErrorKind::ToolError`, `Ended::$queued`).
 
-### [r5] Interrupt, edit, resume
+### [r6] Steering: two delivery modes
 
-The host stops a reply mid-generation, edits what the model has said so far, and the model goes
-on from the edit.
+`Run::interject(Message $user, Delivery $delivery = Delivery::Steer)`:
 
-```php
-$run->interrupt();                       // like cancel(), but the turn ends Reason::Interrupted
-$run->ended()->partial;                  // ?Message: the assistant message as delivered so far
-                                         //   (Text as streamed; completed ToolCalls; Reasoning)
-$run->turn(new Resume($edited));         // $edited: an assistant Message the host built from it
-Prompt::$continue                        // bool: the last message is an assistant message to
-                                         //   continue, not a finished turn
-```
+- `Steer` (as built, with one addition from pi): the message lands before the next model call,
+  and **the step's tool calls that have not started yet are skipped**, each with an error result
+  "Skipped: the user sent a message" so the transcript stays paired; running calls finish.
+- `Queue` **[r6]**: the message waits until the turn would otherwise end `Done`, then starts
+  another step with it (pi's follow-up, OpenCode's `queue`). Several queue in order.
 
-- `Interrupted` keeps the partial message in `Ended::$partial` and nowhere else: `messages()`
-  and `appended` hold only complete steps, as after `Cancelled` and `Failed`. The turn ends
-  within the transport's poll interval; `Ended::$finish` is null.
-- `Resume` appends the edited assistant message and runs a step with `Prompt::$continue` true.
-  The accumulator is seeded with the edited message, so deltas extend it and the final
-  `MessageEnded` carries the whole message; `MessageStarted` is not emitted again, a
-  `MessageResumed(id)` event is **[r5]**. Tool calls the continued message ends with run as in
-  any step. A `Resume` is only valid when the run's last message is a user message (the partial
-  is not in `messages()`); anything else throws.
-- Providers: `ChatCompletions` sends the assistant message last, which llama.cpp, exl3 and
-  vLLM continue (vLLM needs `continue_final_message: true` and `add_generation_prompt: false`,
-  documented as `provider['openai']` keys); `Anthropic\Messages` prefills when the request has no
-  thinking and throws `UnsupportedOptionException` with thinking on; `Responses` throws
-  (`UnsupportedOptionException`: the API has no continuation). The exception names the fallback
-  the host may choose explicitly: append the edit as a finished assistant message and ask for
-  the next one. Nothing emulates silently.
-- Limits, stated in the README: a continuation cannot resume inside a reasoning block (the edit
-  applies to the visible text); a model interrupted mid tool call has no half call to continue.
-- `examples/chat.php`: Ctrl-C during a reply interrupts; the partial text is shown; the user types
-  a replacement for its last line (or nothing to keep it) and the reply continues. A live test
-  against the llama.cpp endpoint: interrupt after the first sentence, replace it, assert the
-  continuation starts after the replacement.
+`Interjected(message, delivery)` carries the mode. Leftovers at the end of a turn stay in
+`Ended::$queued` as built. `examples/chat.php`: Enter while streaming steers, Alt+Enter (or a
+`/queue` prefix, since terminals differ) queues.
 
-### [r5] Steering a running turn
+### [r6] Shaping the tool list is a documented idiom
 
-`Run::interject(Message $user)`: queues a user message that the loop appends at the next step
-boundary (after the step's tool results, before the next model call), so the host can redirect a
-long turn without losing the step in flight. Several interjections queue in order; an
-interjection with no turn running throws (use `turn()`). An event `Interjected(turn, message)`
-**[r5]** marks where it landed. `examples/chat.php`: a line typed while a reply streams is an
-interjection.
+A `ModelMiddleware` may hand `$next` a `Prompt` with a different `tools` list (Gemini CLI's
+`BeforeToolSelection`): fewer tools for a phase, a tool renamed, a tool added for one step. The
+README shows it in the Middleware section with a test; the loop runs whatever call the model
+makes against the run's `ToolSource` by name, so a tool the middleware removed from the prompt
+but the model still calls is the existing "unknown tool" error result. No new seam.
 
-### [r5] A known context window
+### Documentation **[r6]**
 
-`Options::$contextWindow` (`?int`, tokens): the model's window as the host knows it. The core does
-nothing with it but validate it and pass it on; `Compact` uses it (below). The README states that
-the harness assumes a server that errors when the prompt exceeds the window (hosted APIs,
-llama.cpp without context shift) and that a server that evicts silently (Ollama's default
-`num_ctx` of 4k) must be configured (`provider['ollama']['num_ctx']`) because the system prompt is
-the first thing it drops.
-
-### [r5] A LogicException from a tool is misuse
-
-As from the model or a middleware: the turn ends `Failed` and the exception is rethrown from the
-iteration after `TurnEnded`, instead of becoming an error result the model retries. Through
-`AgentTool` it reaches the parent the same way. Round 4 saw a lead agent re-delegating forever
-because a child's `Compact` budget-floor `LogicException` came back as a tool error.
-
-### Documentation **[r5]**
-
-- README `### Tools`: `Call`'s member list includes `pending()`, `answer()`, `answers()`,
-  `decision()`, `state()`, or points to Pause and resume.
-- README Install: only phasync and revolt are run in this repo's own suite; amp and react are
-  fiber-interop adapters the harness has not been tested on.
-- README Events: a `tool_decided` JSON line in the sample, and the note that the inline-answering
-  idiom emits no `ToolDecided` (the Run never saw a pause).
-- README Pause and resume: the answer body of a web host nests by call id
-  (`{"<callId>": {"<needId>": ...}}`), because need ids repeat across calls; a code block for
-  "after Failed" next to the AwaitingInput one, with the sentence that the user message that
-  started the failed step is already in `messages()`.
-- SPEC/docs/policy.md agree: the answering middleware is listed *before* Policy in the array
-  (outermost), since Policy's `Ask` returns without calling `$next`.
+- A tool's or middleware's `LogicException` is rethrown **inside** the consumer's `foreach`
+  (from the iteration after `TurnEnded`): wrap the loop in `try`, not the code after it.
+- Interrupt and cancel act on the `Run` object of the process that runs the turn: a web host
+  that wants to stop a turn from another request keeps the run in that worker (Swerve) or ends
+  it by closing the client's stream, which cancels the turn as documented.
+- A porting checklist for a hand-written `Model`: `Transport::post()`'s current signature with
+  `$prompt->cancel`, `Prompt::$continue`, `Options::$provider` merging being shallow (a provider
+  whose request nests its knobs under one key must merge that key itself, as Ollama's `options`).
 
 ## Modules
 
-### Compact (module) **[r5]**
+### Compact (module) **[r6] redesigned summary**
 
-- **Truncated summaries are collapses.** A side call that ends with `FinishReason::Length` is
-  retried once and then fails, like a short or empty one; `Compaction` records the finish.
-- **The summarizer sees the instructions.** The side call's ask includes the run's system text
-  (as "the agent's instructions") before the kept first messages, so summaries keep the task's
-  terms. docs/compact.md says exactly what the summarizer sees.
-- **A round that does not shrink the prompt is dropped**, with the existing warning, instead of
-  replacing two small messages by a larger summary and spending a side call every step.
-- **Calibration is a value.** `Compact::calibration(): ?Calibration` (low and high points, ratio,
-  offset) and a constructor parameter `?Calibration $calibration = null`, both JSON round-trip,
-  so a host that builds a `Compact` per request (the web idiom) persists it next to the
-  conversation and starts calibrated.
-- **Budget from the window.** `new Compact($summarizer, budgetTokens: null, ...)` takes the budget
-  from `Options::$contextWindow` minus a reserve of 20 % at first use; neither set throws.
-- **Silent truncation is detected.** Once calibrated, a reported input count below 70 % of the
-  calibrated estimate means the server cut the prompt: a `warning` log line naming both numbers,
-  and `Compaction::$truncatedUpstream` on that step. Tested with a FakeModel reporting half.
-- docs/compact.md: the thinking-off summarizer options are the first example's first line, with
-  one sentence why (both round-4 users collapsed on a thinking summarizer); a sentence for
-  upgraders that a budget tuned on bytes/4 can fail the floor once calibration learns the real
-  ratio; the cache key described as it is implemented.
+The mechanism stays (a `ModelMiddleware`; the prompt only; the host's transcript untouched;
+calibrated counting; the floor; collapse detection; one instance shared by forks; truncation
+detection). What changes is what a summary is and how it grows, following pi and OpenCode:
+
+- **A sectioned checkpoint, not a prose summary.** Fixed headings: *Goal* (the task and its
+  constraints, quoting the user), *Progress* with *Done*, *In progress*, *Blocked*, *Decisions*,
+  *Known* (facts with their sources: paths, names, numbers, quotes), *Next* (what remains, in
+  order), *Context* (anything else the agent will need). The prompt says to be complete about
+  facts and terse in wording, and to list every file or resource already read under *Done* so
+  the agent does not read it again (round 5's loop).
+- **Re-compaction updates the checkpoint.** When a summary already exists, the side call gets
+  the previous checkpoint and the new messages to fold in, with the instruction to preserve
+  every fact of the previous checkpoint and add the new progress (pi's `UPDATE` prompt,
+  OpenCode's "update the existing checkpoint"). It never re-summarizes a summary from scratch.
+- **The latest user message stays verbatim**, whatever the cut (round 5: a tight budget
+  summarized the current question away and the agent answered an old one), and so does the step
+  in flight: the recent part always holds at least the last user message and its reply so far.
+- **Reserve, not half.** Compaction keeps the most recent `keepRecentTokens` (default: a quarter
+  of the budget) verbatim and folds everything older into the checkpoint, rather than cutting
+  at half the messages; the cut lands on a message boundary that keeps tool pairs together.
+- **Overflow trigger** (OpenCode): when the provider rejects the request as too long
+  (`ErrorKind::ContextTooLong`) despite the estimate, Compact retries the step with a smaller
+  target (85 %, 70 %, 50 %, 35 % of the budget), then fails. Each retry is logged.
+- **State is a value.** `Compact::state(): State` and `state:` in the constructor replace
+  `Calibration`: `State` holds the calibration and the current checkpoint(s) keyed by a content
+  hash of the messages they cover (not object identity), with `toArray`/`fromArray`. A web host
+  that builds a `Compact` per request persists `State` and never recomputes a checkpoint it has.
+- **The summary text is loggable.** Each accepted checkpoint is logged at `debug` in full (the
+  `info` line keeps the sizes); `Compaction::$summary` as built.
+- docs/compact.md rewritten around the checkpoint; the FakeModel tests cover each rule
+  (update preserves facts; latest user message kept; reserve cut; overflow retry sequence;
+  State round trip reusing a checkpoint in a fresh instance).
+
+### Policy\Shell (module, **[r6] this round**)
+
+Crush's rule for the one tool where arguments matter: a `Policy` rule for the shell tool that
+matches **parsed argv**, not the command string.
+
+```php
+Rule::shell([Shell::allow('git', ['status', 'diff', 'log'], flags: ['--stat', '-p']),
+             Shell::allow('ls'), Shell::deny('rm'), Shell::allow('composer', ['test', 'install'])])
+```
+
+The command is parsed (a small POSIX-shell tokenizer in the module: words, quotes, `&&`, `||`,
+`;`, `|`, redirects); every simple command in a pipeline or list must match an allow rule for
+the whole to be allowed; wrappers (`env`, `nice`, `timeout`, `sudo`, `nohup`, `xargs`) are
+peeled and the wrapped command is matched; anything the tokenizer cannot parse (substitution,
+backticks, here-docs) is `Ask`. Tested with the usual bypasses (`env rm`, `git status; rm -rf`,
+`ls | sh`, `$(rm)`).
+
+### Acp (module, **[r6] if time allows, after everything above is green**)
+
+The Agent Client Protocol (agentclientprotocol.com, v1) over stdio, as an adapter over the event
+stream: `initialize`, `session/new|load|prompt|cancel`; events → `session/update` (text →
+`agent_message_chunk`, reasoning → `agent_thought_chunk`, tool start/update/end → `tool_call`
+and `tool_call_update` with `kind` from `Hints` and `diff` content for `EditFile`/`WriteFile`,
+`terminal` content for `Shell`); a Policy `Ask` → `session/request_permission` with
+`allow_once|allow_always|reject_once|reject_always`, the answer resuming the run; `StopReason`
+from `Reason`. Sub-agent pauses flatten into further permission requests; ACP's `fs/*` and
+`terminal/*` client-side I/O is not used (the harness's own tools run). A PHP test client
+(JSON-RPC over pipes) in tests/ drives it; `examples/acp.php` is the agent executable.
 
 ### Policy, Mcp, Transcript, Agents, Tools, Providers, Testing (modules)
 
-As built. `Responses` and `Anthropic` stay fake-tested until keys exist. A host that answers
-`Policy`'s `Ask` inline lists its answering middleware *before* `Policy` in the middleware array
-(outermost): `Ask` returns without calling `$next`, so a middleware listed after it never sees the
-pause. docs/policy.md says the same.
+As built.
 
 ## Examples and CLI
 
-As built; `chat.php` gains interrupt-edit-resume and interjection **[r5]**; `web.php` persists
-and restores the `Calibration` **[r5]**.
+As built; `chat.php` gains the queue mode **[r6]**; `web.php` persists `Compact\State` **[r6]**;
+`examples/acp.php` if the module ships.
 
 ## Rules the code follows
 
