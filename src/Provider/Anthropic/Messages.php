@@ -311,7 +311,12 @@ final readonly class Messages implements Model
         foreach ($message->parts as $part) {
             if ($part instanceof Reasoning) {
                 if (($part->raw['model'] ?? null) === $this->model) {
-                    \array_push($out, ...($part->raw['blocks'] ?? []));
+                    foreach ($part->raw['blocks'] ?? [] as $block) {
+                        if ('thinking' === ($block['type'] ?? null) && '' === ($block['signature'] ?? '')) {
+                            continue; // cut off (max_tokens) before it was signed: the API rejects it on replay
+                        }
+                        $out[] = $block;
+                    }
                 }
             } elseif ($part instanceof ToolCall) {
                 $out[] = ['type' => 'tool_use', 'id' => $part->id, 'name' => $part->name, 'input' => (object) $part->input];

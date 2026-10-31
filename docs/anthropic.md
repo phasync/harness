@@ -16,7 +16,8 @@ $model = new Messages(
 - SSE events `message_start`, `content_block_start|delta|stop`, `message_delta`, `message_stop`,
   `ping` and `error` are mapped; blocks `text`, `tool_use`, `thinking` and `redacted_thinking`.
 - Thinking is opaque and model-bound: a run of consecutive `thinking`/`redacted_thinking` blocks
-  becomes one Reasoning part whose `raw['blocks']` holds the blocks verbatim (with signatures). They
+  becomes one Reasoning part whose `raw['blocks']` holds the blocks verbatim (with signatures; a block
+  cut off before its signature arrived is dropped on replay, since the API rejects it). They
   are replayed unchanged to the same model and dropped for another.
 - Consecutive user messages are merged into one turn, tool results first, as the API requires.
   `ToolResult` maps to `tool_result` with `is_error`; images (PNG, JPEG, GIF, WebP) map to `image`,

@@ -129,3 +129,44 @@ it('keeps running commands in the directory it was built with, even after the pr
         \exec('rm -rf ' . \escapeshellarg($base));
     }
 }); // #23: the second call failed with 'Could not start bash', the relative cwd resolved against the new directory
+
+/*
+ * Shell::call()'s `$take` closure cuts the middle of long output by byte offset only: `$head`
+ * grows by `substr($chunk, 0, $half - strlen($head))` until it reaches `intdiv(maxOutput, 2)`
+ * bytes, and `$tail` is kept to the last `$half` bytes via `substr($tail . $chunk, -$half)`.
+ * Neither cut point has any notion of a character boundary -- `strlen`/`substr` are byte
+ * functions over the command's raw output.
+ *
+ * `Harness\Part\Text` wraps the result in a plain `string $text`, and a model is addressed over
+ * JSON, which requires a valid UTF-8 string. docs/shell.md promises "the model gets ... the
+ * output" for exactly this truncated-output path ("the middle cut out past maxOutput bytes").
+ *
+ * When the real output is UTF-8 text and the byte offset for `$half` lands inside a multi-byte
+ * character, the cut slices the character in half: `$head` (or `$tail`) ends with a dangling
+ * lead byte or an orphaned continuation byte, and the resulting text is not valid UTF-8 --
+ * `json_encode()` on it returns `false`. No adversarial crafting of the command is needed for
+ * this: any sufficiently long non-ASCII output (international text, emoji, accented names in a
+ * tool's own diagnostics, ...) misaligns against whatever `maxOutput` the host chose about as
+ * often as not, since UTF-8 characters are 1 to 4 bytes and the cut point never aims for a
+ * boundary.
+ *
+ * Verified directly: 2000 repetitions of the 3-byte character "日" (U+65E5) through a real `yes
+ * | head | tr` pipeline, cut at `maxOutput: 101` (half = 50, not a multiple of 3): the resulting
+ * text fails `mb_check_encoding(..., 'UTF-8')`, and `json_encode()` on it returns `false` --
+ * exactly the call a model-API client makes to put this tool result on the wire.
+ */
+it('cuts long multi-byte UTF-8 output on a character boundary, not a raw byte offset', function () {
+    // 2000 copies of the 3-byte character U+65E5 ("日"), well past maxOutput; half=50 is not a
+    // multiple of 3, so a byte-only cut is guaranteed to land inside a character, in the head or
+    // the tail.
+    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: 101))->call(
+        ['command' => "yes \xe6\x97\xa5 | head -n 2000 | tr -d '\\n'"],
+        callFor()
+    ));
+
+    // Today: $r->content[0]->text is not valid UTF-8 (the cut severs a "日" mid-character), so
+    // json_encode() on it -- what a model-API client does to send this tool result -- returns
+    // false instead of the JSON string every other Result's text produces.
+    expect(\mb_check_encoding($r->content[0]->text, 'UTF-8'))->toBeTrue()
+        ->and(\json_encode($r->content[0]->text))->not->toBeFalse();
+}); // #25: the cut left half a character, invalid UTF-8 that json_encode refuses

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Harness\Tools\Files\ApplyPatch;
 use Harness\Tools\Files\EditFile;
 use Harness\Tools\Files\Grep;
 use Harness\Tools\Files\Root;
@@ -94,3 +95,25 @@ it('does not report a match on the phantom line past a file\'s trailing newline'
     // #22: this also reported f.txt:4 on a three-line file
     expect($result->content[0]->text)->toBe('f.txt:2: ');
 });
+
+/*
+ * Round 4. ApplyPatch's docblock promises the patch "is built in memory first", so a failure
+ * "[leaves] the directory untouched" -- but that's only true for a failure caught during
+ * *planning* (an unlocatable or ambiguous hunk). `call()`'s execution loop writes every planned
+ * file in a single `foreach`, in file order, with nothing to undo an earlier iteration's write
+ * when a later one throws. A later `Add File` section whose parent path component is an existing
+ * regular file (not a directory) only fails once its own `mkdir()` is reached -- by which point an
+ * earlier `Add File` in the very same patch call has already landed on disk. One file in the
+ * patch is left applied while the call as a whole reports failure to the model.
+ */
+it('leaves no file written when a later section in the same patch fails to create its directory', function () {
+    \file_put_contents($this->dir . '/blocked', 'not a directory');
+    $patch = new ApplyPatch($this->root);
+    $p     = "*** Begin Patch\n*** Add File: ok.txt\n+hello\n*** Add File: blocked/x.txt\n+world\n*** End Patch";
+
+    expect(fn () => $patch->call(['patch' => $p], callFor()))->toThrow(RuntimeException::class);
+
+    // BUG: today 'ok.txt' already exists on disk -- an earlier section's write survives a later
+    // section's failure, contradicting "leaving the directory untouched" when the call throws.
+    expect(\is_file($this->dir . '/ok.txt'))->toBeFalse();
+}); // #26: ok.txt was written before the second section's mkdir failed

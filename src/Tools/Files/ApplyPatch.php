@@ -58,6 +58,13 @@ final readonly class ApplyPatch implements Tool
             $deletes = [...$deletes, ...$fileDeletes];
         }
 
+        foreach ($writes as $abs => $content) { // still planning: a path blocked by a file fails the patch before anything is written
+            for ($dir = \dirname($abs); !\file_exists($dir); $dir = \dirname($dir)) {
+            }
+            if (!\is_dir($dir)) {
+                throw new \RuntimeException("apply_patch: '" . $this->root->relative($abs) . "' cannot be created: '" . $this->root->relative($dir) . "' is a file, not a directory");
+            }
+        }
         foreach ($deletes as $abs) {
             $this->journal?->record($abs);
             \unlink($abs);

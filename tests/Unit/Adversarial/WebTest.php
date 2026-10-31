@@ -6,9 +6,12 @@ use function fiber\go;
 use function fiber\readable;
 use function fiber\writable;
 use Harness\Cancel;
+use Harness\Http\Response;
 use Harness\Http\StreamTransport;
 use Harness\Http\TransportException;
+use Harness\Testing\FakeTransport;
 use Harness\Tools\Web\Html;
+use Harness\Tools\Web\WebFetch;
 
 /*
  * Html::extract()'s docblock promises, flatly, that "`pre` is kept verbatim" -- no exception is
@@ -89,3 +92,26 @@ it('rejects a negative Content-Length instead of silently returning an empty bod
         });
     })->toThrow(TransportException::class, 'Content-Length');
 }); // #19: this returned status 200 with an empty body and no error
+
+/*
+ * WebFetch's ToolSpec calls `offset` a "character offset", and its class docblock says the text
+ * "is cut at maxChars ... per call with the files tools' tail idiom". WebFetch::tail() (WebFetch.php)
+ * implements that cut with `\strlen($text)` / `\substr($text, $offset, $maxChars)` -- both of
+ * which count and slice BYTES, not characters. For any body with a multi-byte UTF-8 character
+ * (accented letters, an em dash, CJK, emoji -- i.e. most non-English or typographically normal
+ * text, since HTML entities are decoded to UTF-8 before this runs), a maxChars/offset boundary
+ * that lands inside a multi-byte sequence splits it, handing the model invalid UTF-8 glued to a
+ * "[N more characters]" note whose count is also in bytes, not characters.
+ */
+it('cuts maxChars by characters, not bytes, so it never splits a multi-byte character', function () {
+    // "café" is 4 characters but 5 bytes in UTF-8 ('é' is 0xC3 0xA9, two bytes). maxChars: 4 is a
+    // request for the whole word -- there is nothing left to split or to continue from.
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/plain'], ['café']));
+    $fetch     = new WebFetch($transport, 'agent', maxChars: 4);
+    $text      = $fetch->call(['url' => 'https://example.com/a.txt'], callFor())->content[0]->text;
+
+    // Today: the byte-based cut lands after 4 bytes, i.e. inside 'é', and tail() appends a
+    // continuation note straight onto the dangling first byte -- the result is not even valid
+    // UTF-8, let alone the complete 4-character word the maxChars value asked for.
+    expect($text)->toBe('café');
+})->group('bug');

@@ -10,6 +10,7 @@ use Harness\Http\Response;
 use Harness\Message;
 use Harness\ModelException;
 use Harness\Options;
+use Harness\Part\Reasoning;
 use Harness\Part\Text;
 use Harness\Part\ToolCall;
 use Harness\Part\ToolResult;
@@ -151,3 +152,68 @@ it('refuses n other than 1 before the request is sent', function () {
         ->toThrow(UnsupportedOptionException::class, 'n must be 1')
         ->and($t->requests)->toBe([]);
 });
+
+/*
+ * A `thinking` content block's `signature` is built only from `signature_delta` events
+ * (`$blocks[$i]['signature'] .= $delta['signature']`, src/Provider/Anthropic/Messages.php) and
+ * defaults to `''` from `content_block_start` if none ever arrive. Nothing stops `content_block_stop`
+ * from closing a `thinking` block before any `signature_delta` showed up -- exactly what happens
+ * when the reply is cut short by `max_tokens` while still inside a thinking block (the API still
+ * closes the open block with `content_block_stop` so `message_delta`/`message_stop` can follow, but
+ * the model never got to emit the signature it signs the block with once it is done reasoning).
+ * `message()`'s `ReasoningDelta` then carries `signature: ''` into `raw['blocks']` verbatim, and
+ * `Messages::assistant()` replays `raw['blocks']` unchanged on the next turn to the same model
+ * (`array_push($out, ...($part->raw['blocks'] ?? []))`) with no check at all -- so a `thinking`
+ * block that never got a signature goes back to the API as `{"type":"thinking", ...,
+ * "signature": ""}`.
+ *
+ * docs/anthropic.md promises the Reasoning part's blocks are "replayed unchanged ... (with
+ * signatures)" -- i.e. the contract assumes a complete, signed block, not a half-built one from a
+ * turn the model never finished signing. The Messages API verifies a thinking block's signature
+ * when it is replayed and rejects an empty or invalid one; silently sending `signature: ""` turns a
+ * truncated turn (which already ended cleanly, `FinishReason::Length`) into a hard failure on the
+ * *next* turn instead of handling it where the module already handles everything else it cannot
+ * carry forward (by failing loudly, e.g. `UnsupportedOptionException`/`UnsupportedContentException`
+ * elsewhere in this same class) or by dropping the incomplete block the way a cut-off tool call's
+ * invalid JSON is reported rather than guessed at.
+ *
+ * Verified directly against the real code (both adapters): a thinking block cut off by `max_tokens`
+ * before any `signature_delta` accumulates into `raw['blocks']` with `"signature": ""`, and replaying
+ * that Reasoning part to the same model sends that empty signature on to the API unchanged.
+ */
+it('does not replay a thinking block whose signature never arrived', function () {
+    $body = '';
+    foreach ([
+        ['type' => 'message_start', 'message' => ['usage' => []]],
+        ['type' => 'content_block_start', 'index' => 0, 'content_block' => ['type' => 'thinking', 'thinking' => '', 'signature' => '']],
+        ['type' => 'content_block_delta', 'index' => 0, 'delta' => ['type' => 'thinking_delta', 'thinking' => 'cut off mid-thought']],
+        // Cut short by max_tokens: content_block_stop closes the block, but no signature_delta ever came.
+        ['type' => 'content_block_stop', 'index' => 0],
+        ['type' => 'message_delta', 'delta' => ['stop_reason' => 'max_tokens'], 'usage' => []],
+        ['type' => 'message_stop'],
+    ] as $e) {
+        $body .= "event: {$e['type']}\ndata: " . \json_encode($e) . "\n\n";
+    }
+    $acc = new Accumulator();
+    foreach ((new Messages(new FakeTransport(new Response(200, [], \str_split($body, 23))), 'k', 'claude-x'))
+        ->stream(new Prompt(null, [], [], new Options(), live())) as $delta) {
+        $acc->add($delta);
+    }
+    $assistant = $acc->message();
+    expect($assistant->parts[0])->toBeInstanceOf(Reasoning::class)
+        ->and($assistant->parts[0]->raw['blocks'][0]['signature'])->toBe('');  // confirms the setup
+
+    // Replay that reply as the prior turn of a new request to the same model.
+    $t = new FakeTransport(new Response(200, [], \str_split(
+        "event: message_delta\ndata: " . \json_encode(['type' => 'message_delta', 'delta' => ['stop_reason' => 'end_turn']]) . "\n\n"
+        . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n",
+        23,
+    )));
+    [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(null, [user('go'), $assistant], [], new Options(), live()))];
+    $sent     = \json_decode($t->requests[0]['body'], true);
+    $thinking = \array_values(\array_filter($sent['messages'][1]['content'], static fn ($b) => 'thinking' === $b['type']));
+
+    // Today: the empty signature is replayed verbatim, which the real Messages API rejects.
+    expect($thinking)->toHaveCount(1)
+        ->and($thinking[0]['signature'])->not->toBe('');
+}); // #24: the unsigned block was replayed verbatim; the API rejects an empty signature

@@ -17,7 +17,7 @@ use Harness\ToolSpec;
 /**
  * `shell`: runs a command with `bash -c` in `cwd`, stdout and stderr merged, stdin empty. Output is
  * read with `fiber\readable()` and reported as `ToolProgress`; the model gets the exit code and the
- * output, the middle cut out past `maxOutput` bytes. The call ends when the shell exits, times out or
+ * output, the middle cut out past `maxOutput` bytes, invalid UTF-8 replaced by U+FFFD. The call ends when the shell exits, times out or
  * is cancelled, and the command's whole process group is then killed (on Linux it runs under `setsid`):
  * a background child does not outlive the call. A non-zero exit is an error result.
  * Which commands may run is a policy for middleware.
@@ -133,6 +133,8 @@ final readonly class Shell implements Tool
         \proc_close($process);
         $exit   = $status['exitcode'];
         $output = $head . ($total > \strlen($head) + \strlen($tail) ? "\n[" . ($total - \strlen($head) - \strlen($tail)) . " bytes cut]\n" : '') . $tail;
+        // Valid UTF-8 for the model: binary output and a character split by the cut become U+FFFD
+        $output = \html_entity_decode(\htmlspecialchars($output, \ENT_SUBSTITUTE | \ENT_NOQUOTES, 'UTF-8'), \ENT_NOQUOTES | \ENT_HTML5, 'UTF-8');
         $header = null !== $killed ? "Killed: $killed" : "Exit code $exit";
 
         return new Result(

@@ -65,6 +65,12 @@
   one past the end (#22).
 - `Tools\Shell\Shell` resolves its `cwd` to an absolute path when built, so a later `chdir()` by the
   process does not move or break its commands (#23).
+- `Provider\Anthropic\Messages`: a thinking block cut off before its signature arrived is not
+  replayed; the API rejects an empty signature (#24).
+- `Tools\Shell\Shell`: the output handed to the model is valid UTF-8: binary bytes and a character
+  split by the `maxOutput` cut become U+FFFD (#25).
+- `apply_patch`: a path whose parent is a file fails the whole patch while planning, before any
+  write, keeping the all-or-nothing promise (#26).
 
 ### Changed (breaking)
 
