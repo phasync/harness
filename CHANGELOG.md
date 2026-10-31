@@ -89,6 +89,10 @@
   put in its title cannot forge an extra numbered result (#34).
 - `Mcp\McpServer`: a `tools/list` pagination that returns a cursor it already returned is an
   `McpException`, not an endless loop (#35).
+- `Tools\Shell\Shell` refuses a `maxOutput` below 2, which disabled the output cut instead of
+  tightening it (#37).
+- `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
+  and `interject()` there throws instead of losing the message (#36).
 
 ### Changed (breaking)
 

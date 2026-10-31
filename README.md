@@ -97,7 +97,7 @@ awaiting the answers.
 
 `Run` keeps the conversation in memory: `messages()` returns it, `Ended::$appended` is what a turn
 added (`Harness\Transcript` keeps it in a file). To continue elsewhere, pass `messages:` (and
-`pending:`, see below) to a new `Run`. `isRunning()` is true from `turn()` until `TurnEnded` was handled.
+`pending:`, see below) to a new `Run`. `isRunning()` is true from `turn()` until `TurnEnded` is emitted; in that event's handler `ended()` already works.
 
 ### Cancellation
 

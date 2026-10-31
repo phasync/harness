@@ -237,11 +237,8 @@ it('reports progress chunks a host can actually json_encode(), not just the fina
  * roughly 1 byte either side of a marker) returns the full, uncut ~24 KB of output with no
  * "bytes cut" marker at all.
  */
-it('still bounds the output when maxOutput is 0 or 1, not keeps everything', function (int $maxOutput) {
-    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir(), maxOutput: $maxOutput))->call(['command' => 'seq 1 5000'], callFor()));
-
-    // Today: substr($tail . $chunk, -0) returns the whole string (no length argument means "to
-    // the end"), not the empty string the "keep the last $half bytes" formula intends, so $tail
-    // grows without bound and the full ~24 KB of `seq 1 5000` output comes back uncut.
-    expect(\strlen($r->content[0]->text))->toBeLessThan(200);
-})->with([0, 1])->group('bug');
+it('refuses a maxOutput of 0 or 1, which could not bound the output at all', function (int $maxOutput) {
+    // #37: half = intdiv(maxOutput, 2) was 0 and substr($tail, -0) kept everything: `seq 1 5000` came back uncut
+    expect(fn () => new ShellTool(\sys_get_temp_dir(), maxOutput: $maxOutput))
+        ->toThrow(InvalidArgumentException::class, 'at least 2');
+})->with([0, 1]);

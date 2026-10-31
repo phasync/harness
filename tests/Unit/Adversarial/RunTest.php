@@ -288,4 +288,4 @@ it('does not silently lose a message interjected while handling TurnEnded', func
     // TurnEnded has been built (the turn has nothing left to hand the message to), or the message
     // is still accounted for in queued.
     expect($threw instanceof LogicException || [] !== $run->ended()->queued)->toBeTrue();
-})->group('bug');
+}); // #36: interject() succeeded into orphaned arrays; the turn is over before TurnEnded is emitted now

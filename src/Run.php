@@ -273,8 +273,9 @@ final class Run
     }
 
     /**
-     * True from `turn()` until the turn's last event, `TurnEnded`, was handled: while it is,
-     * `cancel()`, `interrupt()` and `interject()` have an effect and `ended()` throws.
+     * True from `turn()` until the turn's last event, `TurnEnded`, is emitted: while it is,
+     * `cancel()`, `interrupt()` and `interject()` have an effect and `ended()` throws. In the
+     * `TurnEnded` handler the turn is over: `ended()` works and an interjection has nowhere to land.
      */
     public function isRunning(): bool
     {
@@ -512,8 +513,8 @@ final class Run
         if ([] !== $pending) {
             $emit(new InputRequested($turn, $parent, $pending));
         }
+        $this->running = false; // over before the host sees TurnEnded: ended() works in its handler, interject() throws
         $emit(new TurnEnded($turn, $parent, $reason, $usage, $kind, $finish));
-        $this->running = false;
         if ($error instanceof \LogicException) {
             throw $error;
         }

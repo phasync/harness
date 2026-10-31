@@ -36,6 +36,9 @@ final readonly class Shell implements Tool
         if (!\is_dir($cwd)) {
             throw new \InvalidArgumentException("Shell cwd '$cwd' is not a directory");
         }
+        if ($maxOutput < 2) {
+            throw new \InvalidArgumentException("Shell maxOutput is at least 2 bytes (one for the head, one for the tail), got $maxOutput");
+        }
         $this->cwd = \realpath($cwd); // absolute: a later chdir() by the process must not move the tool
     }
 

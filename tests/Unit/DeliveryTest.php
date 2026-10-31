@@ -97,7 +97,8 @@ it('reports whether a turn is running', function () {
         $seen[] = $run->isRunning();
     });
     expect($seen[0])->toBeFalse()
-        ->and(\array_unique(\array_slice($seen, 1, -1)))->toBe([true])
+        ->and(\array_unique(\array_slice($seen, 1, -2)))->toBe([true])
+        ->and($seen[\count($seen) - 2])->toBeFalse() // at TurnEnded the turn is over (#36)
         ->and(\end($seen))->toBeFalse();
 });
 
