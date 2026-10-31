@@ -72,6 +72,13 @@ finish (see "Compact" below).
   $subcommands, flags:)`, and asked about when it cannot be parsed (`$`, substitution, backticks,
   here-documents, subshells, braces), sets the environment or redirects output to a file. Tested
   with `env rm`, `git status; rm -rf`, `ls | sh`, `$(rm)` and more.
+- **`Harness\Acp`** (new module): `Agent`, an Agent Client Protocol v1 agent over stdio as an
+  adapter over the event stream: `initialize`, `session/new|load|prompt|cancel`; text, reasoning and
+  tool calls become `session/update`s (`kind` from `Hints`, `diff` content for `edit_file` and
+  `write_file`, `shell` output as text content); a `Policy` `Ask`, a sub-agent's included, becomes
+  `session/request_permission` with `allow_once|allow_always|reject_once|reject_always`, the answer
+  resuming the run; `stopReason` from `Reason`. `examples/acp.php` is the agent executable; a PHP
+  test client over pipes drives it in the tests. The client's `fs/*` and `terminal/*` are not used.
 - **`Rule::decide(ToolCall, Call): ?Rule`**: the rule that decides a call, for `shell()` one whose
   verdict and text are that command's; `Policy` uses it.
 
@@ -84,7 +91,7 @@ finish (see "Compact" below).
   `Options::$provider` merge); the two delivery modes; shaping the tool list in a `ModelMiddleware`,
   with a test.
 - docs/compact.md rewritten around the checkpoint; docs/policy.md has a Shell commands section;
-  docs/agents.md says checkpoints.
+  docs/agents.md says checkpoints; docs/acp.md is new.
 - `examples/chat.php`: a line typed while a reply streams steers it, one ended with Alt+Enter or
   starting with `/queue` is queued. `examples/web.php` persists `Compact\State`.
 

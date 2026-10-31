@@ -483,6 +483,7 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Compact` | `Compact`, `State`: keeps the prompt within a token budget with a checkpoint | [docs/compact.md](docs/compact.md) |
 | `Harness\Policy` | `Policy`, `Rule`, `Shell`, `Verdict`: allow, deny or ask by tool name, hints and parsed shell commands | [docs/policy.md](docs/policy.md) |
 | `Harness\Testing` | `FakeModel`, `FakeTransport`, `TestCall`, `TestPrompt` | [docs/testing.md](docs/testing.md) |
+| `Harness\Acp` | `Agent`: a run as an Agent Client Protocol agent over stdio, for editors | [docs/acp.md](docs/acp.md) |
 
 `Options::$provider` is keyed by the provider module's lowercase name (`openai`, `anthropic`); a
 third-party provider documents its own key.
@@ -513,6 +514,7 @@ php examples/mcp.php "task"                 # a chat with an MCP server's tools 
 php examples/web.php state.json say "hi"    # one turn per request, events as JSON lines, state in a file
 php examples/compact.php [budget]           # a session that compacts to stay within a token budget
 php examples/policy.php ./project "task"    # the file tools under a Policy: reads run, writes ask
+php examples/acp.php [session dir]          # an ACP agent for an editor (it speaks JSON-RPC on stdio)
 ```
 
 ## Tests
