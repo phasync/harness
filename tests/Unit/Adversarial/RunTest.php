@@ -167,3 +167,67 @@ it('does not blame the model for a ModelMiddleware that corrupts the delta strea
     expect($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError);
 }); // #28: this was ModelError; the raw stream is validated before the middleware chain sees it
+
+/*
+ * Round 5: attacking the #28 shadow fix from the other side -- a `ModelMiddleware` that *fixes* a
+ * malformed provider stream (drops a duplicate `ToolCallStart`) instead of corrupting a clean one.
+ *
+ * `callModel()` (Run.php) now feeds every raw delta into `$this->shadow` -- a second Accumulator --
+ * before it is ever yielded to the middleware chain: `$this->shadow->add($delta); // a malformed
+ * sequence is the provider's fault; the middleware chain has not seen it yet`. That ordering is
+ * structural, not incidental: the shadow validates the provider's raw output at the bottom of
+ * `modelChain()`, one level inside where any `ModelMiddleware::stream()` wraps `$next()`. So a
+ * middleware sitting in front of `callModel()` never gets a chance to filter a malformed delta
+ * before validation sees it -- the shadow throws, marked 'model', while the delta is still inside
+ * `callModel()`'s own generator, before the `yield $delta;` that would hand it to the middleware.
+ *
+ * Is a repair opportunity part of the contract? No: `Accumulator`'s docblock calls a malformed
+ * sequence "a provider bug" with no carve-out for a middleware that cleans it up, `ModelMiddleware`'s
+ * own docblock and every documented use (README's retry/read-first/compact examples, docs/compact.md,
+ * docs/plan.md) rewrite the `Prompt` or wrap the whole iteration for retry/tracing -- none claims to
+ * sanitize individual deltas before the run sees them -- and the fix's own comment states the
+ * ordering is deliberate ("the middleware chain has not seen it yet"). So a middleware that repairs
+ * a malformed provider stream still fails the turn as ModelError: this is the documented contract,
+ * not a break of it.
+ *
+ * Verified directly against the real code with both adapters: a `FakeModel` that malfunctions
+ * (duplicate `ToolCallStart`) wrapped by a middleware that drops the duplicate before yielding it on
+ * still ends the turn Failed with errorKind 'model_error', not Done.
+ */
+it('still blames the model when a middleware would have repaired its malformed stream', function () {
+    $model = new FakeModel([
+        new ToolCallStart('c1', 'a'),
+        new ToolCallStart('c1', 'a'),  // the provider's own bug: a duplicate start
+        new ToolInputDelta('c1', '{}'),
+        new ToolCallEnd('c1'),
+        new Usage(10, 5),
+        new Finish(FinishReason::ToolCalls),
+    ]);
+    $repair = new class implements ModelMiddleware {
+        public function stream(Prompt $prompt, Closure $next): iterable
+        {
+            $seen = [];
+            foreach ($next($prompt) as $delta) {
+                if ($delta instanceof ToolCallStart) {
+                    if (isset($seen[$delta->id])) {
+                        continue;  // drop the duplicate: the stream this middleware hands on is clean
+                    }
+                    $seen[$delta->id] = true;
+                }
+                yield $delta;
+            }
+        }
+    };
+    $run = new Harness\Run($model, new Tools(), middleware: [$repair]);
+    try {
+        turn($run, user('go'));
+    } catch (LogicException) {
+        // turn()'s own docblock: a LogicException (misuse) is rethrown after TurnEnded.
+    }
+
+    // The shadow validates callModel()'s raw output one level below $repair, so $repair never sees
+    // the duplicate before validation fails on it: the turn is Failed/ModelError, not Done, because
+    // the provider's bug is real even though downstream middleware would have hidden it.
+    expect($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->ended()->errorKind)->toBe(ErrorKind::ModelError);
+});

@@ -75,6 +75,12 @@
   not valid UTF-8 is scrubbed to U+FFFD (#27).
 - `Run`: a malformed delta sequence is `ModelError` only when the model itself produced it; one a
   `ModelMiddleware` introduced is `MiddlewareError` (#28).
+- `web_fetch` with `maxChars` above 65535 returned nothing and pointed the model back to offset 0
+  (a PCRE quantifier limit); character slicing runs in bounded steps now (#29).
+- `read_file` and `grep` cut long lines by characters, not bytes, and hand the model valid UTF-8 (#30).
+- `Provider\Anthropic\Messages`: a reply whose thinking was cut off unsigned but that still called a
+  tool cannot be replayed with thinking enabled; it fails with an `UnsupportedContentException` that
+  says what to do, instead of sending a request the API rejects (#31).
 
 ### Changed (breaking)
 

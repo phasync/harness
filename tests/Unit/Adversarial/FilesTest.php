@@ -5,6 +5,7 @@ declare(strict_types=1);
 use Harness\Tools\Files\ApplyPatch;
 use Harness\Tools\Files\EditFile;
 use Harness\Tools\Files\Grep;
+use Harness\Tools\Files\ReadFile;
 use Harness\Tools\Files\Root;
 
 beforeEach(function () {
@@ -117,3 +118,25 @@ it('leaves no file written when a later section in the same patch fails to creat
     // section's failure, contradicting "leaving the directory untouched" when the call throws.
     expect(\is_file($this->dir . '/ok.txt'))->toBeFalse();
 }); // #26: ok.txt was written before the second section's mkdir failed
+
+/*
+ * Round 5. `ReadFile`'s long-line cut (like `Grep`'s) is a raw byte-offset `substr()` with no
+ * UTF-8 awareness and no scrub afterwards -- unlike `Shell`, which already does this exact fix
+ * ("binary output and a character split by the cut become U+FFFD" via `Utf8::scrub()`). A
+ * multi-byte UTF-8 character straddling `maxLineLength` is cut in half, leaving an invalid
+ * trailing byte sequence in the text handed to the model. `read_file` is the model's main way to
+ * see file content, and every provider encodes tool results with `JSON_THROW_ON_ERROR`
+ * (`Anthropic\Messages`, `OpenAI\ChatCompletions`, `OpenAI\Responses`), so the very next turn that
+ * carries this tool result as history throws a `JsonException` and the whole run dies -- exactly
+ * the failure mode `Shell` was already fixed against (#25), just not here.
+ */
+it('produces valid UTF-8 when the long-line cut falls inside a multi-byte character', function () {
+    $line = \str_repeat('a', 10) . "\u{20AC}" . 'more text after the euro sign to pad the line out';
+    \file_put_contents($this->dir . '/f.txt', $line . "\n");
+    $r    = (new ReadFile($this->root, maxLineLength: 11))->call(['path' => 'f.txt'], callFor());
+    $text = $r->content[0]->text;
+
+    // BUG: today this is invalid UTF-8 (the cut lands inside the euro sign's 3-byte sequence),
+    // which fails json_encode(..., JSON_THROW_ON_ERROR) exactly where every provider call uses it.
+    expect(1 === \preg_match('//u', $text))->toBeTrue();
+}); // #30: the cut split the euro sign; lines are cut by characters now and scrubbed

@@ -24,12 +24,29 @@ final class Utf8
     /** The number of characters in valid UTF-8 `$text`. */
     public static function length(string $text): int
     {
-        return \preg_match_all('/./su', $text);
+        return \strlen(\preg_replace('/[\x80-\xBF]/', '', $text) ?? $text); // every byte but the continuation bytes starts a character
     }
 
     /** Up to `$length` characters of valid UTF-8 `$text` from character `$offset`. */
     public static function slice(string $text, int $offset, int $length): string
     {
-        return 1 === \preg_match('/^.{' . $offset . '}(.{0,' . $length . '})/su', $text, $m) ? $m[1] : '';
+        $start = self::byteOffset($text, 0, $offset);
+        $end   = self::byteOffset($text, $start, $length);
+
+        return \substr($text, $start, $end - $start);
+    }
+
+    /** The byte offset `$chars` characters past byte `$from`, or the end of `$text` if fewer remain. */
+    private static function byteOffset(string $text, int $from, int $chars): int
+    {
+        for ($pos = $from; $chars > 0; $chars -= $n) { // in runs: PCRE refuses a {N} quantifier above 65535
+            $n = \min($chars, 10000);
+            if (1 !== \preg_match('/\G.{' . $n . '}/su', $text, $m, 0, $pos)) {
+                return \strlen($text);
+            }
+            $pos += \strlen($m[0]);
+        }
+
+        return $pos;
     }
 }

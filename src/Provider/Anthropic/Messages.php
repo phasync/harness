@@ -307,18 +307,24 @@ final readonly class Messages implements Model
     /** @return list<array<string, mixed>> */
     private function assistant(Message $message): array
     {
-        $out = [];
+        $out      = [];
+        $unsigned = false;
         foreach ($message->parts as $part) {
             if ($part instanceof Reasoning) {
                 if (($part->raw['model'] ?? null) === $this->model) {
                     foreach ($part->raw['blocks'] ?? [] as $block) {
                         if ('thinking' === ($block['type'] ?? null) && '' === ($block['signature'] ?? '')) {
-                            continue; // cut off (max_tokens) before it was signed: the API rejects it on replay
+                            $unsigned = true; // cut off (max_tokens) before it was signed: the API rejects it on replay
+
+                            continue;
                         }
                         $out[] = $block;
                     }
                 }
             } elseif ($part instanceof ToolCall) {
+                if ($unsigned) { // with thinking on, a tool_use must follow its thinking block, and that one is gone
+                    throw new UnsupportedContentException("The reply calling '{$part->name}' had its thinking cut off before it was signed (max_tokens) and cannot be replayed; drop that reply and its tool results, or allow more output tokens");
+                }
                 $out[] = ['type' => 'tool_use', 'id' => $part->id, 'name' => $part->name, 'input' => (object) $part->input];
             } elseif ($part instanceof Text) {
                 if ('' !== $part->text) {

@@ -6,6 +6,7 @@ namespace Harness\Tools\Files;
 
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Utf8;
 use Harness\Part\Text;
 use Harness\Result;
 use Harness\Retry;
@@ -74,7 +75,8 @@ final readonly class Grep implements Tool
             $name = $this->root->relative($base . '/' . $rel);
             foreach (\explode("\n", \str_ends_with($content, "\n") ? \substr($content, 0, -1) : $content) as $no => $line) { // the trailing newline is not one more line, as read_file counts
                 if (1 === \preg_match($regex, $line)) {
-                    $lines[] = $name . ':' . ($no + 1) . ': ' . (\strlen($line) > $this->maxLineLength ? \substr($line, 0, $this->maxLineLength) . ' [cut]' : $line);
+                    $line    = Utf8::scrub($line);
+                    $lines[] = $name . ':' . ($no + 1) . ': ' . (Utf8::length($line) > $this->maxLineLength ? Utf8::slice($line, 0, $this->maxLineLength) . ' [cut]' : $line);
                 }
             }
         }

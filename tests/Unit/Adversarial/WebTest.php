@@ -115,3 +115,31 @@ it('cuts maxChars by characters, not bytes, so it never splits a multi-byte char
     // UTF-8, let alone the complete 4-character word the maxChars value asked for.
     expect($text)->toBe('café');
 }); // #27: this cut after 4 bytes, 'caf' plus half an é, and promised one more character
+
+/*
+ * Harness\Internal\Utf8::slice() (Internal/Utf8.php) builds its regex quantifier straight from
+ * `$length`: `'/^.{' . $offset . '}(.{0,' . $length . '})/su'`. PCRE2 (PHP's regex engine since
+ * 7.3) refuses to compile a `{0,N}` quantifier once N exceeds 65535 -- "number too big in {}
+ * quantifier" -- which is exactly `$maxChars` here. WebFetch's own docblock calls 20000 just the
+ * *default* for `maxChars`, implying a deployer may set another value; nothing in the contract
+ * says it must stay under PCRE2's internal limit, and nothing warns a deployer who raises it past
+ * 65535 to fetch more of a page per call. When that happens, `preg_match()` fails and returns
+ * `false`, not `1`, so `slice()`'s `1 === \preg_match(...) ... : ''` falls to the `''` branch --
+ * silently, with no exception, just a PHP warning on stderr the model never sees. `tail()` then
+ * reports the whole body as still unread, pointing the next call back at the exact same
+ * `offset=0` it was already at: a web_fetch call returns no text at all and advises retrying from
+ * the position that produced no text, which would spin forever if followed.
+ */
+it('does not go silent when maxChars is set above the PCRE quantifier limit', function () {
+    $body      = \str_repeat('x', 1000);
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/plain'], [$body]));
+    // 100000 is an ordinary choice for "fetch more per call"; PCRE2's 65535 ceiling is an
+    // implementation detail of Utf8::slice(), not a documented constraint on maxChars.
+    $fetch = new WebFetch($transport, 'agent', maxChars: 100000);
+    $text  = $fetch->call(['url' => 'https://example.com/a.txt'], callFor())->content[0]->text;
+
+    // Today: $text is "\n[1000 more characters; pass offset=0 to read on]" -- none of the 1000
+    // 'x' characters the body actually had, and a "continue" offset identical to the one this
+    // very call used, which would never make progress.
+    expect($text)->toBe($body);
+}); // #29: this returned no text and told the model to continue from offset 0

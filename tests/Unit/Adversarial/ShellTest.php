@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Harness\Event\ToolProgress;
 use Harness\Policy\Shell;
 use Harness\Policy\Verdict;
 use Harness\Tools\Shell\Shell as ShellTool;
@@ -170,3 +171,40 @@ it('cuts long multi-byte UTF-8 output on a character boundary, not a raw byte of
     expect(\mb_check_encoding($r->content[0]->text, 'UTF-8'))->toBeTrue()
         ->and(\json_encode($r->content[0]->text))->not->toBeFalse();
 }); // #25: the cut left half a character, invalid UTF-8 that json_encode refuses
+
+/*
+ * `Event`'s own docblock states its contract plainly: `toArray()` gives the event's fields, "and
+ * it is also what `json_encode()` writes" -- `Event implements \JsonSerializable` via
+ * `jsonSerialize(): array { return $this->toArray(); }`. A host streams events (that is what
+ * `ToolProgress` is for: so a host can render a command's output as it arrives), and the one
+ * supported way to put an event on the wire, per that same docblock, is `json_encode()`.
+ *
+ * #25 fixed exactly this invalid-UTF-8-breaks-JSON failure for the *final* text: `Shell::call()`
+ * now runs `$output` through `Utf8::scrub()` before building the `Result`'s `Text`. But
+ * `$take()` reports every chunk to `$call->progress($chunk)` with the chunk exactly as read from
+ * the pipe -- raw, unscrubbed bytes -- before any cutting or scrubbing happens at all.
+ * `ToolProgress::$value` is that same raw string, forwarded into the event stream untouched.
+ *
+ * So the identical failure #25 fixed for the final `Result` text is still live one layer up, on
+ * every `ToolProgress` event for any command whose output isn't clean UTF-8 (binary output, or
+ * any chunk boundary that happens to split a multi-byte character) -- it just never gets
+ * exercised by a test that only reads the final `Result`.
+ *
+ * Verified directly: a command printing four non-UTF-8 bytes produces a `ToolProgress` event
+ * whose `value` is NOT valid UTF-8, and `json_encode()` on that event returns `false`
+ * ("Malformed UTF-8 characters, possibly incorrectly encoded") -- even though the same call's
+ * final `Result` text, built from the very same bytes, comes out scrubbed and valid.
+ */
+it('reports progress chunks a host can actually json_encode(), not just the final scrubbed text', function () {
+    $events = [];
+    $call   = callFor('c1', $events);
+    $r      = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir()))->call(['command' => "printf '\\xff\\xfe\\x80invalid'"], $call));
+
+    $progress = \array_values(\array_filter($events, static fn ($e) => $e instanceof ToolProgress));
+
+    expect($progress)->not->toBeEmpty()
+        ->and(\mb_check_encoding($r->content[0]->text, 'UTF-8'))->toBeTrue() // #25: the final text is scrubbed
+        // Today: the raw chunk never went through Utf8::scrub(), so this event is not valid UTF-8
+        // and json_encode() on it -- the one documented way to put an Event on the wire -- fails.
+        ->and(\json_encode($progress[0]))->not->toBeFalse();
+})->group('bug');

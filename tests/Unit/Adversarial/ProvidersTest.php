@@ -20,6 +20,7 @@ use Harness\Provider\OpenAI\ChatCompletions;
 use Harness\Role;
 use Harness\Testing\FakeTransport;
 use Harness\ToolSpec;
+use Harness\UnsupportedContentException;
 use Harness\UnsupportedOptionException;
 
 /*
@@ -216,3 +217,54 @@ it('does not replay a thinking block whose signature never arrived', function ()
     expect($sent['messages'])->toHaveCount(1)
         ->and(\json_encode($sent))->not->toContain('"thinking"');
 }); // #24: the unsigned block was replayed verbatim; the API rejects an empty signature
+
+/*
+ * #24's fix drops only the unsigned `thinking` block from `assistant()`'s loop
+ * (src/Provider/Anthropic/Messages.php: `if ('thinking' === ... && '' === signature) { continue; }`);
+ * every other part of the same message -- `Text`, `ToolCall` -- is still appended unconditionally
+ * right after it in the same `foreach`. So a reply that had an unsigned thinking block followed by
+ * a tool call is NOT "a reply left with nothing" (#24's fallback, where the whole turn drops out):
+ * it still has its `tool_use` block, and that alone is what gets replayed.
+ *
+ * Anthropic's extended-thinking contract (reasoning this module's own docblock summarizes as
+ * "Thinking is opaque and model-bound ... replayed unchanged") requires that when `thinking` is
+ * enabled for a request, an assistant turn containing `tool_use` must be preceded by the
+ * `thinking`/`redacted_thinking` block(s) that produced it; sending `tool_use` on its own in that
+ * turn is rejected by the Messages API (`thinking` requires the turn to open with a thinking block
+ * whenever that turn resulted in a tool call). Dropping the block because it has no signature *and*
+ * keeping the `tool_use` that followed it therefore builds exactly the request shape the API
+ * rejects -- #24 fixed the "nothing left" case but not this one.
+ *
+ * Verified directly against the real code (both adapters): an assistant message with
+ * `Reasoning([thinking, signature: ''])` immediately followed by `ToolCall` replays as
+ * `[{"type":"tool_use",...}]` with no thinking block in front of it, under a request that has
+ * `thinking` enabled -- the one combination #24 did not cover.
+ */
+it('does not replay a tool_use whose preceding thinking block was dropped as unsigned', function () {
+    $assistant = new Message(Role::Assistant, [
+        new Reasoning('cut off', ['model' => 'claude-x', 'blocks' => [
+            ['type' => 'thinking', 'thinking' => 'cut off mid-thought', 'signature' => ''],
+        ]]),
+        new ToolCall('t1', 'read', ['path' => 'a']),
+    ]);
+    // A real response is scripted so that, if the broken request is sent at all, the failure
+    // reported is the module's own -- not FakeTransport running out of canned responses.
+    $t = new FakeTransport(new Response(200, [], \str_split(
+        "event: message_delta\ndata: " . \json_encode(['type' => 'message_delta', 'delta' => ['stop_reason' => 'end_turn']]) . "\n\n"
+        . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n",
+        23,
+    )));
+    $thinks = new Options(provider: ['anthropic' => ['thinking' => ['type' => 'enabled', 'budget_tokens' => 2000]]]);
+    $stream = fn () => [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(
+        null,
+        [user('go'), $assistant],
+        [new ToolSpec('read', 'd', ['type' => 'object'])],
+        $thinks,
+        live(),
+    ))];
+
+    // Today: no exception at all -- the broken request (tool_use with no thinking ahead of it,
+    // under thinking: enabled) is actually sent, exactly the shape the Messages API rejects.
+    expect($stream)->toThrow(UnsupportedContentException::class)
+        ->and($t->requests)->toBe([]);
+}); // #31: the tool_use went out without its thinking block

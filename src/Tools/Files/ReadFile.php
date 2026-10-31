@@ -6,6 +6,7 @@ namespace Harness\Tools\Files;
 
 use Harness\Call;
 use Harness\Hints;
+use Harness\Internal\Utf8;
 use Harness\Part\Media;
 use Harness\Part\Text;
 use Harness\Result;
@@ -72,8 +73,9 @@ final readonly class ReadFile implements Tool
         }
         $out = [];
         foreach (\array_slice($lines, $offset - 1, $limit) as $i => $line) {
-            if (\strlen($line) > $this->maxLineLength) {
-                $line = \substr($line, 0, $this->maxLineLength) . ' [line cut at ' . $this->maxLineLength . ' bytes]';
+            $line = Utf8::scrub($line);
+            if (Utf8::length($line) > $this->maxLineLength) {
+                $line = Utf8::slice($line, 0, $this->maxLineLength) . ' [line cut at ' . $this->maxLineLength . ' characters]';
             }
             $out[] = \str_pad((string) ($offset + $i), 6, ' ', \STR_PAD_LEFT) . "\t" . $line;
         }
