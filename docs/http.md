@@ -5,13 +5,16 @@ Providers speak HTTP through `Transport`, not through an HTTP client:
 ```php
 interface Transport {
     public function post(string $url, array $headers, string $body, Cancel $cancel): Response;
+    public function get(string $url, array $headers, Cancel $cancel): Response;
 }
 ```
 
-`post()` returns once the status line and headers are in. `Response::$status` and `$headers` (names
-lower-case, repeats joined with `", "`) are public; `body()` yields the body chunks as they arrive and
-can be called once. A non-2xx status is a normal response; a failed connection, a timeout or a
-truncated body throws `TransportException`, which ends a turn `Failed` with `ErrorKind::TransportError`.
+`post()` and `get()` return once the status line and headers are in. `Response::$status` and
+`$headers` (names lower-case, repeats joined with `", "`) are public; `body()` yields the body
+chunks as they arrive and can be called once. A non-2xx status is a normal response; a failed
+connection, a timeout or a truncated body throws `TransportException`, which ends a turn `Failed`
+with `ErrorKind::TransportError`. `get()` is what `Harness\Tools\Web` fetches with; a hand-written
+`Transport` must add it.
 
 `$cancel` is the turn's signal (`Prompt::$cancel`, passed on by the provider). A transport checks it
 while it waits and throws `Harness\Cancelled` once it is set; the run that set it ends the turn
@@ -22,7 +25,7 @@ while it waits and throws `Harness\Cancelled` once it is set; the run that set i
 HTTP/1.1 over `stream_socket_client()` with non-blocking sockets. Every wait is `fiber\readable()` or
 `fiber\writable()`, so requests run concurrently on any adapter, and must be made inside
 `fiber\run()`. One connection per request (`Connection: close`); chunked and content-length bodies;
-`https://` with peer verification. No redirects, proxies or compression: a model endpoint needs none.
+`https://` with peer verification.
 
 ```php
 new StreamTransport(connectTimeout: 10.0, idleTimeout: 300.0, ssl: ['cafile' => '/etc/ssl/my-ca.pem']);
@@ -31,7 +34,10 @@ new StreamTransport(connectTimeout: 10.0, idleTimeout: 300.0, ssl: ['cafile' => 
 `idleTimeout` bounds each wait for more of the response, not the whole request: a long stream that
 keeps sending is never cut off. Each wait is cut into slices of at most 250 ms with a check of the
 `Cancel` signal between them, so a cancelled turn ends within 250 ms even while the server sends
-nothing. DNS resolution is blocking (PHP has no non-blocking resolver).
+nothing. DNS resolution is blocking (PHP has no non-blocking resolver). No proxies or compression: a
+model endpoint needs none. `get()` follows up to 5 redirects (301, 302, 303, 307, 308), draining and
+closing each hop's connection before the next request, as a browser would for a GET; a non-redirect
+status, or a redirect past 5 hops, comes back as the response as is.
 
 ## Sse
 

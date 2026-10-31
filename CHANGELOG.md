@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+### Changed (breaking)
+
+- **`Transport` gets `get(string $url, array $headers, Cancel $cancel): Response`**, implemented
+  in `StreamTransport` (sharing its connection and request/response code with `post()`; follows up
+  to 5 redirects for 301, 302, 303, 307 and 308, as a browser would for a GET) and scripted in
+  `FakeTransport`. Transport has `get()`; a hand-written `Transport` must add it.
+
 ## 0.1.0 (2026-10-31)
 
 phasync/harness is the runtime between a model and an application: the tool loop, a typed event

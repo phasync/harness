@@ -9,10 +9,11 @@ use Harness\Http\Response;
 use Harness\Http\Transport;
 
 /**
- * A scripted transport for provider tests: each `post()` takes the next response, a `Response`
- * or a closure `fn (string $url, array $headers, string $body, Cancel $cancel): Response`.
- * `requests` records every request. Running out of responses throws. A scripted body that waits
- * observes the `Cancel` the closure is given, as a real transport does.
+ * A scripted transport for provider and tool tests: each `post()` or `get()` call takes the next
+ * response in order, a `Response` or a closure `fn (string $url, array $headers, string $body,
+ * Cancel $cancel): Response` (`$body` is `''` for a `get()` call). `requests` records every
+ * request. Running out of responses throws. A scripted body that waits observes the `Cancel` the
+ * closure is given, as a real transport does.
  */
 final class FakeTransport implements Transport
 {
@@ -28,6 +29,16 @@ final class FakeTransport implements Transport
     }
 
     public function post(string $url, array $headers, string $body, Cancel $cancel): Response
+    {
+        return $this->respond($url, $headers, $body, $cancel);
+    }
+
+    public function get(string $url, array $headers, Cancel $cancel): Response
+    {
+        return $this->respond($url, $headers, '', $cancel);
+    }
+
+    private function respond(string $url, array $headers, string $body, Cancel $cancel): Response
     {
         $this->requests[] = ['url' => $url, 'headers' => $headers, 'body' => $body];
         if ([] === $this->responses) {

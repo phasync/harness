@@ -123,3 +123,19 @@ it('times out an idle response', function () {
 it('rejects URLs it cannot serve', function () {
     expect(fn () => (new StreamTransport())->post('ftp://example.com/', [], '', live()))->toThrow(InvalidArgumentException::class);
 });
+
+it('follows a redirect for get(), on a fresh connection to the Location', function () {
+    $result = \fiber\run(function () {
+        [$port2, $task2] = serve(fn () => ["HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"]);
+        [$port1, $task1] = serve(fn () => ["HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:$port2/dest\r\nContent-Length: 0\r\n\r\n"]);
+        $response        = (new StreamTransport())->get("http://127.0.0.1:$port1/start", [], live());
+        $body            = \implode('', [...$response->body()]);
+
+        return [$response->status, $body, \fiber\await($task1), \fiber\await($task2)];
+    });
+    [$status, $body, $request1, $request2] = $result;
+    expect($status)->toBe(200)
+        ->and($body)->toBe('ok')
+        ->and($request1)->toStartWith("GET /start HTTP/1.1\r\n")
+        ->and($request2)->toStartWith("GET /dest HTTP/1.1\r\n");
+});
