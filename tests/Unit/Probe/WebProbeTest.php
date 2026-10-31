@@ -42,3 +42,9 @@ it('renders br in a paragraph as a line break', function () {
     expect(Html::extract('<p>Line 1<br/>Line 2</p>'))
         ->toBe("Line 1\nLine 2");
 });
+
+it('renders a nested list indented under its parent item', function () {
+    // issue #2: the nested items ran into the parent item's text as "- OuterInner"
+    expect(Html::extract('<ul><li>Outer<ul><li>Inner<ul><li>Deep</li></ul></li><li>Inner 2</li></ul> tail</li><li>Second</li></ul>'))
+        ->toBe("- Outer\n  - Inner\n    - Deep\n  - Inner 2\ntail\n- Second");
+});

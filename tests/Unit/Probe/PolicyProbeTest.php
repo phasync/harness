@@ -57,3 +57,13 @@ it('peels wrapper options with = value syntax (env -C=/path)', function () {
         // And that 'env -C=/tmp rm' is peeled to 'rm' and denied
         ->and(verdictOfProbe('env -C=/tmp rm'))->toBe(Verdict::Deny);
 });
+
+it('detects <> (read-write redirect) and asks about file writes', function () {
+    // <> opens a file for both reading and writing
+    // Testing that 'ls <> file' is asked about because it writes to a file
+    [$verdict, $reason] = Shell::check('ls <> output.txt', shellRulesForProbe());
+    expect($verdict)->toBe(Verdict::Ask)
+        ->and($reason)->toContain('writes to');
+    // But 'ls <> /dev/null' is allowed because /dev/null is exempt from write checks
+    expect(verdictOfProbe('ls <> /dev/null'))->toBe(Verdict::Allow);
+});

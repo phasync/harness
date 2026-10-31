@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use function fiber\go;
+use Harness\Cancel;
 use Harness\Http\Response;
 use Harness\Mcp\HttpConnection;
 use Harness\Mcp\McpException;
@@ -66,4 +67,23 @@ it('queues concurrent StdioConnection writes when two coroutines send at once', 
         return [\fiber\await($c1), \fiber\await($c2)];
     });
     expect($results)->toEqual(['first', 'second']);
+});
+
+it('throws McpException when server responds with a JSON-RPC error', function () {
+    // Test that StdioConnection.request() throws McpException::fromError() when the server
+    // sends a JSON-RPC error response (e.g., unknown tool). This exercises line 84 in
+    // StdioConnection: throw McpException::fromError($method, $message['error']);
+    // Checked against existing test: "maps content, structured content and errors to results"
+    // which tests error results from tools, not JSON-RPC error responses.
+    $exception = \fiber\run(function () {
+        $server = new McpServer(new StdioConnection([\PHP_BINARY, \dirname(__DIR__, 2) . '/Support/mcp-server.php']));
+        try {
+            // Call a non-existent tool, causing the server to send a JSON-RPC error.
+            // The test server sends error code -32602 for unknown tools.
+            $server->request('tools/call', ['name' => 'nonexistent_tool', 'arguments' => new stdClass()], new Cancel(fn () => false));
+        } catch (McpException $e) {
+            return [$e->rpcCode, \str_contains($e->getMessage(), 'Unknown tool')];
+        }
+    });
+    expect($exception)->toEqual([-32602, true]);
 });

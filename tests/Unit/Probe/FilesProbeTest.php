@@ -107,3 +107,32 @@ it('rejects a malformed section header mid-patch, naming the line', function () 
     expect(fn () => $apply->call(['patch' => $patch], callFor()))
         ->toThrow(RuntimeException::class, 'unexpected line 3');
 });
+
+it('moves a file to a nested non-existent target directory, creating the path', function () {
+    // Tests ApplyPatch.php directory creation logic (lines 67-70) for a Move to a path
+    // whose parent directories don't exist yet. This is checked against ApplyPatchTest
+    // "adds, updates with two hunks, deletes and moves a file in one patch" which tests
+    // moving to a target path that exists in the root.
+    // Specifically exercises the mkdir() call at lines 68-69 to create intermediate directories,
+    // since the target path "deep/nested/target.txt" has directories that don't exist yet.
+    \file_put_contents($this->dir . '/source.txt', "original\ncontent\n");
+
+    $patch = <<<'PATCH'
+    *** Begin Patch
+    *** Update File: source.txt
+    *** Move to: deep/nested/subdir/target.txt
+    @@
+     original
+    -content
+    +modified
+    *** End Patch
+    PATCH;
+
+    $apply  = new ApplyPatch($this->root);
+    $result = $apply->call(['patch' => $patch], callFor());
+
+    // The file must be moved to the nested target directory with all intermediate dirs created
+    expect(\file_exists($this->dir . '/source.txt'))->toBeFalse()
+        ->and(\file_get_contents($this->dir . '/deep/nested/subdir/target.txt'))->toBe("original\nmodified\n")
+        ->and($result->content[0]->text)->toContain("Moved 'source.txt' to 'deep/nested/subdir/target.txt'");
+});

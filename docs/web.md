@@ -34,7 +34,7 @@ application/json`. An HTML or XHTML reply is turned into readable text by `Harne
 a module-private extractor with no dependency beyond ext-dom: it drops `script`, `style`,
 `noscript`, `svg`, `nav`, `footer`, `header`, `aside`, `form` and comments, keeps the `<title>` as
 the first line, turns headings into `"# "`.."######" lines by level, separates paragraphs by a
-blank line, renders a list as one `"- "` line per item, a link as `"text (url)"` only when the text
+blank line, renders a list as one `"- "` line per item (a nested list's items indented under the parent item), a link as `"text (url)"` only when the text
 differs from the URL, keeps `pre`/`code` verbatim, renders a table as one row per line with cells
 joined by `" | "`, and otherwise collapses whitespace and decodes entities. `text/plain`,
 `application/json` and other `text/*` replies come back as is; anything else is an error result

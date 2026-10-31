@@ -105,3 +105,24 @@ it('rejects malformed status line from server (StreamTransport line 91 error pat
         (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
     }))->toThrow(TransportException::class, 'Malformed status line');
 });
+
+it('rejects header without colon and malformed chunk size from server (lines 100, 210)', function () {
+    // Test 1: header line without colon (line 100)
+    expect(fn () => \fiber\run(function () {
+        [$port] = probeHttpServe(fn () => [
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nInvalid Header\r\n\r\n",
+        ]);
+        (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
+    }))->toThrow(TransportException::class, 'Malformed header line');
+
+    // Test 2: chunked body with invalid chunk size (not hex) (line 210)
+    expect(fn () => \fiber\run(function () {
+        [$port] = probeHttpServe(fn () => [
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+            "ZZZ\r\nhello\r\n",
+        ]);
+        $r = (new StreamTransport())->post("http://127.0.0.1:$port/", [], '', live());
+        foreach ($r->body() as $_) {
+        }
+    }))->toThrow(TransportException::class, 'Malformed chunk size');
+});

@@ -6,7 +6,8 @@
 
 - **`Harness\Tools\Web`**: `WebSearch` and `WebFetch` tools, a `Search` interface with a `SearXng`
   implementation over a self-hosted instance's JSON API, and a dependency-free HTML-to-text
-  extractor. `WebFetch` guards against SSRF (private-network and non-http(s) URLs refused unless
+  extractor (a `<br>` is a line break; a nested list's items are indented under their parent
+  item, #2). `WebFetch` guards against SSRF (private-network and non-http(s) URLs refused unless
   `allowPrivate`), caches a fetched page by `sha256(url)` when `cacheDir` is set, and cuts long
   text with the files tools' tail idiom. docs/web.md, examples/search.php.
 - **`Harness\Tools\Plan`**: `Plan` (a `Step` list the `plan_set` and `plan_update` tools change),

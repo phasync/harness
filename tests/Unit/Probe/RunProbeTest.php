@@ -12,6 +12,7 @@ use Harness\Run;
 use Harness\Stop;
 use Harness\Testing\FakeModel;
 use Harness\Tools;
+use Harness\Tools\Files\Matcher;
 
 it('validates Stop::maxSteps requires n >= 1', function () {
     expect(fn () => Stop::maxSteps(0))->toThrow(InvalidArgumentException::class, 'n >= 1');
@@ -40,4 +41,13 @@ it('fails when a model yields a non-Delta object', function () {
     expect($ended->reason)->toBe(Reason::Failed)
         ->and($ended->errorKind)->toBe(ErrorKind::ModelError)
         ->and($ended->error)->toBeInstanceOf(LogicException::class);
+});
+
+it('reindents text from tab to space indentation with blank lines', function () {
+    // Test reindent converting tabs to spaces, including blank lines which should be skipped
+    $text   = "if (x) {\n\tcode();\n\n\tanother();\n}";
+    $result = Matcher::reindent($text, "\t", '    ');
+
+    // Tabs should be converted to 4 spaces; blank line should be preserved as-is
+    expect($result)->toBe("if (x) {\n    code();\n\n    another();\n}");
 });

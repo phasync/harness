@@ -140,3 +140,9 @@ it('patch parser rejects malformed patch formats naming the line', function () {
     expect(fn () => PatchParser::parse("*** Begin Patch\n*** End Patch"))
         ->toThrow(RuntimeException::class, 'no Add, Delete or Update section');
 });
+
+it('patch parser rejects Update File without hunk header', function () {
+    // Update File section with content but no @@ hunk header (line 90)
+    expect(fn () => PatchParser::parse("*** Begin Patch\n*** Update File: test.txt\n content\n*** End Patch"))
+        ->toThrow(RuntimeException::class, "must start a hunk with '@@'");
+});

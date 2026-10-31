@@ -107,3 +107,17 @@ it('builds Anthropic request with system cache_control, tool_choice, temperature
             ['type' => 'text', 'text' => 'answer'],
         ]);
 });
+
+it('formats a Reference in an Anthropic user message as a markdown link', function () {
+    $streamResp = "event: message_start\ndata: " . \json_encode(['message' => ['id' => 'm1', 'usage' => ['input_tokens' => 10, 'output_tokens' => 1]]]) . "\n\n"
+        . "event: message_delta\ndata: " . \json_encode(['delta' => ['stop_reason' => 'end_turn']]) . "\n\n"
+        . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n";
+    $t    = new FakeTransport(new Response(200, [], \str_split($streamResp, 23)));
+    $msgs = [new Message(Role::User, [new Reference('https://docs.example.com', 'Docs Link'), new Text('thanks')])];
+    [...(new AnthropicMessages($t, 'key', 'claude-x'))->stream(new Prompt(null, $msgs, [], new Options(), live()))];
+    $body = \json_decode($t->requests[0]['body'], true);
+    expect($body['messages'][0]['content'])->toBe([
+        ['type' => 'text', 'text' => '[Docs Link](https://docs.example.com)'],
+        ['type' => 'text', 'text' => 'thanks'],
+    ]);
+});

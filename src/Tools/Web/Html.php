@@ -11,7 +11,7 @@ namespace Harness\Tools\Web;
  * noscript, svg, nav, footer, header, aside, form and comments are dropped; the `<title>` becomes
  * the first line; headings become `"# "`.."######" lines by level; paragraphs and blockquotes are
  * separated by a blank line; `li` becomes a `"- "` line (a list is one block, its items one per
- * line, un-nested — a nested list's text runs into its parent item); `a` becomes `"text (url)"`
+ * line, a nested list's items on their own lines indented two spaces under the parent item); `a` becomes `"text (url)"`
  * only when the link text differs from the URL; `pre` is kept verbatim; a table becomes one row
  * per line, its cells joined with `" | "`; everything else has its whitespace collapsed to single
  * spaces and entities decoded (both by the DOM parser).
@@ -37,7 +37,7 @@ final class Html
         }
         $root = $dom->getElementsByTagName('body')->item(0) ?? $dom->documentElement;
         if (null !== $root) {
-            $body = \implode("\n\n", self::blocks($root));
+            $body = \str_replace("\u{E001}", '  ', \implode("\n\n", self::blocks($root)));
             if ('' !== $body) {
                 $lines[] = $body;
             }
@@ -109,18 +109,25 @@ final class Html
                 continue;
             }
             if ('br' === $tag) {
-                $out .= "\u{E000}"; // a line break survives the whitespace collapse, see below
+                $out .= "\u{E000}"; // a line break, see below
             } elseif ('a' === $tag) {
                 $text = self::collapse(self::inline($child));
                 $href = $child->getAttribute('href');
                 $out .= ('' === $href || $text === $href) ? $text : "$text ($href)";
             } elseif ('code' === $tag) {
                 $out .= $child->textContent;
+            } elseif ('ul' === $tag || 'ol' === $tag) {
+                foreach (self::blocks($child) as $item) { // a nested list: its items on their own lines, indented
+                    $out .= "\u{E000}\u{E001}" . \str_replace("\n", "\u{E000}\u{E001}", $item);
+                }
+                $out .= "\u{E000}";
             } else {
                 $out .= self::inline($child);
             }
         }
 
+        // E000 is a line break and E001 one level of list indentation; both survive the whitespace
+        // collapse, and extract() turns the indentation into spaces once the nesting is complete
         return \trim(\preg_replace('/ ?\x{E000} ?/u', "\n", self::collapse($out)) ?? '');
     }
 
