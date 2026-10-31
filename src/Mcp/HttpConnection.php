@@ -44,7 +44,8 @@ final readonly class HttpConnection implements Connection
         if (\str_starts_with($type, 'text/event-stream')) {
             foreach (Sse::parse($response->body()) as $data) {
                 $message = self::decode($method, $data);
-                if (($message['id'] ?? null) === $id) {
+                // an error with id null means the server could not tell which request it answers: on one connection, this one
+                if (($message['id'] ?? null) === $id || (\array_key_exists('id', $message) && null === $message['id'] && isset($message['error']))) {
                     return self::result($method, $message);
                 }
                 if (isset($message['method']) && !isset($message['id']) && null !== $notify) {

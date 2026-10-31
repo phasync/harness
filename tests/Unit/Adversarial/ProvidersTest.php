@@ -10,6 +10,7 @@ use Harness\ErrorKind;
 use Harness\FinishReason;
 use Harness\Http\Response;
 use Harness\Mcp\Connection;
+use Harness\Mcp\HttpConnection;
 use Harness\Mcp\McpException;
 use Harness\Mcp\McpServer;
 use Harness\Mcp\StdioConnection;
@@ -1027,3 +1028,46 @@ it('reports a response with id null, not just that the server later exited', fun
     }
     expect($message)->not->toContain('exited');
 }); // #93: the response matched no branch of dispatch() and was dropped
+
+/*
+ * Round 19's attack on #93, and the sibling connection:
+ *
+ * - `id: null` with a `result` and no `error`: #93's new branch requires `isset($message['error'])`,
+ *   so a result with `id: null` still matches no branch and is silently ignored, same as before the
+ *   fix. Decided, not pinned: JSON-RPC defines `id: null` only for the "could not identify the
+ *   request" error case; a *successful* result that the server itself cannot attach to any request
+ *   is a protocol violation with no spec-defined meaning and nothing useful to act on (unlike an
+ *   error's message, a bare, unidentifiable "it worked" carries no actionable content) -- #93's
+ *   narrower scope matches the one case JSON-RPC actually defines. Not a defect.
+ * - A response whose `id` is a string when the request sent an int, and a response for an id that
+ *   was never sent: `StdioConnection`'s own ids are always ints it generates itself
+ *   (`$this->nextId++`), and PHP's array-key coercion makes a numeric-string key like `"3"` land on
+ *   the same slot as `3` regardless, so this is a non-issue for ids genuinely sent by this client; a
+ *   response for an id never sent (`isset($this->open[$message['id']])` false) is silently ignored,
+ *   which is the sound, conservative choice -- there is no open call to tell about it. Not a defect.
+ *
+ * - The one that reproduces: `HttpConnection`'s dispatch is entirely separate from
+ *   `StdioConnection`'s and was never given #93's fix. Its SSE branch matches a response only by
+ *   `($message['id'] ?? null) === $id`, where `$id` is the hex string this client generated for its
+ *   own request -- never `null`. A response with `id: null` (the same JSON-RPC "could not identify
+ *   the request" signal #93 now handles for stdio) simply never equals `$id`, so the loop moves on,
+ *   finds nothing else, and falls through to the generic `throw new McpException("... the event
+ *   stream ended without a response (HTTP {$response->status})")` -- discarding the real error
+ *   the server actually sent, exactly the information loss #93 fixed for the other `Connection`
+ *   implementation in this same module.
+ *
+ * Verified directly against the real code (both adapters): an SSE body carrying
+ * `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error upstream"}}` makes
+ * `HttpConnection::request()` throw `McpException('MCP server/discover: the event stream ended
+ * without a response (HTTP 200)')` -- not an exception naming "Parse error upstream" at all.
+ */
+it('reports a response with id null over HTTP too, not a generic "stream ended" error', function () {
+    $body = 'data: ' . \json_encode(['jsonrpc' => '2.0', 'id' => null, 'error' => ['code' => -32700, 'message' => 'Parse error upstream']]) . "\n\n";
+    $t    = new FakeTransport(new Response(200, ['content-type' => 'text/event-stream'], [$body]));
+    $conn = new HttpConnection($t, 'http://example/mcp');
+
+    // Today: "the event stream ended without a response" -- the real error the server sent,
+    // "Parse error upstream", never reaches the caller at all.
+    expect(fn () => \fiber\run(fn () => $conn->request('server/discover', ['_meta' => ['io.modelcontextprotocol/protocolVersion' => McpServer::VERSION]], live())))
+        ->toThrow(McpException::class, 'Parse error upstream');
+}); // #94: only an exact id match counted; the error fell through to 'stream ended'

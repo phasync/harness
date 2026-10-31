@@ -6,6 +6,7 @@ use Harness\Tools\Files\ApplyPatch;
 use Harness\Tools\Files\EditFile;
 use Harness\Tools\Files\Glob;
 use Harness\Tools\Files\Grep;
+use Harness\Tools\Files\Journal;
 use Harness\Tools\Files\ListDir;
 use Harness\Tools\Files\ReadFile;
 use Harness\Tools\Files\Root;
@@ -488,3 +489,33 @@ it('still finds a match on a line that is not valid UTF-8, in an otherwise text 
     // because preg_match() with the 'u' modifier returns false, not 0, on an invalid-UTF-8 subject.
     expect($result->meta['count'])->toBe(2);
 }); // #91: preg_match returned false under u and the line was taken as no match
+
+/*
+ * Round 19. Attacked the #91 fix quickly: a literal non-ASCII pattern against a line that scrubs
+ * to U+FFFD correctly still matches on the parts of the line that stayed valid; a pattern of
+ * literal U+FFFD correctly matches a scrubbed line's replacement character. Neither broke.
+ *
+ * Worked through the carried-over list in order -- ReadFile (offset past the end, a file of
+ * exactly `limit` lines, a file of only "\n", CRLF line counting and the maxLineLength cut on a
+ * CRLF line), WriteFile (a NUL byte in content, onto a dangling symlink, under a parent that is a
+ * file) -- all verified correct by running them against the real code; nothing broke.
+ *
+ * Pinning the last item instead: Journal's "first touch wins" invariant, verified here across two
+ * *separate* `apply_patch` calls sharing one Journal (not two calls of the same simple `write_file`,
+ * which JournalTest.php already covers in "keeps only the first recorded state of a path touched
+ * more than once") -- apply_patch's own planning/journal-recording path is materially different
+ * (hunks, Matcher, a per-path plan), so this is a distinct code path for the same invariant: the
+ * second patch's `journal?->record()` call is a no-op because the path was already recorded by the
+ * first, and `undo()` restores all the way back to the content from before either patch ran.
+ */
+it('keeps the true original across two separate apply_patch calls sharing one Journal', function () {
+    \file_put_contents($this->dir . '/a.txt', "TRUE ORIGINAL\n");
+    $journal = new Journal();
+    $patch   = new ApplyPatch($this->root, journal: $journal);
+    $patch->call(['patch' => "*** Begin Patch\n*** Update File: a.txt\n@@\n-TRUE ORIGINAL\n+AFTER PATCH 1\n*** End Patch"], callFor());
+    $patch->call(['patch' => "*** Begin Patch\n*** Update File: a.txt\n@@\n-AFTER PATCH 1\n+AFTER PATCH 2\n*** End Patch"], callFor());
+
+    expect(\file_get_contents($this->dir . '/a.txt'))->toBe("AFTER PATCH 2\n");
+    $journal->undo();
+    expect(\file_get_contents($this->dir . '/a.txt'))->toBe("TRUE ORIGINAL\n");
+});

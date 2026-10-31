@@ -546,3 +546,22 @@ it('does not leak a stray sentinel letter when a <br> is the first thing in its 
 it('keeps a nested list that opens its item intact, with its indentation', function () {
     expect(Html::extract('<ul><li><ul><li>inner</li></ul></li><li>second</li></ul>'))->toBe("-   - inner\n- second");
 }); // #90, the \0i sentinel at the start of an item lost its NUL the same way
+
+/*
+ * Round 18 attacked the #90 fix directly: a `<pre>` opening a `<li>` (the `\0v` sentinel at the
+ * edge), a `<br>` as the LAST thing in a block, two `<br>` in a row at the start of a block, a
+ * `<li>` containing a `<table>`, stray text between `<ul>` items, `<code>` inside `<pre>`, and a
+ * `javascript:` href all hold -- no stray sentinel letter, no dropped content, nothing
+ * unexpected. The subtlest surviving combination, and the one most likely to break again if
+ * either the sentinel-trim fix or the #84 nested-table handling is ever touched in isolation, is
+ * a nested table whose very first cell opens with a `<br>`: the `<br>`'s own `\0n` sentinel sits
+ * at the left edge of that cell's `inline()` buffer, which is then itself wrapped in a second
+ * layer of `\0n` sentinels by the nested-table case one level up -- two sentinel layers stacked
+ * at the same edge, resolved back to front. No existing test combines a leading `<br>` with a
+ * nested table.
+ */
+it('resolves a leading <br> correctly even inside a nested table\'s first cell', function () {
+    $html = '<table><tr><td><table><tr><td><br>After</td></tr></table></td></tr></table>';
+
+    expect(Html::extract($html))->toBe('After');
+});
