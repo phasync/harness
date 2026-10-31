@@ -742,3 +742,40 @@ it('does not report the summarizer\'s own ContextTooLong as the conversation\'s'
     expect($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError);
 }); // #75: the summarizer's ContextTooLong was the turn's ErrorKind
+
+/*
+ * Round 14, fresh ground on Compact (the generator-lifecycle angle having had five rounds):
+ * a summarizer that collapses twice in a row -- here, by returning no text at all, both times --
+ * makes Compact::summarize() throw a plain \RuntimeException ("the summarizer returned no text
+ * ..., twice; ..."), per its own docblock and CompactTest.php's
+ * 'fails the step on a second collapsed checkpoint, naming both sizes', which calls Compact's
+ * step() directly and asserts the message, but never through a real Run -- so Run::loop()'s
+ * ErrorKind classification for this specific exception (an unmarked \RuntimeException, caught by
+ * modelStep() and marked 'middleware' because it did not come from the model or a tool) is
+ * verified here, not merely assumed. This is the fallback this round's charter allows when no new
+ * defect survives genuine attack: a regression pinning a verified-but-uncovered behaviour.
+ */
+it('reports a second collapsed checkpoint as the turn\'s MiddlewareError, not ModelError', function () {
+    $bigResult = \str_repeat('x', 20000);
+    $messages  = [
+        new Message(Role::User, [new Text('look something up')]),
+        new Message(Role::Assistant, [new ToolCall('c1', 'lookup', [])]),
+        new Message(Role::User, [new ToolResult('c1', [new Text($bigResult)])]),
+        new Message(Role::Assistant, [new Text('found it')]),
+        new Message(Role::User, [new Text('continue, please, this is the latest message')]),
+    ];
+    // Two replies, both with no Text part at all: summarize() sees '' twice and fails loudly
+    // on the second attempt, never silently folding an empty checkpoint.
+    $summarizer = new FakeModel([new Finish(FinishReason::Stop)], [new Finish(FinishReason::Stop)]);
+    $compact    = new Compact($summarizer, budgetTokens: 200, keepFirst: 0, keepRecentTokens: 5);
+    $mainModel  = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
+    $run        = new Harness\Run($mainModel, new Tools(), messages: $messages, middleware: [$compact]);
+
+    turn($run, user('next'));
+
+    expect($run->ended()->reason)->toBe(Reason::Failed)
+        ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError)
+        ->and($run->ended()->error)->toBeInstanceOf(RuntimeException::class)
+        ->and($run->ended()->error->getMessage())->toContain('returned no text')
+        ->and($run->ended()->error->getMessage())->toContain('twice');
+});

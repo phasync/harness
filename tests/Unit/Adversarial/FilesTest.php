@@ -420,3 +420,23 @@ it('takes the single exact match without ever consulting the tolerant cascade', 
     expect($result->content[0]->text)->not->toContain('matched with')
         ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("REPLACED\nbar\n  foo( x )\nbaz\n");
 });
+
+/*
+ * Round 16, moving to ReadFile (fewer rounds spent here than apply_patch/edit_file). `read_file`
+ * decides whether a file "is" an image purely from its extension (`self::IMAGES[strtolower(
+ * pathinfo($abs, PATHINFO_EXTENSION))]`), checked before the binary-content sniff and with no look
+ * at the bytes at all. A file named `fake.png` that actually holds plain text comes back as
+ * `Media('image/png', ...)`, wrapping the raw text bytes and telling the caller (and, through
+ * `toArray()`'s base64 encoding, the model's provider) that this is a real PNG. A provider trying
+ * to decode those bytes as PNG image data will fail; the model never gets to see the text at all,
+ * even though it is perfectly readable, valid content read_file could have shown as text.
+ */
+it('does not report a .png file as an image when its content is plain text', function () {
+    \file_put_contents($this->dir . '/fake.png', "<?php\necho 'this is actually PHP source, not a PNG';\n");
+    $result = (new ReadFile($this->root))->call(['path' => 'fake.png'], callFor());
+
+    // BUG: today this comes back as Media('image/png', ...) wrapping the raw text bytes --
+    // ReadFile trusts the extension alone and never checks the content against real PNG magic
+    // bytes, so a provider asked to decode this as an image will fail on perfectly good text.
+    expect($result->content[0])->toBeInstanceOf(Harness\Part\Text::class);
+})->group('bug');

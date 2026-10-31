@@ -501,4 +501,25 @@ it('does not use an SVG icon\'s own title as the page title', function () {
     // Today: the output starts with "Acme Corp logo\n\n# Welcome..." -- the SVG's own title,
     // content Html::extract's docblock promises to drop entirely, becomes the page's first line.
     expect(Html::extract($html))->toBe("# Welcome\n\nMain content.");
+}); // #81: the first title in document order won, dropped or not
+
+/*
+ * `table()` (Html.php) builds its rows with `$table->getElementsByTagName('tr')` -- a
+ * document-order search of ALL descendant `tr` elements, not just the table's own direct rows.
+ * When a cell contains a nested `<table>` (an ordinary pattern for complex layouts/data grids),
+ * the nested table's own `tr`s are descendants of the outer `<table>` too, so they get counted a
+ * SECOND time as if they were additional rows of the OUTER table -- on top of whatever `inline()`
+ * already did with that cell's content (it has no `table` case, so the nested cells get run
+ * together with no `" | "` separator). The docblock promises "a table becomes one row per line";
+ * a table whose declared rows is N produces more than N lines once any cell nests a table.
+ */
+it('does not count a nested table\'s rows as rows of the outer table', function () {
+    $html = '<table>'
+          . '<tr><td>Outer-A1</td><td><table><tr><td>Inner-1</td><td>Inner-2</td></tr></table></td></tr>'
+          . '<tr><td>Outer-B1</td><td>Outer-B2</td></tr>'
+          . '</table>';
+
+    // Today: the output has THREE lines, not two -- the nested table's single row ("Inner-1 |
+    // Inner-2") is appended again as a spurious extra row of the outer table.
+    expect(\substr_count(Html::extract($html), "\n"))->toBe(1);
 })->group('bug');

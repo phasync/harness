@@ -861,3 +861,60 @@ it('leaves an empty text part out of an Anthropic message, which the API rejects
     expect($body['messages'][0]['content'])->toBe([['type' => 'text', 'text' => 'hello']])
         ->and($body['messages'][2]['content'][0]['content'])->toBe([['type' => 'text', 'text' => '(no output)']]);
 }); // #83: {type: text, text: ''} went out, a 400 from the API
+
+/*
+ * Round 16's attack on #82/#83:
+ *
+ * - A user message whose only part is an empty `Text`, through Anthropic: `user()` now excludes
+ *   it (`elseif (!($part instanceof Text && '' === $part->text))`), so `messages()` sees `[] ===
+ *   $content` and skips the whole message -- same path as a reasoning-only assistant message.
+ *   Confirmed; the question is what that skip does to the *surrounding* messages, below.
+ * - The same for Chat Completions: `user()` was not touched by #83 (that fix was Anthropic-only,
+ *   per the coordinator); an empty `Text` still maps to `{"role":"user","content":""}` -- OpenAI
+ *   accepts an empty string for a user message's content (unlike an assistant message needing
+ *   content or tool_calls, already guarded by #45/#82's class), so not a defect.
+ * - A `Message` with an empty parts list at the end of the prompt: both `user()` and `assistant()`
+ *   return `[]` for it regardless of role, so `messages()` skips it the same way; "the last message
+ *   must be a user message with content" is then simply never violated because nothing invalid is
+ *   sent -- the message just vanishes, consistent with every other all-empty-message case already
+ *   covered.
+ *
+ * - The one that reproduces: `messages()`'s merge step is written for ONE documented purpose --
+ *   "Consecutive user messages are merged into one turn ... as the API requires" (docs/anthropic.md)
+ *   -- but the code merges ANY two adjacent same-role entries in the *output*, `assistant` included
+ *   (`if (null !== $last && $out[$last]['role'] === $role) { ...; $out[$last]['content'] =
+ *   $merged; }`), with no distinction for which role, and no distinction between messages that were
+ *   always adjacent and messages that only became adjacent because something between them (here,
+ *   an empty-text-only user message) was just skipped. Two assistant turns that were never
+ *   consecutive in the original prompt -- one making a tool call, the next replying with plain
+ *   text, originally separated by a user turn -- become consecutive in `$out` the moment that user
+ *   turn's only content is an empty `Text` and gets dropped by #83. The two unrelated assistant
+ *   replies are then silently glued into one `{"role":"assistant","content":[tool_use, text]}`
+ *   message, with no `tool_result` for the `tool_use` anywhere -- a shape the real Messages API
+ *   rejects (a `tool_use` must be followed by its `tool_result` before the next assistant turn),
+ *   and, regardless of what the API would do with it, not what the conversation actually was.
+ *
+ * Verified directly against the real code (both adapters): `[user("do it"), assistant(tool_use
+ * "read"), user(Text("")), assistant(Text("Here is the answer."))]` sends exactly two messages --
+ * the user turn, and ONE assistant message carrying both the `tool_use` block and the unrelated
+ * final text, with no `tool_result` in between.
+ */
+it('does not merge two assistant turns together when the user turn between them was all-empty', function () {
+    $msgs = [
+        user('do it'),
+        new Message(Role::Assistant, [new ToolCall('t1', 'read', ['path' => 'a'])]),
+        new Message(Role::User, [new Text('')]),
+        new Message(Role::Assistant, [new Text('Here is the answer.')]),
+    ];
+    $t = new FakeTransport(new Response(200, [], \str_split(
+        "event: message_delta\ndata: " . \json_encode(['type' => 'message_delta', 'delta' => ['stop_reason' => 'end_turn']]) . "\n\n"
+        . "event: message_stop\ndata: " . \json_encode(['type' => 'message_stop']) . "\n\n",
+        23,
+    )));
+    [...(new Messages($t, 'k', 'claude-x'))->stream(new Prompt(null, $msgs, [], new Options(), live()))];
+    $sent = \json_decode($t->requests[0]['body'], true);
+
+    // Today: 2 messages -- the two separate assistant turns were glued into one, tool_use and
+    // all, with no tool_result ever sent for it.
+    expect($sent['messages'])->toHaveCount(3);
+})->group('bug');
