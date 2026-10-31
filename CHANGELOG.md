@@ -210,7 +210,9 @@
   bytes were taken as UTF-8); a charset mbstring does not know is an error result (#98). A leading
   byte-order mark names the encoding and is stripped, outranking a wrong header (#100); the meta
   prescan skips HTML comments (#102); a declared `iso-8859-1`, `latin1` or `us-ascii` is read as
-  windows-1252, as browsers do, so cp1252's quotes and dashes do not vanish as C1 controls (#104).
+  windows-1252, as browsers do, so cp1252's quotes and dashes do not vanish as C1 controls (#104);
+  likewise `shift_jis` as windows-31j, `gb2312` as GBK, `euc-kr` as windows-949 and `iso-8859-9`
+  as windows-1254, the Encoding standard's decoders for those labels (#107).
 - `shell` widens the cut past `maxOutput` to the line boundaries the kept parts have, so the
   `[N bytes cut]` marker sits between real lines and one unbroken line gets it inline, instead of
   wrapping the marker in two line breaks the output never had (#99).

@@ -673,3 +673,26 @@ it('reads a declared iso-8859-1 charset as windows-1252, as browsers alias it', 
     expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
         ->toBe("It\u{2019}s fine");
 }); // #104: converted as true Latin-1, 0x92 became a C1 control and vanished
+
+/*
+ * `LATIN1_LABELS` fixed the latin1/windows-1252 alias, but the same category of mismatch exists
+ * for Japanese pages: the WHATWG Encoding Standard maps the label "shift_jis" (and "sjis",
+ * "x-sjis", "ms_kanji", "csshiftjis", etc.) to the **Windows-31J (cp932)** decoder, not strict
+ * JIS X 0208 Shift_JIS, for exactly the same real-world reason as latin1/cp1252: virtually every
+ * "Shift_JIS"-labelled page in the wild is Windows-authored and uses the cp932 mapping. The two
+ * disagree on specific code points -- most famously 0x81 0x60, which strict Shift_JIS maps to
+ * U+301C (WAVE DASH) but Windows-31J maps to U+FF5E (FULLWIDTH TILDE), the character every
+ * browser actually renders for that byte pair. `toText()` hands `charset=shift_jis` straight to
+ * `mb_convert_encoding()` as literal "shift_jis" (mbstring's strict JIS X 0208 variant), with no
+ * alias entry the way `iso-8859-1` now has one to `windows-1252`.
+ */
+it('reads a declared shift_jis charset as windows-31j, as browsers alias it', function () {
+    // 0x81 0x60 is the wave dash (U+301C) in strict Shift_JIS, but the fullwidth tilde (U+FF5E)
+    // in the Windows-31J variant real "Shift_JIS"-labelled pages actually use.
+    $body      = "<html><body><p>A\x81\x60B</p></body></html>";
+    $transport = new FakeTransport(new Response(200, ['content-type' => 'text/html; charset=shift_jis'], [$body]));
+    $fetch     = new WebFetch($transport, 'agent');
+
+    expect($fetch->call(['url' => 'https://example.com/'], TestCall::make())->content[0]->text)
+        ->toBe("A\u{FF5E}B");
+}); // #107: only the Latin-1 family was aliased; shift_jis decoded as strict JIS X 0208

@@ -1209,3 +1209,46 @@ it('reports a non-array input schema as an McpException, not a raw internal Type
     expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
         ->toThrow(McpException::class);
 }); // #106: a TypeError from headerPaths() left Harness\Mcp // headerPaths() runs before spec()'s type check and has no type-mismatch guard of its own
+
+/*
+ * Round 23, the loop before headerPaths() still bites, as suggested: `tools()`'s `foreach`
+ * (src/Mcp/McpServer.php:60-73) now checks `inputSchema`'s type (#106) before `headerPaths()`
+ * sees it, but nothing checks whether the tool even HAS a `name` before that name is used. A tool
+ * entry missing `name` entirely reaches `spec()` (line ~129) with `$tool['name']` undefined
+ * (a PHP warning, coerced to null), gets concatenated into the sanitized name as if it were an
+ * empty string, and only THEN fails -- inside `new ToolSpec($name, ...)`, whose own constructor
+ * (src/ToolSpec.php:33) rejects an empty name with a raw `\InvalidArgumentException`: "Tool name
+ * '' must be 1-64 characters of a-z, A-Z, 0-9, _ and -". This is the exact same mistake #103/#106
+ * were fixed for -- a malformed tool crosses `Harness\Mcp` as the wrong exception type, naming no
+ * server and nothing about the real problem (a missing `name`, not an "empty" one chosen on
+ * purpose) -- just reached through a different missing field, one the loop still does not guard.
+ * (The sibling cases the coordinator named -- `name` not a string, and a tool entry that is not an
+ * array at all -- reproduce the same way, as raw `\TypeError`s from `McpTool::__construct()` and
+ * `McpServer::spec()`'s own typed parameters respectively; one test is enough to pin the class of
+ * bug, and `name` missing is the most ordinary mistake a real server would make.)
+ *
+ * Verified directly against the real code (both adapters): an MCP server listing one tool with no
+ * `name` key at all makes `McpServer::tools()` throw `InvalidArgumentException("Tool name '' must
+ * be 1-64 characters of a-z, A-Z, 0-9, _ and -")` -- not `McpException`, and the message never
+ * mentions that `name` was missing.
+ */
+it('reports a tool with no name as an McpException, not a raw InvalidArgumentException', function () {
+    $conn = new class implements Connection {
+        public function request(string $method, array $params, Cancel $cancel, ?Closure $notify = null, array $headers = []): array
+        {
+            if ('server/discover' === $method) {
+                return ['supportedVersions' => [McpServer::VERSION]];
+            }
+
+            return ['tools' => [
+                ['description' => 'A tool that forgot its own name', 'inputSchema' => ['type' => 'object']],
+            ], 'ttlMs' => 60000];
+        }
+    };
+    $server = new McpServer($conn);
+
+    // Today: a raw InvalidArgumentException from ToolSpec's constructor ("Tool name '' must be
+    // 1-64 characters..."), naming no server and not mentioning that `name` was simply absent.
+    expect(fn () => \fiber\run(fn () => \iterator_to_array($server->tools())))
+        ->toThrow(McpException::class);
+})->group('bug'); // the tools() loop never checks a tool has a name before using it

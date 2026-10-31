@@ -612,3 +612,52 @@ it('names a path Journal::undo() cannot write back, keeps it recorded, and leaks
         ->and($journal->undo())->toBe([$this->dir . '/a.txt'])
         ->and(\file_get_contents($this->dir . '/a.txt'))->toBe("ORIGINAL\n");
 }); // #105: the warning escaped and the path was returned as restored while it held CHANGED
+
+/*
+ * Round 22, attacking #105's fix from the other end: `record()` itself, not `undo()`.
+ * `record()` reads a path's pre-change content with a bare `\file_get_contents($abs)` -- no `Fs`,
+ * no error handler. When the path exists but is unreadable (permission denied), that call fails
+ * and leaks its own native PHP warning (the same class #105 just closed for `undo()`'s write/
+ * delete side), and -- worse -- stores its failure return, `false`, as the "original content" in
+ * `$before[$abs]`, breaking the array's documented `?string` type (false is neither a string nor
+ * null).
+ *
+ * That corrupted entry is a landmine for `undo()`: when it reaches it, `Fs::write($abs, false,
+ * ...)` fails PHP's own parameter-type check (`Journal.php` has `declare(strict_types=1)`) and
+ * throws a `\TypeError`, *not* the `\RuntimeException` #105 documents. `undo()`'s `catch
+ * (\RuntimeException $e)` does not match a `\TypeError`, so it escapes the `foreach` entirely --
+ * which means every path still waiting in the loop, not just this one, is abandoned mid-undo.
+ * Recording the bad path *last* (so it is processed *first* after `array_reverse`) proves this
+ * directly: a perfectly healthy, perfectly restorable path queued behind it in the loop never
+ * gets its turn, violating docs/files.md's explicit promise that "a path it cannot restore... does
+ * not stop the others."
+ */
+it('lets an unreadable path poison undo() with a TypeError that aborts every path still queued behind it', function () {
+    \file_put_contents($this->dir . '/good.txt', "GOOD_ORIGINAL\n");
+    \file_put_contents($this->dir . '/bad.txt', "BAD_ORIGINAL\n");
+    $journal = new Journal();
+    $w       = new WriteFile($this->root, journal: $journal);
+
+    $w->call(['path' => 'good.txt', 'content' => 'CHANGED_GOOD'], callFor());
+
+    \chmod($this->dir . '/bad.txt', 0000); // unreadable, so record()'s own file_get_contents() fails
+    $warnings = [];
+    \set_error_handler(function (int $errno, string $message) use (&$warnings): bool {
+        $warnings[] = $message;
+
+        return true;
+    });
+    try {
+        $w->call(['path' => 'bad.txt', 'content' => 'CHANGED_BAD'], callFor());
+    } catch (RuntimeException) {
+        // bad.txt's own write also fails (no write permission either); record() already ran
+    } finally {
+        \restore_error_handler();
+    }
+
+    expect($warnings)->toBe([]) // #105 closed this leak for undo()'s side; record() still has it
+        ->and(fn () => $journal->undo())->toThrow(TypeError::class) // not the documented RuntimeException
+        ->and(\file_get_contents($this->dir . '/good.txt'))->toBe('CHANGED_GOOD'); // never reached: "the others" were stopped
+
+    \chmod($this->dir . '/bad.txt', 0644);
+})->group('bug');
