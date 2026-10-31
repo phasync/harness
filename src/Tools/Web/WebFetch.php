@@ -1,0 +1,173 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Harness\Tools\Web;
+
+use Harness\Call;
+use Harness\Cancel;
+use Harness\Hints;
+use Harness\Http\Transport;
+use Harness\Result;
+use Harness\Tool;
+use Harness\Tools\Input;
+use Harness\ToolSpec;
+
+/**
+ * `web_fetch`: a URL's text, HTML converted to readable text by `Html`, read with `$userAgent`
+ * (required, with no default, so a site being fetched can identify the agent instead of guessing
+ * from a generic header) and `Accept: text/html,application/xhtml+xml,text/*,application/json`.
+ * `text/plain`, `application/json` and other `text/*` replies come back as is; anything else is an
+ * error result naming the content type. The response body is read up to `maxBytes` (default 5 MB)
+ * and then stopped; the extracted text is cut at `maxChars` (default 20000) per call with the
+ * files tools' tail idiom (`offset` continues from where the previous call left off). A
+ * private-network or non-http(s) URL (`localhost`, `127/8`, `10/8`, `172.16/12`, `192.168/16`,
+ * `169.254/16`, `::1`, `fc00::/7`, `file:`, `ftp:`, ...) is refused as an SSRF guard unless
+ * `allowPrivate` is true (default false). When `cacheDir` is set, a fetched page's text is stored
+ * by `sha256(url)` and reused for `cacheTtl` seconds (default 3600) without a new request.
+ */
+final readonly class WebFetch implements Tool
+{
+    /** IPv4 networks treated as private. */
+    private const PRIVATE_NETS_V4 = [['127.0.0.0', 8], ['10.0.0.0', 8], ['172.16.0.0', 12], ['192.168.0.0', 16], ['169.254.0.0', 16]];
+
+    public function __construct(
+        private Transport $transport,
+        private string $userAgent,
+        private ?string $cacheDir = null,
+        private int $cacheTtl = 3600,
+        private int $maxChars = 20000,
+        private int $maxBytes = 5 * 1024 * 1024,
+        private bool $allowPrivate = false,
+    ) {
+    }
+
+    public function spec(): ToolSpec
+    {
+        return new ToolSpec('web_fetch', 'Fetch a URL and return its text. HTML pages are converted to readable text.', [
+            'type'       => 'object',
+            'properties' => [
+                'url'    => ['type' => 'string', 'description' => 'The URL to fetch'],
+                'offset' => ['type' => 'integer', 'description' => 'Character offset to continue from (default 0)'],
+            ],
+            'required' => ['url'],
+        ], new Hints(readOnly: true, idempotent: true, openWorld: true));
+    }
+
+    public function call(array $input, Call $call): Result
+    {
+        $url    = Input::string($input, 'url');
+        $offset = Input::int($input, 'offset', 0, 0);
+        $this->guard($url);
+
+        $cacheFile = null !== $this->cacheDir ? $this->cacheDir . '/' . \hash('sha256', $url) : null;
+        if (null !== $cacheFile && \is_file($cacheFile) && \filemtime($cacheFile) > \time() - $this->cacheTtl) {
+            $text = (string) \file_get_contents($cacheFile);
+        } else {
+            [$contentType, $body] = $this->fetch($url, $call);
+            $text                 = $this->toText($contentType, $body);
+            if (null !== $cacheFile) {
+                $this->store($cacheFile, $text, $url);
+            }
+        }
+
+        return Result::text(self::tail($text, $offset, $this->maxChars));
+    }
+
+    private function guard(string $url): void
+    {
+        if ($this->allowPrivate) {
+            return;
+        }
+        $parts  = \parse_url($url);
+        $scheme = \is_array($parts) ? ($parts['scheme'] ?? '') : '';
+        $host   = \is_array($parts) ? ($parts['host'] ?? '') : '';
+        if (!\in_array($scheme, ['http', 'https'], true) || self::isPrivateHost($host)) {
+            throw new \RuntimeException("'$url' is a private-network or non-http(s) address; web_fetch refuses it as its SSRF guard (pass allowPrivate: true to the constructor to fetch it anyway)");
+        }
+    }
+
+    private static function isPrivateHost(string $host): bool
+    {
+        $host = \strtolower($host);
+        if ('localhost' === $host || '' === $host) {
+            return true;
+        }
+        if (false !== \filter_var($host, \FILTER_VALIDATE_IP, \FILTER_FLAG_IPV4)) {
+            $long = \ip2long($host);
+            foreach (self::PRIVATE_NETS_V4 as [$net, $bits]) {
+                $mask = -1 << (32 - $bits);
+                if (($long & $mask) === (\ip2long($net) & $mask)) {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        if (false !== \filter_var($host, \FILTER_VALIDATE_IP, \FILTER_FLAG_IPV6)) {
+            $bin = (string) \inet_pton($host);
+
+            return '::1' === $host || (0xFC === (\ord($bin[0]) & 0xFE));
+        }
+
+        return false;
+    }
+
+    /** @return array{0: string, 1: string} the lower-case content type without parameters, and the body up to maxBytes */
+    private function fetch(string $url, Call $call): array
+    {
+        $cancel   = new Cancel($call->isCancelled(...));
+        $headers  = ['User-Agent' => $this->userAgent, 'Accept' => 'text/html,application/xhtml+xml,text/*,application/json'];
+        $response = $this->transport->get($url, $headers, $cancel);
+        $type     = \strtolower(\trim(\explode(';', $response->headers['content-type'] ?? '')[0]));
+        $body     = '';
+        foreach ($response->body() as $chunk) {
+            $body .= $chunk;
+            if (\strlen($body) >= $this->maxBytes) {
+                break;
+            }
+        }
+
+        return [$type, \substr($body, 0, $this->maxBytes)];
+    }
+
+    private function toText(string $contentType, string $body): string
+    {
+        if ('' === $contentType) {
+            $contentType = 'text/plain';
+        }
+        if ('text/html' === $contentType || 'application/xhtml+xml' === $contentType) {
+            return Html::extract($body);
+        }
+        if ('application/json' === $contentType || \str_starts_with($contentType, 'text/')) {
+            return $body;
+        }
+        throw new \RuntimeException("web_fetch does not read $contentType; only text");
+    }
+
+    private function store(string $cacheFile, string $text, string $url): void
+    {
+        $dir = \dirname($cacheFile);
+        if (!\is_dir($dir) && !\mkdir($dir, 0o777, true) && !\is_dir($dir)) {
+            throw new \RuntimeException("Could not create the cache directory '$dir'");
+        }
+        if (false === \file_put_contents($cacheFile, $text)) {
+            throw new \RuntimeException("Could not write the cache entry for '$url'");
+        }
+    }
+
+    private static function tail(string $text, int $offset, int $maxChars): string
+    {
+        $total = \strlen($text);
+        if ($offset > $total) {
+            throw new \RuntimeException("The fetched text is $total characters; offset $offset is past the end");
+        }
+        $slice = \substr($text, $offset, $maxChars);
+        $end   = $offset + \strlen($slice);
+        if ($end < $total) {
+            $slice .= "\n[" . ($total - $end) . ' more characters; pass offset=' . $end . ' to read on]';
+        }
+
+        return $slice;
+    }
+}

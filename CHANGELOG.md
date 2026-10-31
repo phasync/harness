@@ -2,6 +2,14 @@
 
 ## 0.2.0 (unreleased)
 
+### Added
+
+- **`Harness\Tools\Web`**: `WebSearch` and `WebFetch` tools, a `Search` interface with a `SearXng`
+  implementation over a self-hosted instance's JSON API, and a dependency-free HTML-to-text
+  extractor. `WebFetch` guards against SSRF (private-network and non-http(s) URLs refused unless
+  `allowPrivate`), caches a fetched page by `sha256(url)` when `cacheDir` is set, and cuts long
+  text with the files tools' tail idiom. docs/web.md, examples/search.php.
+
 ### Changed (breaking)
 
 - **`Transport` gets `get(string $url, array $headers, Cancel $cancel): Response`**, implemented

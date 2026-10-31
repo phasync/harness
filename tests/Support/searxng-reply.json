@@ -1,0 +1,115 @@
+{
+  "query": "SQLite write-ahead log",
+  "results": [
+    {
+      "template": "default.html",
+      "title": "Write-Ahead Logging - SQLite",
+      "content": "25. aug. 2026 ... The persistence of WAL mode means that applications can be converted to using SQLite in WAL mode without making any changes to the application ...",
+      "img_src": "",
+      "iframe_src": "",
+      "audio_src": "",
+      "thumbnail": "https://encrypted-tbn0.gstatic.com/images?q=tbn%3AANd9GcTlBKkIy8BywNx2NkurpNTcV0NmgBsnh95W5MP2LNP3Bz0fmG0QkqZ705tH",
+      "publishedDate": null,
+      "pubdate": "",
+      "length": null,
+      "views": "",
+      "author": "",
+      "metadata": "",
+      "priority": "",
+      "engines": [
+        "google cse",
+        "brave"
+      ],
+      "open_group": false,
+      "close_group": false,
+      "positions": [
+        1,
+        1
+      ],
+      "score": 4.0,
+      "category": "general",
+      "url": "https://www.sqlite.org/wal.html",
+      "engine": "google cse",
+      "parsed_url": [
+        "https",
+        "www.sqlite.org",
+        "/wal.html",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "template": "default.html",
+      "title": "SQLite WAL Mode: How Write-Ahead Logging Works and When to Use ...",
+      "content": "Write-ahead logging (WAL) lets SQLite readers keep reading while a writer writes, which is why turning it on can fix some lock errors. It also changes how SQLite writes to disk and adds two files next to the database.",
+      "img_src": "",
+      "iframe_src": "",
+      "audio_src": "",
+      "thumbnail": "",
+      "publishedDate": "2026-10-07T12:37:10",
+      "pubdate": "2026-10-07 12:37:10",
+      "length": null,
+      "views": "",
+      "author": "",
+      "metadata": "",
+      "priority": "",
+      "engines": [
+        "brave"
+      ],
+      "open_group": false,
+      "close_group": false,
+      "positions": [
+        4
+      ],
+      "score": 0.25,
+      "category": "general",
+      "url": "https://sqldocs.org/sqlite-write-ahead-logging/",
+      "engine": "brave",
+      "parsed_url": [
+        "https",
+        "sqldocs.org",
+        "/sqlite-write-ahead-logging/",
+        "",
+        "",
+        ""
+      ]
+    },
+    {
+      "template": "default.html",
+      "title": "Speed up SQLite with Write-Ahead Logging (WAL) - DEV Community",
+      "content": "With WAL, instead of modifying the DB file itself and maintaining a separate rollback file, each change to the SQLite Database is written to a separate \"write-ahead logging file\" (which typically ends in \"-wal\").",
+      "img_src": "",
+      "iframe_src": "",
+      "audio_src": "",
+      "thumbnail": "https://imgs.search.brave.com/itj4es41yxNkGOWZloOAxzGViwkriIIDK7o9tT8lW48/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9kZXYt/dG8tdXBsb2Fkcy5z/My5hbWF6b25hd3Mu/Y29tL3VwbG9hZHMv/YXJ0aWNsZXMvM290/dmIyejY0Nnl0cHQx/aGwycnYuanBn",
+      "publishedDate": "2017-11-06T17:07:13",
+      "pubdate": "2017-11-06 17:07:13",
+      "length": null,
+      "views": "",
+      "author": "",
+      "metadata": "",
+      "priority": "",
+      "engines": [
+        "brave"
+      ],
+      "open_group": false,
+      "close_group": false,
+      "positions": [
+        5
+      ],
+      "score": 0.2,
+      "category": "general",
+      "url": "https://dev.to/lefebvre/speed-up-sqlite-with-write-ahead-logging-wal-do",
+      "engine": "brave",
+      "parsed_url": [
+        "https",
+        "dev.to",
+        "/lefebvre/speed-up-sqlite-with-write-ahead-logging-wal-do",
+        "",
+        "",
+        ""
+      ]
+    }
+  ]
+}

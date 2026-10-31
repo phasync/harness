@@ -482,6 +482,7 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Provider\Anthropic` | `Messages`: the Messages API with thinking blocks | [docs/anthropic.md](docs/anthropic.md) |
 | `Harness\Tools\Files` | `ReadFile`, `WriteFile`, `EditFile`, `ListDir`, `Glob`, `Grep` under a `Root` | [docs/files.md](docs/files.md) |
 | `Harness\Tools\Shell` | `Shell`: bash commands with streamed output | [docs/shell.md](docs/shell.md) |
+| `Harness\Tools\Web` | `WebSearch`, `WebFetch`; `Search`, `SearXng` | [docs/web.md](docs/web.md) |
 | `Harness\Agents` | `AgentTool`: a sub-agent as a tool | [docs/agents.md](docs/agents.md) |
 | `Harness\Mcp` | `McpServer`: an MCP server's tools, over stdio or Streamable HTTP | [docs/mcp.md](docs/mcp.md) |
 | `Harness\Transcript` | `JsonlTranscript`, `JsonlEvents`: the conversation and the events in files | [docs/transcript.md](docs/transcript.md) |
@@ -522,6 +523,7 @@ php examples/files.php ./project "task"     # file tools; writes need approval o
 php examples/shell.php ./project "task"     # a shell; every command needs approval
 php examples/subagent.php ./project "question"   # delegates reading to sub-agents, rendered per line
 php examples/mcp.php "task"                 # a chat with an MCP server's tools (the test server by default)
+php examples/search.php "question"          # web_search and web_fetch over a local SearXng instance
 php examples/web.php state.json say "hi"    # one turn per request, events as JSON lines, state in a file
 php examples/compact.php [budget]           # a session that compacts to stay within a token budget
 php examples/policy.php ./project "task"    # the file tools under a Policy: reads run, writes ask
