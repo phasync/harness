@@ -316,3 +316,36 @@ it('refuses a maxTimeout below the default timeout and a cwd it cannot enter', f
         \rmdir($dir);
     }
 }); // #44: the first call failed with 'Could not start bash' and no word about the cwd
+
+/*
+ * The tool spec declares `timeout` as `['type' => 'number', ...]`, and `Shell::call()` validates
+ * it itself, by hand, rather than through `Harness\Tools\Input` (which has no `float()` helper at
+ * all -- only `string()`, `int()` and `bool()`). That hand-rolled check is
+ * `!\is_int($timeout) && !\is_float($timeout) || $timeout <= 0`, which rejects a numeric string
+ * like `"5"` outright with `Retry("'timeout' must be a positive number of seconds")` -- a message
+ * that reads as if the *value* were wrong (negative, zero, NaN), when `"5"` is exactly the
+ * positive number of seconds it asks for, just spelled as a JSON string rather than a JSON
+ * number.
+ *
+ * This is a real possibility, not a contrived one: tool-call arguments are reconstructed from a
+ * model's own generated JSON (or, for some providers/SDKs, from loosely-typed function-call
+ * argument strings), and models are well known to sometimes emit a numeric field as a quoted
+ * string. `Input::int()`, the project's own established helper for exactly this situation on
+ * another numeric field, explicitly tolerates and coerces a digit-only string
+ * (`'/^-?\d+$/'`) rather than rejecting it. `Shell::call()`'s bespoke `timeout` check does not
+ * extend the same leniency to its own numeric field, so the one tool in this codebase that rolls
+ * its own numeric parsing is stricter than the codebase's own convention for numeric input,
+ * for no documented reason.
+ *
+ * Verified directly: calling with `['command' => 'sleep 5', 'timeout' => '0.3']` throws
+ * `Harness\Retry: 'timeout' must be a positive number of seconds` immediately, never starting
+ * bash at all, for a value that is unambiguously a valid, positive, well-formed number of
+ * seconds.
+ */
+it('accepts timeout as a numeric string, as Input::int() already does for its own numeric field', function () {
+    // Today: is_int('0.3') and is_float('0.3') are both false, so this throws a Retry blaming
+    // the value as non-positive, even though "0.3" is a perfectly well-formed positive number.
+    $r = \fiber\run(fn () => (new ShellTool(\sys_get_temp_dir()))->call(['command' => 'sleep 5', 'timeout' => '0.3'], callFor()));
+
+    expect($r->content[0]->text)->toStartWith('Killed: timed out after 0.3 s');
+}); // #51: a hand-rolled is_int/is_float check gave a Retry for '0.3'

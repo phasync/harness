@@ -37,6 +37,25 @@ final class Input
         return $value;
     }
 
+    /**
+     * A number, which a model may send as a numeric string; `$min` is exclusive, so a positive
+     * number is `$min = 0`.
+     *
+     * @param array<string, mixed> $input
+     */
+    public static function number(array $input, string $key, float $default, float $min = -\INF): float
+    {
+        $value = $input[$key] ?? $default;
+        if (\is_string($value) && \is_numeric($value)) {
+            $value = (float) $value;
+        }
+        if (!\is_int($value) && !\is_float($value) || \is_nan($value) || $value <= $min) {
+            throw new Retry("'$key' must be a number" . (-\INF !== $min ? " > $min" : ''));
+        }
+
+        return (float) $value;
+    }
+
     /** @param array<string, mixed> $input */
     public static function bool(array $input, string $key, bool $default): bool
     {

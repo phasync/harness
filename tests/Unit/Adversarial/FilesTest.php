@@ -204,3 +204,27 @@ it('accepts the exact JSON-quoted name list_dir told it to pass back as the path
     $result = (new ReadFile($this->root))->call(['path' => $shown], callFor());
     expect($result->content[0]->text)->toContain('secret');
 }); // #46: the literal the docs said to pass back was "does not exist"
+
+/*
+ * Round 9, attacking the #46 fix from the other side. `Root::resolve()` now treats any `path`
+ * that starts and ends with `"` as a candidate JSON string literal, and commits to the decoded
+ * form whenever that decoded form holds a control character -- it never checks whether the
+ * *literal* text is itself an existing file first. A real file literally named `"a\nb"` (a quote,
+ * `a`, a backslash, `n`, `b`, a quote -- six ordinary printable bytes, no control character at
+ * all) is shown by `list_dir` completely unquoted, exactly as it is on disk, because
+ * `Page::name()` only quotes a name that *itself* holds a control character. Docs/files.md
+ * promises "every tool takes that literal... back as its path" -- but passing back precisely what
+ * was shown (the plain, un-quoted-by-the-tool name) makes `resolve()` guess it is JSON syntax,
+ * decode `\n` into a real newline, and look for an unrelated (and here nonexistent) file instead
+ * of the one list_dir just named. Narrowing this (preferring an existing literal match over a
+ * speculative decode) is the restrictive choice that doesn't break the #46 fix for names that
+ * truly need quoting.
+ */
+it('lists a name wrapped in double quotes as a JSON literal so its pass-back is unambiguous', function () {
+    \file_put_contents($this->dir . '/"a\nb"', "FILE A CONTENT\n");
+    $shown = \trim((new ListDir($this->root))->call([], callFor())->content[0]->text);
+    expect($shown)->toBe('"\"a\\\\nb\""'); // the JSON literal; shown plainly, "a\nb" would decode to a newline name
+
+    $result = (new ReadFile($this->root))->call(['path' => $shown], callFor());
+    expect($result->content[0]->text)->toContain('FILE A CONTENT');
+}); // #50: shown plainly, and passing that back resolved to a + newline + b

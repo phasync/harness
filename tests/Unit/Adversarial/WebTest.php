@@ -272,3 +272,55 @@ it('does not decode a single compressed chunk far past maxBytes before checking 
     // several MB before `fetch()`'s size check ever runs.
     expect($after - $before)->toBeLessThan(1024 * 1024);
 }); // #48: one inflate_add() per transport chunk grew peak memory by 6-10 MB against maxBytes 1000
+
+/*
+ * The #48 fix feeds compressed input to `inflate_add()` in artificial 256-byte slices
+ * (`\str_split($chunk, 256)`) instead of one call per transport chunk. zlib correctly ignores
+ * bytes that arrive AFTER a gzip member has fully ended, as long as they are fed in the SAME
+ * `inflate_add()` call as the member's own final bytes (verified directly against ext-zlib: a
+ * complete member followed by junk, fed in one call, decodes cleanly and ignores the junk). But
+ * when that boundary now falls on an artificial 256-byte slice edge instead of the natural
+ * transport-chunk edge, trailing bytes can end up ALONE in their own, later `inflate_add()` call
+ * on a context that has already finished -- and feeding more bytes to an already-finished zlib
+ * stream throws "data error". The 256-byte slicing is purely an internal memory-bound mechanism;
+ * it should not change whether an otherwise perfectly decodable page succeeds or fails depending
+ * on incidental byte alignment with that constant.
+ */
+it('does not fail a perfectly decodable gzip body because of trailing bytes after the member', function () {
+    // Deterministic "incompressible" plaintext (repeated sha256 digests) so the gzip member's
+    // exact size -- and therefore where it falls relative to the 256-byte slicing -- never
+    // depends on randomness between runs.
+    $plain = '';
+    $seed  = 'web-fetch-adversarial-trailing-garbage-seed';
+    while (\strlen($plain) < 1000) {
+        $seed  = \hash('sha256', $seed, true);
+        $plain .= $seed;
+    }
+    $plain = \substr($plain, 0, 1000);
+    // A complete, valid gzip member (zlib will decode it in full) followed by bytes that are not
+    // part of it at all -- padding a misbehaving proxy added, or a second, truncated member.
+    $body = \gzencode($plain, 9) . \str_repeat('G', 300);
+
+    $text = \fiber\run(function () use ($body) {
+        $server = \stream_socket_server('tcp://127.0.0.1:0');
+        $port   = (int) \substr(\strrchr(\stream_socket_get_name($server, false), ':'), 1);
+        go(function () use ($server, $body) {
+            $conn    = \stream_socket_accept(readable($server), 0);
+            $request = '';
+            while (!\str_contains($request, "\r\n\r\n")) {
+                $request .= \fread(readable($conn), 65536);
+            }
+            \fwrite(writable($conn), "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Length: " . \strlen($body) . "\r\n\r\n" . $body);
+            \fclose($conn);
+            \fclose($server);
+        });
+        $fetch = new WebFetch(new StreamTransport(), 'agent', allowPrivate: true);
+
+        return $fetch->call(['url' => "http://127.0.0.1:$port/"], TestCall::make())->content[0]->text;
+    });
+
+    // Today: this throws RuntimeException "sends a compressed body that does not decode:
+    // inflate_add(): data error" -- even though the real content decoded perfectly; the error
+    // comes only from the 300 trailing 'G' bytes landing in their own 256-byte slice.
+    expect($text)->toBe($plain);
+})->group('bug');

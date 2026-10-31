@@ -410,3 +410,93 @@ it('does not let a misuse exception escape past fiber\run() when the host breaks
     expect($caughtInner)->toBeInstanceOf(UnsupportedOptionException::class)
         ->and($caughtOuter)->toBeNull();
 }); // #47: the failed task's exception surfaced from fiber\run(), past the host's handler
+
+/*
+ * Round 9: attacking the #47 fix's own escape hatch. `turn()`'s docblock, and the #41 error
+ * message for a reentrant call, both treat "release it" (let the generator go out of scope, or
+ * `unset()` it, without exhausting it) as a legitimate alternative to exhausting the generator.
+ * But #47's fix made the `finally` block call `await($task)` whenever the LAST event delivered
+ * was `TurnEnded` -- and that `finally` only runs once the generator is actually destroyed. If the
+ * host instead HOLDS the generator open (an ordinary pattern: break at TurnEnded, keep the
+ * generator in a variable for later, go on with other work inside the same `fiber\run()` call),
+ * the generator is not destroyed yet, so the `finally` -- and the `await($task)` inside it --
+ * never runs while still inside that `fiber\run()` call. Structured concurrency then has an
+ * outstanding, unreconciled child (`$task`, and the turn's own scope) that nothing is waiting on
+ * in the normal way, and the whole `fiber\run()` call deadlocks instead of returning.
+ *
+ * This reproduces even for a turn that ends completely successfully (`Reason::Done`, no
+ * exception anywhere) -- it has nothing to do with the misuse-exception machinery #47 just fixed;
+ * it is the plain act of not draining the generator before the enclosing `fiber\run()` call
+ * returns. Nothing in `turn()`'s docblock says the generator must be exhausted or released before
+ * the `fiber\run()` call it was created in returns, and the #41 message's "release it" wording
+ * implies the opposite -- that holding it a while longer, then releasing it, is fine.
+ *
+ * Verified directly against the real code with both adapters: holding the generator open across
+ * `break` and letting the closure return makes `fiber\run()` itself fail -- a
+ * `phasync\DeadlockException` on the phasync adapter, an event-loop stall error on the revolt one
+ * -- for a turn that produced no error of its own.
+ */
+it('does not deadlock fiber\run() when the generator is held open past TurnEnded', function () {
+    // Run as a subprocess: this reproduces as fiber\run() itself crashing (verified standalone,
+    // both adapters), but inside a long-lived shared process (such as this very test run) the
+    // same wedge can hang the event loop indefinitely instead of failing fast -- a subprocess with
+    // a hard timeout is what keeps a genuine hang from taking the test runner down with it.
+    $script = \tempnam(\sys_get_temp_dir(), 'round9_');
+    \file_put_contents($script, <<<'PHP'
+        <?php
+        require $argv[1] . '/vendor/autoload.php';
+        use Harness\Delta\Finish;
+        use Harness\Delta\TextDelta;
+        use Harness\FinishReason;
+        use Harness\Message;
+        use Harness\Part\Text;
+        use Harness\Role;
+        use Harness\Run;
+        use Harness\Testing\FakeModel;
+        use Harness\Tools;
+        use Harness\Usage;
+        \fiber\setup('revolt' === ($argv[2] ?? 'phasync') ? new FiberInterop\Revolt\Adapter() : new FiberInterop\Phasync\Adapter());
+        $model = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
+        $run = new Run($model, new Tools());
+        $gen = null;
+        \fiber\run(function () use ($run, &$gen) {
+            $gen = $run->turn(new Message(Role::User, [new Text('go')]));
+            foreach ($gen as $e) {
+                if ($e instanceof Harness\Event\TurnEnded) {
+                    break; // hold $gen open; an ordinary pattern, not an exhaust-or-release misuse
+                }
+            }
+            // ... the host goes on with other work inside the same fiber\run() call ...
+        });
+        echo "DONE\n";
+        PHP);
+
+    $adapter = \getenv('HARNESS_ADAPTER') ?: 'phasync';
+    $proc    = \proc_open(['php', $script, \dirname(__DIR__, 3), $adapter], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    $deadline = \microtime(true) + 5.0;
+    do {
+        $status = \proc_get_status($proc);
+        if (!$status['running']) {
+            break;
+        }
+        \usleep(20_000);
+    } while (\microtime(true) < $deadline);
+    $timedOut = $status['running'];
+    if ($timedOut) {
+        \proc_terminate($proc, 9);
+    }
+    $out = \stream_get_contents($pipes[1]);
+    foreach ($pipes as $p) {
+        \fclose($p);
+    }
+    \proc_close($proc);
+    \unlink($script);
+
+    // Today: the subprocess either hangs past the 5 s deadline (killed here, $timedOut true) or
+    // exits non-zero with an uncaught DeadlockException/event-loop-stall error -- for a turn that
+    // ended Done with no exception anywhere. Merely holding the generator open, which the docs
+    // never forbid (the #41 message's "release it" wording implies holding it a while is fine),
+    // wedges fiber\run()'s own bookkeeping instead of letting it return normally.
+    expect($timedOut)->toBeFalse()
+        ->and(\trim($out))->toBe('DONE');
+})->group('bug');

@@ -438,3 +438,60 @@ it('does not report ToolCalls when finish_reason says tool_calls but none were e
             ->and($e->getMessage())->toContain('holds no tool call');
     }
 }); // #45: Finish(ToolCalls) with no tool call in the stream, as #39 in Messages
+
+/*
+ * Round 9's attack on #45 and the third provider:
+ *
+ * - Responses `response.completed` with a `function_call` item present in `output` but no
+ *   `response.output_item.added`/`.done` events for it (i.e. `$called` never set): traced -- every
+ *   path that could make `$called` true is driven by the SSE events this code actually switches on,
+ *   never by inspecting `response.completed`'s own `output` array, so this exact mismatch (`output`
+ *   says a function_call exists, no event said so) cannot arise from what the code reads; it would
+ *   require the API to omit the very events this provider relies on while still listing the item in
+ *   the final payload -- not reachable the way #39/#45 were (those needed only a stop/finish value
+ *   contradicting events already seen, not events contradicting a field this code never reads).
+ * - A `function_call` item whose arguments stream in but `response.output_item.done` never fires:
+ *   executed -- the only consequence is a missing `ToolCallEnd` delta during the live stream (no
+ *   progress event for that call); `Accumulator::message()` decodes every call's accumulated JSON
+ *   regardless of its `ended` flag, so the final message is unaffected. A real gap (ChatCompletions
+ *   force-closes pending calls at stream end, src/Provider/OpenAI/ChatCompletions.php; Responses
+ *   does not), but not a wrong final result -- same conclusion as earlier rounds' look at this.
+ * - `tool_calls` delta with an index but no id on the first chunk for it: already covered by
+ *   docs/openai.md ("a server that omits the call id gets a generated one") and the fallback
+ *   `$call['id'] ?? ('call_' . bin2hex(random_bytes(8)))` -- working as documented.
+ *
+ * - The one that reproduces: `ChatCompletions::delta()`'s `$ids` map is keyed by `index` alone and
+ *   is "sticky" for the rest of the stream -- `if (!isset($ids[$index])) { $ids[$index] = ...; yield
+ *   new ToolCallStart(...); }` only ever fires once per index, no matter what a *later* chunk's
+ *   `tool_calls[].id` or `.function.name` says for that same index. Compare Anthropic's
+ *   `content_block_start`, which always overwrites `$blocks[$e['index']]` and always yields a fresh
+ *   `ToolCallStart` for a `tool_use` block regardless of what was at that index before -- Chat
+ *   Completions has no equivalent. A second, logically distinct tool call that reuses an index (the
+ *   same bug class as n > 1's interleaved choices and the earlier duplicate-id cases, but via a
+ *   buggy proxy restarting its per-message index counter instead of incrementing) is silently folded
+ *   into the FIRST call at that index: its name is discarded entirely -- no `ToolCallStart`, no
+ *   error, nothing -- and its arguments are appended as if they were more of the first call's JSON,
+ *   corrupting what was a complete, valid call into invalid JSON.
+ *
+ * Verified directly against the real code (both adapters): two complete, independent tool calls
+ * (`call_A`/`toolA` with valid arguments `{"x":1}`, then `call_B`/`toolB` with valid arguments
+ * `{"y":2}`) both sent at `index: 0`. The real `Accumulator` ends up with exactly one `ToolCall`
+ * part, named `toolA`, whose input is `[]` because its JSON is now `{"x":1}{"y":2}` -- invalid.
+ * `toolB` never appears anywhere; a call that was never broken is reported broken, and a second,
+ * fully valid call vanishes without a trace.
+ */
+it('does not fold a second tool call into the first when a chunk reuses the same index', function () {
+    $body = 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => ['tool_calls' => [
+        ['index' => 0, 'id' => 'call_A', 'type' => 'function', 'function' => ['name' => 'toolA', 'arguments' => '{"x":1}']],
+    ]], 'finish_reason' => null]]]) . "\n\n"
+          . 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => ['tool_calls' => [
+              ['index' => 0, 'id' => 'call_B', 'type' => 'function', 'function' => ['name' => 'toolB', 'arguments' => '{"y":2}']],
+          ]], 'finish_reason' => null]]]) . "\n\n"
+          . 'data: ' . \json_encode(['choices' => [['index' => 0, 'delta' => [], 'finish_reason' => 'tool_calls']]]) . "\n\n"
+          . "data: [DONE]\n\n";
+    $model = new ChatCompletions(new FakeTransport(new Response(200, [], \str_split($body, 23))), 'http://h/v1', 'm');
+
+    // The API gives every tool call its own index; a new id at a seen index is a broken stream, not a merge.
+    expect(fn () => [...$model->stream(new Prompt(null, [], [], new Options(), live()))])
+        ->toThrow(ModelException::class, "changed its id from 'call_A' to 'call_B'");
+}); // #49: one ToolCall named toolA with the invalid input {"x":1}{"y":2}; toolB vanished

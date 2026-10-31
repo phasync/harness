@@ -23,9 +23,11 @@ Output is cut with a tail that says how to go on (`[120 more lines; pass offset=
 never silently. `read_file` returns PNG, JPEG, GIF and WebP files as Media and refuses other binaries;
 lines past `maxLineLength` are cut with a marker. `glob` and `grep` skip `.git` and do not follow
 symlinked directories; `grep` skips binary files and says how many, and `read_file`, `edit_file` and
-`apply_patch` refuse one by name. A file name holding a control character (a newline, say) is listed
-as a JSON string literal, `"evil.txt\nfake.php"`, so it stays one entry; every tool takes that literal,
-or the decoded name, back as its `path`.
+`apply_patch` refuse one by name. A file name holding a control character (a newline, say), or one
+wrapped in double quotes, is listed as a JSON string literal, `"evil.txt\nfake.php"`, so it stays one
+entry and reads back unambiguously; every tool takes that literal back as its `path` (a plain name
+that happens to be wrapped in double quotes is read as a literal too, so such a file is always
+addressed by its listed form).
 
 ## edit_file's matching cascade
 

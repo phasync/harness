@@ -111,6 +111,11 @@
   escaping `fiber\run()` unhandled (#47).
 - `web_fetch` feeds a compressed body to the decoder in small slices, so a page that inflates far
   beyond `maxBytes` costs about that much memory, not tens of MB (#48).
+- A Chat Completions chunk that gives a seen tool-call index a different id is a `ModelException`
+  instead of two calls folded into one invalid input (#49).
+- A file name wrapped in double quotes is listed as a JSON string literal too, so `Root::resolve()`'s
+  decoding of listed names is its exact inverse (#50).
+- `shell` accepts `timeout` as a numeric string, through the new `Input::number()` (#51).
 - `Run`: the turn is over before `TurnEnded` is emitted, so `ended()` works in that event's handler
   and `interject()` there throws instead of losing the message (#36).
 

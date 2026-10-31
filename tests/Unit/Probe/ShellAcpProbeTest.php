@@ -110,15 +110,15 @@ it('rejects invalid timeout values with Retry', function () {
     expect(fn () => \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
         ['command' => 'true', 'timeout' => -1],
         callFor()
-    )))->toThrow(Retry::class, 'must be a positive number');
+    )))->toThrow(Retry::class, 'must be a number > 0');
 
     expect(fn () => \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
         ['command' => 'true', 'timeout' => 0],
         callFor()
-    )))->toThrow(Retry::class, 'must be a positive number');
+    )))->toThrow(Retry::class, 'must be a number > 0');
 
     expect(fn () => \fiber\run(fn () => (new Shell(\sys_get_temp_dir()))->call(
         ['command' => 'true', 'timeout' => 'abc'],
         callFor()
-    )))->toThrow(Retry::class, 'must be a positive number');
+    )))->toThrow(Retry::class, 'must be a number > 0');
 });

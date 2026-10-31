@@ -135,6 +135,8 @@ final readonly class ChatCompletions implements Model
             if (!isset($ids[$index])) {
                 $ids[$index] = $call['id'] ?? ('call_' . \bin2hex(\random_bytes(8)));
                 yield new ToolCallStart($ids[$index], $call['function']['name'] ?? throw new ModelException(ErrorKind::ModelError, "Tool call $index began without a function name"));
+            } elseif (isset($call['id']) && $call['id'] !== $ids[$index]) {
+                throw new ModelException(ErrorKind::ModelError, "Tool call $index changed its id from '{$ids[$index]}' to '{$call['id']}' mid-stream; a second call takes its own index");
             }
             $arguments = $call['function']['arguments'] ?? '';
             if ('' !== $arguments) {

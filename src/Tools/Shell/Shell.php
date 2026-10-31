@@ -66,11 +66,7 @@ final readonly class Shell implements Tool
     public function call(array $input, Call $call): Result
     {
         $command = Input::string($input, 'command');
-        $timeout = $input['timeout'] ?? $this->timeout;
-        if (!\is_int($timeout) && !\is_float($timeout) || $timeout <= 0) {
-            throw new \Harness\Retry("'timeout' must be a positive number of seconds");
-        }
-        $timeout = \min((float) $timeout, $this->maxTimeout);
+        $timeout = \min(Input::number($input, 'timeout', $this->timeout, 0.0), $this->maxTimeout);
         $group   = \PHP_OS_FAMILY === 'Linux' && \function_exists('posix_kill');
         $argv    = $group ? ['setsid', 'bash', '-c', $command] : ['bash', '-c', $command];
         $process = \proc_open($argv, [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, $this->cwd);

@@ -24,14 +24,15 @@ final readonly class Root
 
     /**
      * The absolute path for `$path`, which need not exist yet. A path written as a JSON string
-     * literal that decodes to a name holding a control character is the form `list_dir`, `glob` and
-     * `grep` show such a name in (`Page::name()`); it is taken as that name.
+     * literal that decodes to a name `Page::name()` would show that way (one holding a control
+     * character, or wrapped in double quotes) is taken as that name: the exact inverse of how
+     * `list_dir`, `glob` and `grep` show it.
      */
     public function resolve(string $path): string
     {
         if (\strlen($path) >= 2 && '"' === $path[0] && '"' === $path[-1]) {
             $decoded = \json_decode($path);
-            if (\is_string($decoded) && 1 === \preg_match('/[\x00-\x1f\x7f]/', $decoded)) {
+            if (\is_string($decoded) && Page::quoted($decoded)) {
                 $path = $decoded;
             }
         }
