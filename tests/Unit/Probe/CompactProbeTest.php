@@ -77,7 +77,7 @@ it('restores a checkpoint that no longer fits and updates it instead of summariz
     $largeMessages = [new Message(Role::User, [new Text('task')])];
     for ($i = 1; $i <= 8; ++$i) {
         $largeMessages[] = new Message(Role::Assistant, [new ToolCall("c$i", 'read', ['n' => $i])]);
-        $largeMessages[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 250))])]);
+        $largeMessages[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 200))])]);
     }
 
     // Process to generate checkpoint
@@ -117,7 +117,7 @@ it('restores a checkpoint that no longer fits and updates it instead of summariz
     // Add 4 more tool pairs (total 12 instead of 8) to exceed budget and require UPDATE
     for ($i = 9; $i <= 12; ++$i) {
         $rebuilt[] = new Message(Role::Assistant, [new ToolCall("c$i", 'read', ['n' => $i])]);
-        $rebuilt[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 250))])]);
+        $rebuilt[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 200))])]);
     }
 
     // Process extended conversation - should trigger UPDATE call for the restored checkpoint

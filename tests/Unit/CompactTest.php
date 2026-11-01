@@ -55,13 +55,13 @@ function assistant(Harness\Part ...$parts): Message
     return new Message(Role::Assistant, $parts);
 }
 
-/** u0, then $pairs tool steps (each 300 bytes of result, about 560 bytes a pair). */
+/** u0, then $pairs tool steps (each 200 bytes of result, too small to demote, and 100 of reasoning: about 560 bytes a pair). */
 function agentic(int $pairs, string $task = 'the task'): array
 {
     $m = [user($task)];
     for ($i = 1; $i <= $pairs; ++$i) {
-        $m[] = assistant(new Reasoning("thinking $i"), new ToolCall("c$i", 'read', ['n' => $i]));
-        $m[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 300))])]);
+        $m[] = assistant(new Reasoning("thinking $i" . \str_repeat('.', 100)), new ToolCall("c$i", 'read', ['n' => $i]));
+        $m[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 200))])]);
     }
 
     return $m;
@@ -126,28 +126,25 @@ it('folds everything older than the step in flight into a checkpoint when the re
         ->and($text)->toStartWith("The agent's instructions (context only, do not summarize them):\n\nsys\n\nThe start of the conversation, which the agent keeps in full (context only, do not summarize it):\n\nUSER:\nthe task\n\nThe messages to fold into a new checkpoint:")
         // A quarter of the budget (500 tokens, under 3/4 of the 2048 output tokens), in words.
         ->and($text)->toEndWith('Write the checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.')
-        ->and($text)->toContain('[calls read {"n":4}]')->toContain(\str_repeat('4', 300))
+        ->and($text)->toContain('[calls read {"n":4}]')->toContain(\str_repeat('4', 200))
         ->and($text)->not->toContain('[calls read {"n":5}]')
-        // The agent's reasoning goes along with the calls it folds (so a model that writes its
-        // reading of a tool result only in its reasoning does not lose it once the result is
-        // folded away), but not the reasoning of the step still in flight.
-        ->and($text)->toContain('[thinking] thinking 4')
-        ->and($text)->not->toContain('thinking 5');
+        // Reasoning is scratch work, left out as Hermes Agent leaves it out.
+        ->and($text)->not->toContain('thinking');
 });
 
-it('demotes old, large tool results to bounded stubs before calling the summarizer at all, sparing the step in flight', function () {
+it('demotes old, large tool results to one-line stubs before calling the summarizer at all, sparing the step in flight', function () {
     $big      = \str_repeat('x', 1000);
     $messages = [
         user('the task'),
-        assistant(new ToolCall('c1', 'read', ['n' => 1])),
+        assistant(new ToolCall('c1', 'read_file', ['path' => 'src/a.php', 'offset' => 1])),
         new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
-        assistant(new ToolCall('c2', 'read', ['n' => 2])),
-        new Message(Role::User, [new ToolResult('c2', [new Text($big)])]),
-        assistant(new ToolCall('c3', 'read', ['n' => 3])),
-        new Message(Role::User, [new ToolResult('c3', [new Text('small result')])]),
+        assistant(new ToolCall('c2', 'read_file', ['path' => 'src/b.php'])),
+        new Message(Role::User, [new ToolResult('c2', [new Text("no such file\n" . $big)], true)]),
+        assistant(new ToolCall('c3', 'read_file', ['path' => 'src/a.php', 'offset' => 1])),
+        new Message(Role::User, [new ToolResult('c3', [new Text($big)])]),
     ];
     $summaries = new Summaries();
-    $compact   = new Compact($summaries, 1200, bytesOf(...), keepRecentTokens: 100);
+    $compact   = new Compact($summaries, 2000, bytesOf(...), keepRecentTokens: 100);
     $prompt    = step($compact, $messages);
 
     expect($summaries->prompts)->toHaveCount(0)                  // demotion alone was enough
@@ -156,70 +153,59 @@ it('demotes old, large tool results to bounded stubs before calling the summariz
         ->and($prompt->messages[1])->toBe($messages[1])          // a ToolCall's arguments are never rewritten
         ->and($prompt->messages[3])->toBe($messages[3])
         ->and($prompt->messages[5])->toBe($messages[5])
-        ->and($prompt->messages[6])->toBe($messages[6])          // the step in flight, spared entirely
-        // The newer of two identical results stays as a bounded excerpt...
-        ->and($prompt->messages[4]->parts[0]->content[0]->text)->toStartWith(\str_repeat('x', 200))
-        ->and($prompt->messages[4]->parts[0]->content[0]->text)->not->toBe($big)
-        ->and($prompt->messages[4]->parts[0]->content[0]->text)->toContain('more bytes cleared to save context')
-        // ...and the older identical one becomes a one-line duplicate marker, not a second excerpt.
-        ->and($prompt->messages[2]->parts[0]->content[0]->text)->toBe('[duplicate of a later tool result]')
+        ->and($prompt->messages[6])->toBe($messages[6])          // the step in flight, spared: the newest copy of its body
+        // An older identical body is a duplicate marker; another becomes a stub of its call.
+        ->and($prompt->messages[2]->parts[0]->content[0]->text)->toBe('[Duplicate tool output — same content as a more recent call]')
+        ->and($prompt->messages[4]->parts[0]->content[0]->text)->toBe('[read_file] path=src/b.php (1,013 chars result) FAILED: no such file')
+        ->and($prompt->messages[4]->parts[0]->error)->toBeTrue()
         ->and($compact->last())->not->toBeNull()
         ->and($compact->last()->demoted)->toBe(2)
         ->and($compact->last()->removed)->toBe(0)
         ->and($compact->last()->summary)->toBe('');
 });
 
-it('folds the older part only when demotion alone does not reach the budget, and the summarizer sees the demoted bodies, not the raw ones', function () {
-    $big      = \str_repeat('x', 1000);
-    $messages = [
-        user('the task'),
-        assistant(new ToolCall('c1', 'read', ['n' => 1])),
-        new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
-        assistant(new ToolCall('c2', 'read', ['n' => 2])),
-        new Message(Role::User, [new ToolResult('c2', [new Text($big)])]),
-        assistant(new ToolCall('c3', 'read', ['n' => 3])),
-        new Message(Role::User, [new ToolResult('c3', [new Text('small result')])]),
-    ];
+it('folds the older part only when demotion alone does not reach the budget, and the summarizer sees the stubs, not the raw bodies', function () {
+    $messages = [user('the task')];
+    for ($i = 1; $i <= 6; ++$i) {
+        $messages[] = assistant(new Text("step $i"), new ToolCall("c$i", 'read_file', ['path' => "f$i.txt"]));
+        $messages[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) $i, 1000))])]);
+    }
     $summarizer = new Summaries();
-    $compact    = new Compact($summarizer, 300, bytesOf(...), keepRecentTokens: 50);
+    $compact    = new Compact($summarizer, 900, bytesOf(...), keepRecentTokens: 50);
     step($compact, $messages);
 
     expect($summarizer->prompts)->toHaveCount(1)
-        ->and($summarizer->asked(0))->not->toContain($big)
-        ->and($summarizer->asked(0))->toContain(\str_repeat('x', 200))
-        ->and($summarizer->asked(0))->toContain('more bytes cleared to save context')
-        ->and($summarizer->asked(0))->toContain('[duplicate of a later tool result]')
-        ->and($compact->last()->demoted)->toBe(2)
+        ->and($summarizer->asked(0))->not->toContain(\str_repeat('1', 300))
+        ->and($summarizer->asked(0))->toContain('[read_file] path=f1.txt (1,000 chars result)')
+        ->and($compact->last()->demoted)->toBeGreaterThan(0)
         ->and($compact->last()->removed)->toBeGreaterThan(0);
 });
 
-it('gives the summarizer the agent\'s reasoning, so a tool result demoted or folded does not lose what the agent read from it', function () {
-    $big      = \str_repeat('y', 1000);
+it('gives the summarizer no reasoning and no inline <think> block of the agent, as Hermes Agent does', function () {
     $messages = [
         user('the task'),
-        assistant(new Reasoning('The metrics file lists 14 servers.'), new ToolCall('c1', 'read', ['n' => 1])),
-        new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
+        assistant(new Reasoning('scratch work'), new Text('<think>more scratch</think>The file lists 14 servers.'), new ToolCall('c1', 'read', ['n' => 1])),
+        new Message(Role::User, [new ToolResult('c1', [new Text('small result')])]),
         assistant(new ToolCall('c2', 'read', ['n' => 2])),
-        new Message(Role::User, [new ToolResult('c2', [new Text('small result')])]),
+        new Message(Role::User, [new ToolResult('c2', [new Text('small result 2')])]),
     ];
     $summarizer = new Summaries();
-    $compact    = new Compact($summarizer, 300, bytesOf(...), keepRecentTokens: 10);
-    step($compact, $messages);
+    step(new Compact($summarizer, 300, bytesOf(...), keepRecentTokens: 10), $messages);
 
     expect($summarizer->prompts)->toHaveCount(1)
-        ->and($summarizer->asked(0))->toContain('[thinking] The metrics file lists 14 servers.')
-        ->and($summarizer->asked(0))->not->toContain($big)
-        ->and($compact->last()->demoted)->toBe(1);
+        ->and($summarizer->asked(0))->toContain("ASSISTANT:\nThe file lists 14 servers.\n[calls read {\"n\":1}]")
+        ->and($summarizer->asked(0))->not->toContain('scratch');
 });
 
-it('bounds a single part\'s text in the summarizer\'s input when it is far larger than demotion would ever reach', function () {
-    $huge       = \str_repeat('k', 5000);                 // the kept-first message: demotion never reaches it
-    $messages   = [user($huge), ...\array_slice(agentic(20), 1)];
+it('bounds a part\'s text and a call\'s arguments in the summarizer\'s input, as Hermes Agent does', function () {
+    $huge       = \str_repeat('k', 7000);                 // the kept-first message: demotion never reaches it
+    $messages   = [user($huge), assistant(new ToolCall('c0', 'write_file', ['content' => \str_repeat('w', 2000)])), new Message(Role::User, [new ToolResult('c0', [new Text('ok')])]), ...\array_slice(agentic(20), 1)];
     $summarizer = new Summaries();
-    step(new Compact($summarizer, 11000, bytesOf(...), keepFirst: 1), $messages);
+    step(new Compact($summarizer, 15000, bytesOf(...), keepFirst: 1), $messages);
     expect($summarizer->asked(0))->not->toContain($huge)
-        ->and($summarizer->asked(0))->toContain(\str_repeat('k', 3000))
-        ->and($summarizer->asked(0))->toContain('bytes elided');
+        ->and($summarizer->asked(0))->toContain(\str_repeat('k', 4000) . "\n[…1,500 bytes elided…]\n" . \str_repeat('k', 1500) . "\n")
+        ->and($summarizer->asked(0))->toContain('[calls write_file {"content":"' . \str_repeat('w', 1200 - 12) . '...]')
+        ->and($summarizer->asked(0))->not->toContain(\str_repeat('w', 1200));
 });
 
 it('strips a stray <think> block from the summarizer\'s checkpoint text', function () {
@@ -308,7 +294,7 @@ it('reuses the checkpoint while the conversation fits, and updates it with what 
     $third    = step($compact, $messages);
     $update   = $summarizer->asked(1);
     expect($summarizer->prompts)->toHaveCount(2)
-        ->and($update)->toContain("The current checkpoint:\n\nS1\n\nThe messages since the checkpoint, to fold into it:\n\nASSISTANT:\n[thinking] thinking 5\n[calls read {\"n\":5}]")
+        ->and($update)->toContain("The current checkpoint:\n\nS1\n\nThe messages since the checkpoint, to fold into it:\n\nASSISTANT:\n[calls read {\"n\":5}]")
         ->and($update)->toEndWith('Update the checkpoint: keep every fact, source and decision it holds in the same detail, record what the new messages finished as done, and add what they establish. Write the whole updated checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.')
         ->and($update)->not->toContain('[calls read {"n":4}]')
         ->and($update)->not->toContain('[calls read {"n":9}]')
@@ -331,7 +317,7 @@ it('never touches the system prompt or the first keepFirst messages, and keeps a
         ->and($prompt->messages[3]->parts[0]->text)->toContain('[A checkpoint of the earlier conversation')
         ->and(bytesOf($prompt))->toBeLessThanOrEqual(1500)
         // The kept call and its result are context for the summarizer, not what it folds.
-        ->and(\explode('The messages to fold', $summarizer->asked(0))[1])->not->toContain(\str_repeat('1', 300));
+        ->and(\explode('The messages to fold', $summarizer->asked(0))[1])->not->toContain(\str_repeat('1', 200));
 });
 
 it('compacts inside a run: the model sees the checkpoint, the run keeps every message, and the compaction is logged', function () {
@@ -343,7 +329,7 @@ it('compacts inside a run: the model sees the checkpoint, the run keeps every me
             $this->lines[] = [$level, $message, $context];
         }
     };
-    $read = tool('read', fn (array $in) => Harness\Result::text(\str_repeat('x', 400)), new Harness\Hints(readOnly: true));
+    $read = tool('read', fn (array $in) => Harness\Result::text(\str_repeat('x', 200)), new Harness\Hints(readOnly: true));
     // No usage reported, so the counter is not calibrated.
     $quiet = fn (array $deltas) => \array_values(\array_filter($deltas, fn ($d) => !$d instanceof Harness\Usage));
     $model = new FakeModel($quiet(calls(['c1', 'read', []])), $quiet(calls(['c2', 'read', []])), $quiet(calls(['c3', 'read', []])), $quiet(calls(['c4', 'read', []])), $quiet(says('done')));
@@ -531,7 +517,7 @@ it('serves several conversations from one instance, each its own checkpoint, wit
         $m[0] = $root;
         foreach ($m as $i => $message) {
             if (Role::User === $message->role && $message->parts[0] instanceof ToolResult) {
-                $m[$i] = new Message(Role::User, [new ToolResult($message->parts[0]->callId, [new Text("$who: " . $message->parts[0]->content[0]->text)])]);
+                $m[$i] = new Message(Role::User, [new ToolResult($message->parts[0]->callId, [new Text("$who: " . \substr($message->parts[0]->content[0]->text, 5))])]);
             }
         }
 
@@ -593,8 +579,8 @@ it('compacts two conversations at once on one instance, each with its own checkp
     $compact   = new Compact($summarizer, 2000, bytesOf(...));
     $a         = agentic(5);
     $b         = agentic(5);
-    $a[2]      = new Message(Role::User, [new ToolResult('c1', [new Text('from a ' . \str_repeat('1', 300))])]);
-    $b[2]      = new Message(Role::User, [new ToolResult('c1', [new Text('from b ' . \str_repeat('1', 300))])]);
+    $a[2]      = new Message(Role::User, [new ToolResult('c1', [new Text('from a ' . \str_repeat('1', 150))])]);
+    $b[2]      = new Message(Role::User, [new ToolResult('c1', [new Text('from b ' . \str_repeat('1', 150))])]);
     [$pa, $pb] = \fiber\run(fn () => \fiber\await_all([\fiber\go(fn () => step($compact, $a)), \fiber\go(fn () => step($compact, $b))]));
     expect($pa->messages[1]->parts[0]->text)->toEndWith('checkpoint of a')
         ->and($pb->messages[1]->parts[0]->text)->toEndWith('checkpoint of b')

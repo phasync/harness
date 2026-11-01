@@ -246,17 +246,16 @@
   secrets out, and writes finished work as completed past-tense facts.
 - **`Compact` demotes old tool results first**, a cheap tier tried before any summarizer call, as
   Hermes Agent's `_prune_old_tool_results` does: within the part a fold would otherwise cover, a
-  `ToolResult` of 500 bytes or more becomes a bounded excerpt, and an identical body kept more
-  recently becomes a one-line duplicate marker (the newest copy stays whole); a `ToolCall`'s
+  `ToolResult` over 200 bytes becomes a one-line stub of its call (`[read_file] path=src/a.php
+  (5,120 chars result)`, with the first line of an error), and an identical body that comes again
+  later becomes a duplicate marker (the newest copy stays whole); a `ToolCall`'s
   arguments are never rewritten, and the step in flight is never touched. Only when this does not
   bring the prompt under budget does the summarizer fold the older part, and it then sees whatever
   demotion left there, not the raw bodies. `Compaction::$demoted` reports how many results this
-  reached. Also after Hermes: the summarizer's input now carries `Reasoning` (as `[thinking] ...`,
-  so a model that writes its reading of a tool result only in its reasoning does not lose it once
-  that result is demoted or folded away, previously dropped outright), a single rendered part is
-  elided past 4,000 bytes as a safety net for what demotion does not reach, and a stray
-  `<think>...</think>` block is stripped from the summarizer's own checkpoint text (keeping the
-  whole answer when stripping would leave nothing), as Hermes strips it from its summary output.
+  reached. Also after Hermes: a `<think>...</think>` block is stripped from the agent's text the
+  summarizer reads and from the checkpoint it writes, a part's text over 6,000 bytes reaches the
+  summarizer as its first 4,000 and last 1,500, and a call's arguments over 1,500 bytes as their
+  first 1,200.
 
 ### Changed (breaking)
 

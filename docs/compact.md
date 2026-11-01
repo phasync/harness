@@ -88,10 +88,11 @@ Before any side call, a cheap tier tries to shrink the prompt on its own, as Her
 `_prune_old_tool_results` does. Within the same older part a fold would otherwise cover (between the
 kept-first messages and the step in flight):
 
-- a `ToolResult` of 500 bytes or more becomes its first 200 bytes with a note of how many more were
-  cleared;
-- an identical body that was already kept at a later index (closer to the step in flight) becomes a
-  one-line duplicate marker instead: the newest copy of a repeated result stays whole;
+- a `ToolResult` over 200 bytes becomes one line naming the call that made it, its first two
+  arguments and the result's size, `[read_file] path=src/a.php (5,120 chars result)`, and for an
+  error also its first line (`... FAILED: no such file`);
+- a body that appears again later in the conversation becomes `[Duplicate tool output — same
+  content as a more recent call]` instead: the newest copy of a repeated result stays whole;
 - a `ToolCall`'s arguments are never rewritten, and a result holding anything but text (an image, say)
   is left alone, since it cannot be shrunk by text.
 
@@ -110,11 +111,11 @@ them)", the run's system text when there is one; "The start of the conversation,
 keeps in full (context only)", the kept first messages; then either "The messages to fold into a
 new checkpoint" or "The current checkpoint" and "The messages since the checkpoint, to fold into
 it". Messages are rendered as `USER:`/`ASSISTANT:` text, tool calls as `[calls name {json}]`,
-results as `[result]` or `[error]` and their text; `Reasoning` is rendered too, as `[thinking] ...`,
-so a model that writes its reading of a tool result only in its reasoning does not lose it once that
-result is demoted or folded away; media and references are named, not sent. A single rendered part
-over 4,000 bytes is elided to its first 3,000 and last 500, a safety net for text demotion does not
-reach (the kept-first context, a result just under the demotion threshold). Any `Model` can
+results as `[result]` or `[error]` and their text; media and references are named, not sent. As in
+Hermes Agent, the agent's reasoning, and a `<think>...</think>` block in its text, are left out: they
+are scratch work, and the summarizer could keep them as fact. What the agent concluded from a result
+is in what it wrote and did next. A part's text over 6,000 bytes keeps its first 4,000 and last
+1,500, and a call's arguments over 1,500 bytes their first 1,200. Any `Model` can
 summarize; a smaller one is the usual choice.
 
 A model that reasons inline instead of in a separate `Reasoning` part may leave a

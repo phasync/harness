@@ -55,9 +55,9 @@ use Psr\Log\NullLogger;
  *
  * Before any side call, a cheap tier tries to shrink the prompt on its own, as Hermes Agent's
  * `_prune_old_tool_results` does: within the same older part a fold would otherwise cover, a
- * `ToolResult` of `PRUNE_MIN_CHARS` bytes or more becomes its first `DEMOTE_KEEP_CHARS` bytes with
- * a note of how much was cut, or, when an identical body appears again closer to the step in
- * flight, a one-line duplicate marker; the newest copy of a repeated result stays whole. A
+ * `ToolResult` over `PRUNE_MIN_CHARS` bytes becomes a one-line stub naming the call (`[read_file]
+ * path=src/a.php (5,120 chars result)`), or, when an identical body appears again closer to the
+ * step in flight, a duplicate marker; the newest copy of a repeated result stays whole. A
  * `ToolCall`'s arguments are never rewritten, and the step in flight is never touched. Only when
  * this does not bring the prompt under budget does the summarizer fold the older part, and it then
  * sees whatever demotion left there. `last()->demoted` is how many results this reached; it is
@@ -111,18 +111,17 @@ final class Compact implements ModelMiddleware
     /** The shares of the budget a prompt the provider rejected as too long is compacted to, in turn. */
     private const OVERFLOW = [0.85, 0.70, 0.50, 0.35];
 
-    /** A `ToolResult` under this many bytes is not worth demoting (Hermes Agent's `_PRUNE_MIN_CHARS`). */
-    private const PRUNE_MIN_CHARS = 500;
+    /** A `ToolResult` of this many bytes or fewer is not worth demoting (Hermes Agent's `_PRUNE_MIN_CHARS`). */
+    private const PRUNE_MIN_CHARS = 200;
 
-    /** How many bytes of a demoted `ToolResult` survive, from its start. */
-    private const DEMOTE_KEEP_CHARS = 200;
-
-    /** A single rendered part over this many bytes is elided in the summarizer's input: a safety
-     * net for what demotion does not reach (the kept-first context, a result just under
-     * PRUNE_MIN_CHARS). RENDER_HEAD from the start and RENDER_TAIL from the end survive. */
-    private const RENDER_MAX  = 4000;
-    private const RENDER_HEAD = 3000;
-    private const RENDER_TAIL = 500;
+    /** A part's text over CONTENT_MAX bytes reaches the summarizer as its first CONTENT_HEAD and
+     * last CONTENT_TAIL bytes, and a tool call's arguments over ARGS_MAX as their first ARGS_HEAD
+     * (Hermes Agent's `_CONTENT_MAX` and `_TOOL_ARGS_MAX`). */
+    private const CONTENT_MAX  = 6000;
+    private const CONTENT_HEAD = 4000;
+    private const CONTENT_TAIL = 1500;
+    private const ARGS_MAX     = 1500;
+    private const ARGS_HEAD    = 1200;
 
     /** @var \Closure(Prompt): int */
     private readonly \Closure $count;
@@ -581,18 +580,19 @@ final class Compact implements ModelMiddleware
     }
 
     /**
-     * A message as plain text for the summarizer: text and reasoning (a model that writes its
-     * reading of a tool result only in its reasoning must not lose it once that result is demoted
-     * or folded away), tool calls, and tool results, each bounded by `bound()`.
+     * A message as plain text for the summarizer, as Hermes Agent serializes it: without reasoning,
+     * and without an inline `<think>` block in the agent's text (scratch work wastes the
+     * summarizer's context and risks being kept as fact); a part's text bounded by `bound()`, a
+     * call's arguments by ARGS_MAX.
      */
     private static function render(Message $message): string
     {
         $out = '';
         foreach ($message->parts as $part) {
             $out .= match (true) {
-                $part instanceof Text       => self::bound($part->text) . "\n",
-                $part instanceof Reasoning  => '' === $part->text ? '' : '[thinking] ' . self::bound($part->text) . "\n",
-                $part instanceof ToolCall   => "[calls {$part->name} " . \json_encode((object) $part->input, \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR) . "]\n",
+                $part instanceof Text       => self::bound(Role::User === $message->role ? $part->text : self::stripThink($part->text)) . "\n",
+                $part instanceof Reasoning  => '',
+                $part instanceof ToolCall   => "[calls {$part->name} " . self::args($part) . "]\n",
                 $part instanceof ToolResult => '[' . ($part->error ? 'error' : 'result') . "]\n" . self::render(new Message(Role::User, \array_map(
                     static fn (Part $p) => $p instanceof Text ? new Text(self::bound($p->text)) : $p,
                     $part->content,
@@ -605,26 +605,29 @@ final class Compact implements ModelMiddleware
         return '' === $out ? '' : (Role::User === $message->role ? 'USER' : 'ASSISTANT') . ":\n$out\n";
     }
 
-    /**
-     * `$text`, its middle elided when it is over RENDER_MAX bytes: RENDER_HEAD bytes from the
-     * start and RENDER_TAIL from the end survive. A safety net, in the summarizer's input, for text
-     * the demotion tier does not reach (the kept-first context, a tool result just under
-     * PRUNE_MIN_CHARS).
-     */
+    /** `$text` with its middle elided when it is over CONTENT_MAX bytes. */
     private static function bound(string $text): string
     {
-        if (\strlen($text) <= self::RENDER_MAX) {
+        if (\strlen($text) <= self::CONTENT_MAX) {
             return $text;
         }
 
-        return \substr($text, 0, self::RENDER_HEAD) . "\n[\xe2\x80\xa6" . \number_format(\strlen($text) - self::RENDER_HEAD - self::RENDER_TAIL) . " bytes elided\xe2\x80\xa6]\n" . \substr($text, -self::RENDER_TAIL);
+        return \mb_strcut($text, 0, self::CONTENT_HEAD) . "\n[\xe2\x80\xa6" . \number_format(\strlen($text) - self::CONTENT_HEAD - self::CONTENT_TAIL) . " bytes elided\xe2\x80\xa6]\n" . \mb_strcut($text, \strlen($text) - self::CONTENT_TAIL);
+    }
+
+    /** A tool call's arguments as JSON, cut to their first ARGS_HEAD bytes when over ARGS_MAX. */
+    private static function args(ToolCall $call): string
+    {
+        $json = \json_encode((object) $call->input, \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR);
+
+        return \strlen($json) > self::ARGS_MAX ? \mb_strcut($json, 0, self::ARGS_HEAD) . '...' : $json;
     }
 
     /**
-     * The summarizer's own output with a `<think>...</think>` block removed, as Hermes Agent does:
-     * a model that reasons inline, rather than in a separate `Reasoning` part, must not leave its
-     * scratch work in the checkpoint. The original is kept whole when stripping would leave
-     * nothing, so a reply that is only a think block is not mistaken for an empty one.
+     * `$text` with `<think>...</think>` blocks removed, as Hermes Agent strips them from the
+     * agent's text it summarizes and from the summary itself. The original is kept whole when
+     * stripping would leave nothing, so a reply that is only a think block is not mistaken for an
+     * empty one.
      */
     private static function stripThink(string $text): string
     {
@@ -635,15 +638,12 @@ final class Compact implements ModelMiddleware
 
     /**
      * `$messages` with old `ToolResult` bodies demoted, from index `$from` up to (not including)
-     * `$until`: the cheap first tier, tried before any summarizer call (see the class docblock). A
-     * result of `PRUNE_MIN_CHARS` bytes or more becomes its first `DEMOTE_KEEP_CHARS` bytes with a
-     * note of how much was cut, or, when an identical body was already kept at a later index
-     * (closer to the step in flight), a one-line duplicate marker: the newest copy of a repeated
-     * result stays whole. A `ToolCall`'s arguments, anything outside the range, and a result under
-     * the threshold or holding anything but `Text` (a `Media` part cannot be shrunk by text) are
-     * left as they are. `$count` is set to how many `ToolResult` parts were changed; an unmodified
-     * message keeps its original object, so a round that changes nothing returns `$messages`
-     * unchanged, identity included.
+     * `$until`, as Hermes Agent's `_prune_old_tool_results` does (see the class docblock). A result
+     * of `Text` alone over `PRUNE_MIN_CHARS` bytes becomes a duplicate marker when an identical body
+     * comes later in the conversation (the newest copy stays whole), else a one-line stub of the
+     * call that made it. A `ToolCall`'s arguments, anything outside the range, and a result holding
+     * anything but `Text` are left as they are. `$count` is set to how many results were changed;
+     * an unmodified message keeps its original object.
      *
      * @param list<Message> $messages
      *
@@ -653,23 +653,33 @@ final class Compact implements ModelMiddleware
     {
         $count = 0;
         $seen  = [];
+        $calls = [];
+        foreach ($messages as $i => $message) {
+            foreach ($message->parts as $part) {
+                if ($part instanceof ToolCall) {
+                    $calls[$part->id] = $part;
+                } elseif ($i >= $until && $part instanceof ToolResult && null !== ($text = self::resultText($part))) {
+                    $seen[\hash('xxh128', $text)] = true;
+                }
+            }
+        }
         for ($i = \min($until, \count($messages)) - 1; $i >= $from; --$i) {
             $parts   = $messages[$i]->parts;
             $changed = false;
             foreach ($parts as $j => $part) {
-                if (!$part instanceof ToolResult || null === ($text = self::resultText($part)) || \strlen($text) < self::PRUNE_MIN_CHARS) {
+                if (!$part instanceof ToolResult || null === ($text = self::resultText($part)) || \strlen($text) <= self::PRUNE_MIN_CHARS) {
                     continue;
                 }
                 $hash      = \hash('xxh128', $text);
-                $parts[$j] = isset($seen[$hash])
-                    ? new ToolResult($part->callId, [new Text('[duplicate of a later tool result]')], $part->error)
-                    : new ToolResult($part->callId, [new Text(self::excerpt($text))], $part->error);
+                $parts[$j] = new ToolResult($part->callId, [new Text(isset($seen[$hash])
+                    ? "[Duplicate tool output \xe2\x80\x94 same content as a more recent call]"
+                    : self::stub($calls[$part->callId] ?? null, $text, $part->error))], $part->error);
                 $seen[$hash] = true;
                 $changed     = true;
+                ++$count;
             }
             if ($changed) {
                 $messages[$i] = new Message($messages[$i]->role, $parts);
-                ++$count;
             }
         }
 
@@ -690,10 +700,20 @@ final class Compact implements ModelMiddleware
         return $text;
     }
 
-    /** The first `DEMOTE_KEEP_CHARS` bytes of `$text`, with a note of how many more were cut. */
-    private static function excerpt(string $text): string
+    /**
+     * A demoted result as one line, as Hermes Agent's generic `_summarize_tool_result`: the tool,
+     * its first two arguments cut to 40 bytes, the result's size, and, for an error, its first line.
+     */
+    private static function stub(?ToolCall $call, string $text, bool $error): string
     {
-        return \substr($text, 0, self::DEMOTE_KEEP_CHARS) . "\n[\xe2\x80\xa6" . \number_format(\strlen($text) - self::DEMOTE_KEEP_CHARS) . ' more bytes cleared to save context]';
+        $args = '';
+        foreach (\array_slice($call->input ?? [], 0, 2, true) as $key => $value) {
+            $value = \is_string($value) ? $value : \json_encode($value, \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR);
+            $args .= " $key=" . \mb_strcut($value, 0, 40);
+        }
+
+        return '[' . ($call->name ?? 'unknown') . "]$args (" . \number_format(\strlen($text)) . ' chars result)'
+            . ($error ? ' FAILED: ' . \mb_strcut(\strtok($text, "\n"), 0, 120) : '');
     }
 
     private static function hasResults(Message $message): bool

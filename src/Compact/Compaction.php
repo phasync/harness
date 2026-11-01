@@ -17,7 +17,7 @@ use Harness\FinishReason;
  * the server cut the prompt. On such a step that compacted nothing, `removed` is 0, `summary` empty
  * and `before` and `after` the calibrated count. `demoted` is how many `ToolResult` parts
  * `Compact`'s cheap first tier (`demote()`, before any summarizer call, as Hermes Agent's
- * `_prune_old_tool_results` does) shrank to a bounded excerpt or a duplicate marker this step; 0
+ * `_prune_old_tool_results` does) shrank to a one-line stub or a duplicate marker this step; 0
  * when none qualified. It is set whether or not a checkpoint was also made: demotion and folding
  * are independent, and either can happen alone.
  */
