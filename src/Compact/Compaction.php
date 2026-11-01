@@ -15,7 +15,11 @@ use Harness\FinishReason;
  * one replaced, null when it replaced none; `finish` is how the side call that wrote the summary
  * ended. `truncatedUpstream` is true when the provider reported under 70 % of the calibrated count:
  * the server cut the prompt. On such a step that compacted nothing, `removed` is 0, `summary` empty
- * and `before` and `after` the calibrated count.
+ * and `before` and `after` the calibrated count. `demoted` is how many `ToolResult` parts
+ * `Compact`'s cheap first tier (`demote()`, before any summarizer call, as Hermes Agent's
+ * `_prune_old_tool_results` does) shrank to a bounded excerpt or a duplicate marker this step; 0
+ * when none qualified. It is set whether or not a checkpoint was also made: demotion and folding
+ * are independent, and either can happen alone.
  */
 final readonly class Compaction
 {
@@ -31,6 +35,7 @@ final readonly class Compaction
         public float $offset = 0.0,
         public ?FinishReason $finish = null,
         public bool $truncatedUpstream = false,
+        public int $demoted = 0,
     ) {
     }
 }

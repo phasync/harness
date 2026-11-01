@@ -730,7 +730,9 @@ it('does not report the summarizer\'s own ContextTooLong as the conversation\'s'
     $summarizer = new FakeModel(static function () {
         throw new ModelException(ErrorKind::ContextTooLong, "the summarizer's own context window is too small for this chunk");
     });
-    $compact   = new Compact($summarizer, budgetTokens: 200, keepFirst: 0, keepRecentTokens: 5);
+    // Small enough that Compact's cheap tool-result-demotion tier (tried first, see Compact's
+    // docblock) cannot bring the prompt under it alone, so the summarizer is still called.
+    $compact   = new Compact($summarizer, budgetTokens: 30, keepFirst: 0, keepRecentTokens: 5);
     $mainModel = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
     $run       = new Harness\Run($mainModel, new Tools(), messages: $messages, middleware: [$compact]);
 
@@ -767,7 +769,9 @@ it('reports a second collapsed checkpoint as the turn\'s MiddlewareError, not Mo
     // Two replies, both with no Text part at all: summarize() sees '' twice and fails loudly
     // on the second attempt, never silently folding an empty checkpoint.
     $summarizer = new FakeModel([new Finish(FinishReason::Stop)], [new Finish(FinishReason::Stop)]);
-    $compact    = new Compact($summarizer, budgetTokens: 200, keepFirst: 0, keepRecentTokens: 5);
+    // Small enough that Compact's cheap tool-result-demotion tier (tried first, see Compact's
+    // docblock) cannot bring the prompt under it alone, so the summarizer is still called.
+    $compact    = new Compact($summarizer, budgetTokens: 30, keepFirst: 0, keepRecentTokens: 5);
     $mainModel  = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
     $run        = new Harness\Run($mainModel, new Tools(), messages: $messages, middleware: [$compact]);
 

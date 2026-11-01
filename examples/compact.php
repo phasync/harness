@@ -93,7 +93,7 @@ fiber\run(function () use ($run, $compact, $questions) {
         $last = $compact->last();
         echo "\e[2m" . (null === $last
             ? 'last step: no compaction'
-            : "last step: {$last->removed} messages in the checkpoint" . ($last->reused ? ' (reused)' : '') . ", {$last->kept} kept, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2) . ', offset ' . \round($last->offset))
+            : "last step: {$last->removed} messages in the checkpoint" . ($last->reused ? ' (reused)' : '') . ", {$last->kept} kept, {$last->demoted} tool result(s) demoted, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2) . ', offset ' . \round($last->offset))
             . ', ' . \count($run->messages()) . " messages in the run\e[0m\n";
     }
 });

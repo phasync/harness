@@ -244,6 +244,19 @@
   sent is not repeated. Also after Hermes: the summarizer treats the conversation as material, not
   instructions (a command in a fetched page or tool result is recorded, never followed), leaves
   secrets out, and writes finished work as completed past-tense facts.
+- **`Compact` demotes old tool results first**, a cheap tier tried before any summarizer call, as
+  Hermes Agent's `_prune_old_tool_results` does: within the part a fold would otherwise cover, a
+  `ToolResult` of 500 bytes or more becomes a bounded excerpt, and an identical body kept more
+  recently becomes a one-line duplicate marker (the newest copy stays whole); a `ToolCall`'s
+  arguments are never rewritten, and the step in flight is never touched. Only when this does not
+  bring the prompt under budget does the summarizer fold the older part, and it then sees whatever
+  demotion left there, not the raw bodies. `Compaction::$demoted` reports how many results this
+  reached. Also after Hermes: the summarizer's input now carries `Reasoning` (as `[thinking] ...`,
+  so a model that writes its reading of a tool result only in its reasoning does not lose it once
+  that result is demoted or folded away, previously dropped outright), a single rendered part is
+  elided past 4,000 bytes as a safety net for what demotion does not reach, and a stray
+  `<think>...</think>` block is stripped from the summarizer's own checkpoint text (keeping the
+  whole answer when stripping would leave nothing), as Hermes strips it from its summary output.
 
 ### Changed (breaking)
 

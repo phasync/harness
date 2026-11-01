@@ -82,6 +82,26 @@ When the prompt counts over the budget:
 Only the prompt changes. `Run::messages()`, `Ended::$appended` and a transcript keep every message.
 A continued prompt (`Prompt::$continue`) is handed on as one; its last message is never folded.
 
+## Demoting old tool results
+
+Before any side call, a cheap tier tries to shrink the prompt on its own, as Hermes Agent's
+`_prune_old_tool_results` does. Within the same older part a fold would otherwise cover (between the
+kept-first messages and the step in flight):
+
+- a `ToolResult` of 500 bytes or more becomes its first 200 bytes with a note of how many more were
+  cleared;
+- an identical body that was already kept at a later index (closer to the step in flight) becomes a
+  one-line duplicate marker instead: the newest copy of a repeated result stays whole;
+- a `ToolCall`'s arguments are never rewritten, and a result holding anything but text (an image, say)
+  is left alone, since it cannot be shrunk by text.
+
+When that alone brings the prompt under budget, it goes on with no checkpoint and no side call at
+all. Only when it does not is the older part folded as above, and the summarizer then sees whatever
+demotion left there, not the raw bodies. Demotion is recomputed from the conversation every round
+(`Compact` never rewrites `Run::messages()`), so it is deterministic for the same messages: a reused
+checkpoint's prefix, and a provider's prompt cache, see the same bytes again. `last()->demoted`
+counts how many results this reached, set whether or not a checkpoint was also made.
+
 ## The side call
 
 It has no tools, `$summarizerOptions` (never the step's options) and the turn's `Cancel`. Its one
@@ -90,8 +110,17 @@ them)", the run's system text when there is one; "The start of the conversation,
 keeps in full (context only)", the kept first messages; then either "The messages to fold into a
 new checkpoint" or "The current checkpoint" and "The messages since the checkpoint, to fold into
 it". Messages are rendered as `USER:`/`ASSISTANT:` text, tool calls as `[calls name {json}]`,
-results as `[result]` or `[error]` and their text; `Reasoning` is left out; media and references are
-named, not sent. Any `Model` can summarize; a smaller one is the usual choice.
+results as `[result]` or `[error]` and their text; `Reasoning` is rendered too, as `[thinking] ...`,
+so a model that writes its reading of a tool result only in its reasoning does not lose it once that
+result is demoted or folded away; media and references are named, not sent. A single rendered part
+over 4,000 bytes is elided to its first 3,000 and last 500, a safety net for text demotion does not
+reach (the kept-first context, a result just under the demotion threshold). Any `Model` can
+summarize; a smaller one is the usual choice.
+
+A model that reasons inline instead of in a separate `Reasoning` part may leave a
+`<think>...</think>` block in its answer; Compact strips it from the checkpoint text, as Hermes
+Agent does to its own summary output, keeping the whole answer only when stripping would leave
+nothing.
 
 A checkpoint that comes back empty, cut at the output token limit (`FinishReason::Length`), or
 shorter than a quarter of the checkpoint it updates, is a collapse: asked for once more (logged as a
@@ -172,9 +201,11 @@ an instance only among conversations with the same model and fixed part.
 ## Seeing it
 
 The core has no event for compaction. Each new checkpoint is logged at `info` (messages removed,
-size, budget, counter ratio and offset) and in full at `debug`. `last(): ?Compaction` tells what the
-last step did: `removed`, `kept` (messages after the checkpoint, verbatim), `summary` (the
-checkpoint text), `before` and `after` (calibrated tokens), `reused`, `previousSummaryBytes` (the
-checkpoint this one updated, null for the first), `ratio`, `offset`, `finish` and
-`truncatedUpstream`. It is null when the step's prompt went on unchanged and was not cut upstream.
-[`examples/compact.php`](../examples/compact.php) prints both.
+size, budget, counter ratio and offset) and in full at `debug`; demotion alone, when it brings the
+prompt under budget without one, is logged at `info` too. `last(): ?Compaction` tells what the last
+step did: `removed`, `kept` (messages after the checkpoint, verbatim), `summary` (the checkpoint
+text), `before` and `after` (calibrated tokens), `reused`, `previousSummaryBytes` (the checkpoint
+this one updated, null for the first), `ratio`, `offset`, `finish`, `truncatedUpstream` and
+`demoted` (how many `ToolResult`s the cheap tier shrank this step, 0 when none qualified, set
+whether or not a checkpoint was also made). It is null when the step's prompt went on unchanged and
+was not cut upstream. [`examples/compact.php`](../examples/compact.php) prints both.

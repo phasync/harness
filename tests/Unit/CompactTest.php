@@ -128,7 +128,115 @@ it('folds everything older than the step in flight into a checkpoint when the re
         ->and($text)->toEndWith('Write the checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.')
         ->and($text)->toContain('[calls read {"n":4}]')->toContain(\str_repeat('4', 300))
         ->and($text)->not->toContain('[calls read {"n":5}]')
-        ->and($text)->not->toContain('thinking');
+        // The agent's reasoning goes along with the calls it folds (so a model that writes its
+        // reading of a tool result only in its reasoning does not lose it once the result is
+        // folded away), but not the reasoning of the step still in flight.
+        ->and($text)->toContain('[thinking] thinking 4')
+        ->and($text)->not->toContain('thinking 5');
+});
+
+it('demotes old, large tool results to bounded stubs before calling the summarizer at all, sparing the step in flight', function () {
+    $big      = \str_repeat('x', 1000);
+    $messages = [
+        user('the task'),
+        assistant(new ToolCall('c1', 'read', ['n' => 1])),
+        new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
+        assistant(new ToolCall('c2', 'read', ['n' => 2])),
+        new Message(Role::User, [new ToolResult('c2', [new Text($big)])]),
+        assistant(new ToolCall('c3', 'read', ['n' => 3])),
+        new Message(Role::User, [new ToolResult('c3', [new Text('small result')])]),
+    ];
+    $summaries = new Summaries();
+    $compact   = new Compact($summaries, 1200, bytesOf(...), keepRecentTokens: 100);
+    $prompt    = step($compact, $messages);
+
+    expect($summaries->prompts)->toHaveCount(0)                  // demotion alone was enough
+        ->and($prompt->messages)->toHaveCount(7)
+        ->and($prompt->messages[0])->toBe($messages[0])          // kept-first, untouched
+        ->and($prompt->messages[1])->toBe($messages[1])          // a ToolCall's arguments are never rewritten
+        ->and($prompt->messages[3])->toBe($messages[3])
+        ->and($prompt->messages[5])->toBe($messages[5])
+        ->and($prompt->messages[6])->toBe($messages[6])          // the step in flight, spared entirely
+        // The newer of two identical results stays as a bounded excerpt...
+        ->and($prompt->messages[4]->parts[0]->content[0]->text)->toStartWith(\str_repeat('x', 200))
+        ->and($prompt->messages[4]->parts[0]->content[0]->text)->not->toBe($big)
+        ->and($prompt->messages[4]->parts[0]->content[0]->text)->toContain('more bytes cleared to save context')
+        // ...and the older identical one becomes a one-line duplicate marker, not a second excerpt.
+        ->and($prompt->messages[2]->parts[0]->content[0]->text)->toBe('[duplicate of a later tool result]')
+        ->and($compact->last())->not->toBeNull()
+        ->and($compact->last()->demoted)->toBe(2)
+        ->and($compact->last()->removed)->toBe(0)
+        ->and($compact->last()->summary)->toBe('');
+});
+
+it('folds the older part only when demotion alone does not reach the budget, and the summarizer sees the demoted bodies, not the raw ones', function () {
+    $big      = \str_repeat('x', 1000);
+    $messages = [
+        user('the task'),
+        assistant(new ToolCall('c1', 'read', ['n' => 1])),
+        new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
+        assistant(new ToolCall('c2', 'read', ['n' => 2])),
+        new Message(Role::User, [new ToolResult('c2', [new Text($big)])]),
+        assistant(new ToolCall('c3', 'read', ['n' => 3])),
+        new Message(Role::User, [new ToolResult('c3', [new Text('small result')])]),
+    ];
+    $summarizer = new Summaries();
+    $compact    = new Compact($summarizer, 300, bytesOf(...), keepRecentTokens: 50);
+    step($compact, $messages);
+
+    expect($summarizer->prompts)->toHaveCount(1)
+        ->and($summarizer->asked(0))->not->toContain($big)
+        ->and($summarizer->asked(0))->toContain(\str_repeat('x', 200))
+        ->and($summarizer->asked(0))->toContain('more bytes cleared to save context')
+        ->and($summarizer->asked(0))->toContain('[duplicate of a later tool result]')
+        ->and($compact->last()->demoted)->toBe(2)
+        ->and($compact->last()->removed)->toBeGreaterThan(0);
+});
+
+it('gives the summarizer the agent\'s reasoning, so a tool result demoted or folded does not lose what the agent read from it', function () {
+    $big      = \str_repeat('y', 1000);
+    $messages = [
+        user('the task'),
+        assistant(new Reasoning('The metrics file lists 14 servers.'), new ToolCall('c1', 'read', ['n' => 1])),
+        new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
+        assistant(new ToolCall('c2', 'read', ['n' => 2])),
+        new Message(Role::User, [new ToolResult('c2', [new Text('small result')])]),
+    ];
+    $summarizer = new Summaries();
+    $compact    = new Compact($summarizer, 300, bytesOf(...), keepRecentTokens: 10);
+    step($compact, $messages);
+
+    expect($summarizer->prompts)->toHaveCount(1)
+        ->and($summarizer->asked(0))->toContain('[thinking] The metrics file lists 14 servers.')
+        ->and($summarizer->asked(0))->not->toContain($big)
+        ->and($compact->last()->demoted)->toBe(1);
+});
+
+it('bounds a single part\'s text in the summarizer\'s input when it is far larger than demotion would ever reach', function () {
+    $huge       = \str_repeat('k', 5000);                 // the kept-first message: demotion never reaches it
+    $messages   = [user($huge), ...\array_slice(agentic(20), 1)];
+    $summarizer = new Summaries();
+    step(new Compact($summarizer, 11000, bytesOf(...), keepFirst: 1), $messages);
+    expect($summarizer->asked(0))->not->toContain($huge)
+        ->and($summarizer->asked(0))->toContain(\str_repeat('k', 3000))
+        ->and($summarizer->asked(0))->toContain('bytes elided');
+});
+
+it('strips a stray <think> block from the summarizer\'s checkpoint text', function () {
+    $checkpoint = "<think>scratch work here</think>\n## Goal\nCount the servers.";
+    $compact    = new Compact(new FakeModel(says($checkpoint)), 2000, bytesOf(...));
+    $prompt     = step($compact, agentic(5));
+    expect($prompt->messages[1]->parts[0]->text)->toEndWith("## Goal\nCount the servers.")
+        ->and($prompt->messages[1]->parts[0]->text)->not->toContain('scratch work')
+        ->and($compact->last()->summary)->toBe("## Goal\nCount the servers.");
+});
+
+it('keeps the checkpoint whole when stripping <think> would leave nothing', function () {
+    $onlyThink = '<think>only scratch work, no checkpoint written</think>';
+    $compact   = new Compact(new FakeModel(says($onlyThink)), 2000, bytesOf(...));
+    $prompt    = step($compact, agentic(5));
+    expect($prompt->messages[1]->parts[0]->text)->toEndWith($onlyThink)
+        ->and($compact->last()->summary)->toBe($onlyThink);
 });
 
 it('keeps the most recent keepRecentTokens verbatim, cut on a boundary that keeps tool pairs together', function () {
@@ -200,7 +308,7 @@ it('reuses the checkpoint while the conversation fits, and updates it with what 
     $third    = step($compact, $messages);
     $update   = $summarizer->asked(1);
     expect($summarizer->prompts)->toHaveCount(2)
-        ->and($update)->toContain("The current checkpoint:\n\nS1\n\nThe messages since the checkpoint, to fold into it:\n\nASSISTANT:\n[calls read {\"n\":5}]")
+        ->and($update)->toContain("The current checkpoint:\n\nS1\n\nThe messages since the checkpoint, to fold into it:\n\nASSISTANT:\n[thinking] thinking 5\n[calls read {\"n\":5}]")
         ->and($update)->toEndWith('Update the checkpoint: keep every fact, source and decision it holds in the same detail, record what the new messages finished as done, and add what they establish. Write the whole updated checkpoint. Keep it under 350 words: when it would not fit, shorten the wording and merge entries, but drop no source consulted and no fact.')
         ->and($update)->not->toContain('[calls read {"n":4}]')
         ->and($update)->not->toContain('[calls read {"n":9}]')

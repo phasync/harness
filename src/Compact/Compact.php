@@ -53,6 +53,17 @@ use Psr\Log\NullLogger;
  * second fails the step with a `\RuntimeException`. A round whose checkpoint would not make the
  * prompt smaller is dropped with a warning.
  *
+ * Before any side call, a cheap tier tries to shrink the prompt on its own, as Hermes Agent's
+ * `_prune_old_tool_results` does: within the same older part a fold would otherwise cover, a
+ * `ToolResult` of `PRUNE_MIN_CHARS` bytes or more becomes its first `DEMOTE_KEEP_CHARS` bytes with
+ * a note of how much was cut, or, when an identical body appears again closer to the step in
+ * flight, a one-line duplicate marker; the newest copy of a repeated result stays whole. A
+ * `ToolCall`'s arguments are never rewritten, and the step in flight is never touched. Only when
+ * this does not bring the prompt under budget does the summarizer fold the older part, and it then
+ * sees whatever demotion left there. `last()->demoted` is how many results this reached; it is
+ * recomputed from the conversation every round (`Compact` never rewrites `Run::messages()`), so it
+ * is deterministic for the same messages, keeping the provider's cache prefix stable.
+ *
  * When the provider rejects a prompt as too long (`ErrorKind::ContextTooLong`) before streaming,
  * the step is compacted again to 85 %, 70 %, 50 % and 35 % of the budget and retried, each retry
  * logged, then the error is rethrown.
@@ -99,6 +110,19 @@ final class Compact implements ModelMiddleware
 
     /** The shares of the budget a prompt the provider rejected as too long is compacted to, in turn. */
     private const OVERFLOW = [0.85, 0.70, 0.50, 0.35];
+
+    /** A `ToolResult` under this many bytes is not worth demoting (Hermes Agent's `_PRUNE_MIN_CHARS`). */
+    private const PRUNE_MIN_CHARS = 500;
+
+    /** How many bytes of a demoted `ToolResult` survive, from its start. */
+    private const DEMOTE_KEEP_CHARS = 200;
+
+    /** A single rendered part over this many bytes is elided in the summarizer's input: a safety
+     * net for what demotion does not reach (the kept-first context, a result just under
+     * PRUNE_MIN_CHARS). RENDER_HEAD from the start and RENDER_TAIL from the end survive. */
+    private const RENDER_MAX  = 4000;
+    private const RENDER_HEAD = 3000;
+    private const RENDER_TAIL = 500;
 
     /** @var \Closure(Prompt): int */
     private readonly \Closure $count;
@@ -334,30 +358,45 @@ final class Compact implements ModelMiddleware
                 $cut = $i;
             }
         }
-        $nothing = 'Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize';
-        $segment = $cut > $from ? \array_slice($messages, $from, $cut - $from) : [];
-        if ([] === $segment || (null !== $this->noGain && $this->countMessages($prompt, $segment) <= $this->noGain)) {
-            $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target]);
+        // The cheap first tier, tried before any summarizer call: see the class docblock and `demote()`.
+        $demoted         = 0;
+        $demotedMessages = self::demote($messages, $from, $cut, $demoted);
+        if ($demoted > 0) {
+            $demotedView    = null === $checkpoint ? $demotedMessages : self::view($demotedMessages, $checkpoint);
+            $demotedCounted = ($this->count)(self::with($prompt, $demotedView));
+            $demotedAfter   = $tokens($demotedCounted);
+        } else {
+            $demotedMessages = $messages;
+            $demotedView     = $view;
+            $demotedCounted  = $counted;
+            $demotedAfter    = $after;
+        }
+        if ($demoted > 0 && $demotedAfter <= $target) {
+            $this->log->info('Compact: demoted {demoted} old tool result(s) from {from} to {to} tokens (budget {budget}), without a checkpoint', ['demoted' => $demoted, 'from' => $after, 'to' => $demotedAfter, 'budget' => $target]);
 
-            return null === $checkpoint
-                ? $this->unchanged($prompt, $cal)
-                : $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
+            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted);
+        }
+
+        $nothing = 'Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize';
+        $segment = $cut > $from ? \array_slice($demotedMessages, $from, $cut - $from) : [];
+        if ([] === $segment || (null !== $this->noGain && $this->countMessages($prompt, $segment) <= $this->noGain)) {
+            $this->log->warning($nothing, ['tokens' => $demotedAfter, 'budget' => $target]);
+
+            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted);
         }
         $previous        = null === $checkpoint ? null : \strlen($checkpoint->text);
-        [$text, $finish] = $this->summarize($prompt->system, \array_slice($messages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel, $budget);
+        [$text, $finish] = $this->summarize($prompt->system, \array_slice($demotedMessages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel, $budget);
         $lifted          = null !== $latest && $latest >= $kept && $latest < $cut ? $latest : null;
         $new             = new Checkpoint($hashes[$cut], $cut, $kept, $lifted, $text, $previous, $finish);
-        $next            = self::view($messages, $new);
+        $next            = self::view($demotedMessages, $new);
         $nextCount       = ($this->count)(self::with($prompt, $next));
-        if ($nextCount >= $counted) {
+        if ($nextCount >= $demotedCounted) {
             // Two small messages replaced by a larger checkpoint: keep them, and spend no side
             // call on a part this small again.
             $this->noGain = $this->countMessages($prompt, [new Message(Role::User, [new Text(self::HEADER . $text)])]);
-            $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target, 'summaryBytes' => \strlen($text)]);
+            $this->log->warning($nothing, ['tokens' => $demotedAfter, 'budget' => $target, 'summaryBytes' => \strlen($text)]);
 
-            return null === $checkpoint
-                ? $this->unchanged($prompt, $cal)
-                : $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
+            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted);
         }
         // Store it in place of the checkpoints it supersedes: those of the same conversation.
         $this->state = new State($this->state->calibration, \array_slice([$new, ...\array_filter(
@@ -371,7 +410,26 @@ final class Compact implements ModelMiddleware
             $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target]);
         }
 
-        return $this->served($prompt, $next, $nextCount, $cal, $new, $before, $after, false);
+        return $this->served($prompt, $next, $nextCount, $cal, $new, $before, $after, false, $demoted);
+    }
+
+    /**
+     * Falls back to the demoted view alone, when folding is not possible or not worth it: the
+     * existing checkpoint reused unmodified (demotion alone shrinks the live tail further), or,
+     * with none, the prompt going on demoted but otherwise as submitted. `last()` is null only when
+     * there is neither a checkpoint nor anything demoted: truly nothing changed.
+     *
+     * @param list<Message> $demotedView
+     *
+     * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: ?Compaction}
+     */
+    private function keepDemoted(Prompt $prompt, array $demotedView, int $demotedCounted, ?Calibration $cal, ?Checkpoint $checkpoint, int $before, int $demotedAfter, int $demoted): array
+    {
+        if (null === $checkpoint && 0 === $demoted) {
+            return $this->unchanged($prompt, $cal);
+        }
+
+        return $this->served($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, null !== $checkpoint, $demoted);
     }
 
     /** @return array{0: Prompt, 1: int, 2: ?Calibration, 3: null} */
@@ -383,13 +441,28 @@ final class Compact implements ModelMiddleware
     }
 
     /**
+     * `$checkpoint` is null when demotion alone served the step, with no checkpoint yet.
+     *
      * @param list<Message> $view
      *
      * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: Compaction}
      */
-    private function served(Prompt $prompt, array $view, int $counted, ?Calibration $cal, Checkpoint $checkpoint, int $before, int $after, bool $reused): array
+    private function served(Prompt $prompt, array $view, int $counted, ?Calibration $cal, ?Checkpoint $checkpoint, int $before, int $after, bool $reused, int $demoted = 0): array
     {
-        $this->last = new Compaction($checkpoint->removed(), \count($prompt->messages) - $checkpoint->covered + (null === $checkpoint->lifted ? 0 : 1), $checkpoint->text, $before, $after, $reused, $checkpoint->previousBytes, $cal?->ratio ?? 1.0, $cal?->offset ?? 0.0, $checkpoint->finish);
+        $this->last = new Compaction(
+            $checkpoint?->removed() ?? 0,
+            null === $checkpoint ? \count($prompt->messages) : \count($prompt->messages) - $checkpoint->covered + (null === $checkpoint->lifted ? 0 : 1),
+            $checkpoint?->text ?? '',
+            $before,
+            $after,
+            $reused,
+            $checkpoint?->previousBytes,
+            $cal?->ratio ?? 1.0,
+            $cal?->offset ?? 0.0,
+            $checkpoint?->finish,
+            false,
+            $demoted,
+        );
 
         return [self::with($prompt, $view), $counted, $cal, $this->last];
     }
@@ -485,7 +558,7 @@ final class Compact implements ModelMiddleware
                     $text .= $part->text;
                 }
             }
-            $text   = \trim($text);
+            $text   = self::stripThink(\trim($text));
             $finish = $acc->finish() ?? throw new ModelException(ErrorKind::ModelError, 'The summarizer\'s stream ended without a Finish delta');
             if ('' !== $text && FinishReason::Length !== $finish && (null === $bytes || 4 * \strlen($text) >= $bytes)) {
                 return [$text, $finish];
@@ -507,22 +580,120 @@ final class Compact implements ModelMiddleware
         }
     }
 
-    /** A message as plain text for the summarizer, without reasoning. */
+    /**
+     * A message as plain text for the summarizer: text and reasoning (a model that writes its
+     * reading of a tool result only in its reasoning must not lose it once that result is demoted
+     * or folded away), tool calls, and tool results, each bounded by `bound()`.
+     */
     private static function render(Message $message): string
     {
         $out = '';
         foreach ($message->parts as $part) {
             $out .= match (true) {
-                $part instanceof Text       => $part->text . "\n",
-                $part instanceof Reasoning  => '',
+                $part instanceof Text       => self::bound($part->text) . "\n",
+                $part instanceof Reasoning  => '' === $part->text ? '' : '[thinking] ' . self::bound($part->text) . "\n",
                 $part instanceof ToolCall   => "[calls {$part->name} " . \json_encode((object) $part->input, \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE | \JSON_THROW_ON_ERROR) . "]\n",
-                $part instanceof ToolResult => '[' . ($part->error ? 'error' : 'result') . "]\n" . self::render(new Message(Role::User, $part->content)),
+                $part instanceof ToolResult => '[' . ($part->error ? 'error' : 'result') . "]\n" . self::render(new Message(Role::User, \array_map(
+                    static fn (Part $p) => $p instanceof Text ? new Text(self::bound($p->text)) : $p,
+                    $part->content,
+                ))),
                 $part instanceof Media      => "[{$part->mime}]\n",
                 $part instanceof Reference  => '[' . ($part->title ?? $part->uri) . " <{$part->uri}>]\n",
             };
         }
 
         return '' === $out ? '' : (Role::User === $message->role ? 'USER' : 'ASSISTANT') . ":\n$out\n";
+    }
+
+    /**
+     * `$text`, its middle elided when it is over RENDER_MAX bytes: RENDER_HEAD bytes from the
+     * start and RENDER_TAIL from the end survive. A safety net, in the summarizer's input, for text
+     * the demotion tier does not reach (the kept-first context, a tool result just under
+     * PRUNE_MIN_CHARS).
+     */
+    private static function bound(string $text): string
+    {
+        if (\strlen($text) <= self::RENDER_MAX) {
+            return $text;
+        }
+
+        return \substr($text, 0, self::RENDER_HEAD) . "\n[\xe2\x80\xa6" . \number_format(\strlen($text) - self::RENDER_HEAD - self::RENDER_TAIL) . " bytes elided\xe2\x80\xa6]\n" . \substr($text, -self::RENDER_TAIL);
+    }
+
+    /**
+     * The summarizer's own output with a `<think>...</think>` block removed, as Hermes Agent does:
+     * a model that reasons inline, rather than in a separate `Reasoning` part, must not leave its
+     * scratch work in the checkpoint. The original is kept whole when stripping would leave
+     * nothing, so a reply that is only a think block is not mistaken for an empty one.
+     */
+    private static function stripThink(string $text): string
+    {
+        $stripped = \trim((string) \preg_replace('#<think>.*?</think>#is', '', $text));
+
+        return '' === $stripped ? $text : $stripped;
+    }
+
+    /**
+     * `$messages` with old `ToolResult` bodies demoted, from index `$from` up to (not including)
+     * `$until`: the cheap first tier, tried before any summarizer call (see the class docblock). A
+     * result of `PRUNE_MIN_CHARS` bytes or more becomes its first `DEMOTE_KEEP_CHARS` bytes with a
+     * note of how much was cut, or, when an identical body was already kept at a later index
+     * (closer to the step in flight), a one-line duplicate marker: the newest copy of a repeated
+     * result stays whole. A `ToolCall`'s arguments, anything outside the range, and a result under
+     * the threshold or holding anything but `Text` (a `Media` part cannot be shrunk by text) are
+     * left as they are. `$count` is set to how many `ToolResult` parts were changed; an unmodified
+     * message keeps its original object, so a round that changes nothing returns `$messages`
+     * unchanged, identity included.
+     *
+     * @param list<Message> $messages
+     *
+     * @return list<Message>
+     */
+    private static function demote(array $messages, int $from, int $until, int &$count): array
+    {
+        $count = 0;
+        $seen  = [];
+        for ($i = \min($until, \count($messages)) - 1; $i >= $from; --$i) {
+            $parts   = $messages[$i]->parts;
+            $changed = false;
+            foreach ($parts as $j => $part) {
+                if (!$part instanceof ToolResult || null === ($text = self::resultText($part)) || \strlen($text) < self::PRUNE_MIN_CHARS) {
+                    continue;
+                }
+                $hash      = \hash('xxh128', $text);
+                $parts[$j] = isset($seen[$hash])
+                    ? new ToolResult($part->callId, [new Text('[duplicate of a later tool result]')], $part->error)
+                    : new ToolResult($part->callId, [new Text(self::excerpt($text))], $part->error);
+                $seen[$hash] = true;
+                $changed     = true;
+            }
+            if ($changed) {
+                $messages[$i] = new Message($messages[$i]->role, $parts);
+                ++$count;
+            }
+        }
+
+        return $messages;
+    }
+
+    /** The text of a `ToolResult`'s content when it is `Text` parts alone, else null. */
+    private static function resultText(ToolResult $result): ?string
+    {
+        $text = '';
+        foreach ($result->content as $part) {
+            if (!$part instanceof Text) {
+                return null;
+            }
+            $text .= $part->text;
+        }
+
+        return $text;
+    }
+
+    /** The first `DEMOTE_KEEP_CHARS` bytes of `$text`, with a note of how many more were cut. */
+    private static function excerpt(string $text): string
+    {
+        return \substr($text, 0, self::DEMOTE_KEEP_CHARS) . "\n[\xe2\x80\xa6" . \number_format(\strlen($text) - self::DEMOTE_KEEP_CHARS) . ' more bytes cleared to save context]';
     }
 
     private static function hasResults(Message $message): bool
