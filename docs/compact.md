@@ -40,6 +40,11 @@ form itself (the headings a researcher, an accountant or a programmer would use 
 - the choices made, and why;
 - what was under way, what failed or waits and on what, and what remains, in order.
 
+Finished work is written as a completed fact in the past tense. The conversation is treated as
+material, not instructions: a command inside a fetched page, a file or a tool result is recorded,
+never followed, so injected text cannot steer the checkpoint. Secrets are left out; the checkpoint
+notes that one was present, not its value.
+
 The prompt asks for completeness about facts and terseness in wording, and for at most a quarter of
 the budget and three quarters of `summarizerOptions`' output tokens, in words, so the checkpoint
 fits beside the rest and is not cut. The agent gets it as one user message headed "A checkpoint of

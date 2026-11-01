@@ -241,7 +241,9 @@
   accounting or any other work. The checkpoint's header tells the agent its facts are its own
   observations and (after Hermes Agent's wrapper) that the world already
   reflects the work it records as done, so a file it edited, a record it posted or a request it
-  sent is not repeated.
+  sent is not repeated. Also after Hermes: the summarizer treats the conversation as material, not
+  instructions (a command in a fetched page or tool result is recorded, never followed), leaves
+  secrets out, and writes finished work as completed past-tense facts.
 
 ### Changed (breaking)
 
