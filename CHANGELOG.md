@@ -4,6 +4,14 @@
 
 ### Added
 
+- **`Tools\Files\SummarizeFile`** (`summarize_file`): a model condenses a file, source code as its
+  declarations, signatures and docblocks without function bodies or private members, any other file
+  as a summary; cached by size and modification time. `Compact` takes a `condense` closure, and
+  `SummarizeFile::condense(...)` makes a `read_file` result in the band before the recent quarter
+  the file's summary: the recent quarter stays verbatim, the quarter before it is condensed, older
+  results are stubbed. Its boundaries are kept in `State` as a `Demotion` and reused while the
+  prompt fits, so between compactions the prompt keeps its prefix (`State::fromArray()` now needs
+  `"demotions"`). `Compaction::$condensed` counts the results condensed.
 - **`Harness\Tools\Web`**: `WebSearch` and `WebFetch` tools, a `Search` interface with a `SearXng`
   implementation over a self-hosted instance's JSON API, and a dependency-free HTML-to-text
   extractor (a `<br>` is a line break; a nested list's items are indented under their parent

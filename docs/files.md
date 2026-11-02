@@ -18,6 +18,14 @@ $tools = new Tools(new ReadFile($root), new ListDir($root), new Glob($root), new
 | `write_file` | `path`, `content` (creates parent directories; a parent that is a file is refused) | destructive, idempotent |
 | `edit_file` | `path`, `old`, `new` (`old` must match exactly once) | destructive |
 | `apply_patch` | `patch` (the V4A format) | destructive |
+| `summarize_file` | `path` | readOnly, idempotent |
+
+`SummarizeFile($root, $model)` has `$model` condense a file: source code as its declarations, with
+their signatures and docblocks, without function bodies or private members; any other text file as a
+summary of what it holds. A summary is cached by the file's size and modification time, so asking
+again for an unchanged file costs no model call. The agent uses it to get to know a file cheaply;
+`Compact` uses it (`condense: $summarize->condense(...)`) to replace an older `read_file` result with
+the summary, see [compact](compact.md).
 
 Output is cut with a tail that says how to go on (`[120 more lines; pass offset=2001 to read on]`),
 never silently. `read_file` returns PNG, JPEG, GIF and WebP files (by their first bytes, not the

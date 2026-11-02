@@ -58,11 +58,13 @@ use Psr\Log\NullLogger;
  * `ToolResult` over `PRUNE_MIN_CHARS` bytes becomes a one-line stub naming the call (`[read_file]
  * path=src/a.php (5,120 chars result)`), or, when an identical body appears again closer to the
  * step in flight, a duplicate marker; the newest copy of a repeated result stays whole. A
- * `ToolCall`'s arguments are never rewritten, and the step in flight is never touched. Only when
+ * `ToolCall`'s arguments are never rewritten, and the step in flight is never touched. In the band
+ * before the recent part, as large as it, a result becomes what `$condense` gives for its call
+ * instead (with `SummarizeFile::condense(...)`, a file read becomes the file's summary). Only when
  * this does not bring the prompt under budget does the summarizer fold the older part, and it then
- * sees whatever demotion left there. `last()->demoted` is how many results this reached; it is
- * recomputed from the conversation every round (`Compact` never rewrites `Run::messages()`), so it
- * is deterministic for the same messages, keeping the provider's cache prefix stable.
+ * sees whatever demotion left there. `last()->demoted` and `last()->condensed` count the results
+ * this reached. The boundaries are kept in `State` as a `Demotion` and reused while the prompt
+ * fits, so between compactions the prompt keeps its prefix and only grows.
  *
  * When the provider rejects a prompt as too long (`ErrorKind::ContextTooLong`) before streaming,
  * the step is compacted again to 85 %, 70 %, 50 % and 35 % of the budget and retried, each retry
@@ -136,10 +138,13 @@ final class Compact implements ModelMiddleware
     private ?Compaction $last = null;
 
     /**
-     * @param int|null                     $budgetTokens     null: the step's `Options::$contextWindow` less 20 %
-     * @param (\Closure(Prompt): int)|null $count            null: `Compact::approximate(...)`
-     * @param State|null                   $state            the state of an earlier instance (`state()`)
-     * @param int|null                     $keepRecentTokens the recent tokens kept verbatim; null: a quarter of the budget
+     * @param int|null                                   $budgetTokens     null: the step's `Options::$contextWindow` less 20 %
+     * @param (\Closure(Prompt): int)|null               $count            null: `Compact::approximate(...)`
+     * @param State|null                                 $state            the state of an earlier instance (`state()`)
+     * @param int|null                                   $keepRecentTokens the recent tokens kept verbatim; null: a quarter of the budget
+     * @param (\Closure(ToolCall, Cancel): ?string)|null $condense         the text that replaces the result of a call
+     *                                                                     in the band before the recent part, or null for a stub;
+     *                                                                     `Tools\Files\SummarizeFile::condense(...)` condenses file reads
      */
     public function __construct(
         private readonly Model $summarizer,
@@ -150,6 +155,7 @@ final class Compact implements ModelMiddleware
         private readonly Options $summarizerOptions = new Options(maxOutputTokens: 2048),
         ?State $state = null,
         private readonly ?int $keepRecentTokens = null,
+        private readonly ?\Closure $condense = null,
     ) {
         if (null !== $budgetTokens && $budgetTokens < 1) {
             throw new \InvalidArgumentException('Compact needs a budget of at least 1 token, or null for the context window less 20 %');
@@ -249,7 +255,7 @@ final class Compact implements ModelMiddleware
             return;     // a cut prompt's report would teach the calibration the cut
         }
         $current     = $this->state->calibration;
-        $this->state = new State($current?->with($counted, $reported) ?? new Calibration($counted, $reported, $counted, $reported), $this->state->checkpoints);
+        $this->state = new State($current?->with($counted, $reported) ?? new Calibration($counted, $reported, $counted, $reported), $this->state->checkpoints, $this->state->demotions);
     }
 
     /**
@@ -322,18 +328,27 @@ final class Compact implements ModelMiddleware
                 $checkpoint = $c;
             }
         }
-        $view    = null === $checkpoint ? $messages : self::view($messages, $checkpoint);
-        $counted = ($this->count)(self::with($prompt, $view));
-        $after   = $tokens($counted);
-        if (null !== $checkpoint && $after <= $target) {
-            return $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true);
-        }
-
         $kept = \min($this->keepFirst, $n);
         if ($kept > 0 && $kept < $n && self::hasResults($messages[$kept])) {
             ++$kept;   // the results of the last kept message's tool calls stay with it
         }
         $from = \max($kept, $checkpoint?->covered ?? 0);
+        // The boundaries of the last demotion, reused while the prompt fits so it keeps its prefix.
+        $demotion = null;
+        foreach ($this->state->demotions as $d) {
+            if ($d->until <= $n && $d->until > $from && $d->hash === $hashes[$d->until] && $d->until > ($demotion?->until ?? 0)) {
+                $demotion = $d;
+            }
+        }
+        $demoted   = 0;
+        $condensed = 0;
+        $present   = null === $demotion ? $messages : $this->demote($messages, $from, \max($from, $demotion->condensed), $demotion->until, $prompt->cancel, $demoted, $condensed);
+        $view      = null === $checkpoint ? $present : self::view($present, $checkpoint);
+        $counted   = ($this->count)(self::with($prompt, $view));
+        $after     = $tokens($counted);
+        if ((null !== $checkpoint || null !== $demotion) && $after <= $target) {
+            return $this->served($prompt, $view, $counted, $cal, $checkpoint, $before, $after, true, $demoted, $condensed);
+        }
         // The step in flight: the last assistant message and its results, or the latest user
         // message when no reply follows it. The recent part starts there at the latest.
         $latest = null;
@@ -357,31 +372,42 @@ final class Compact implements ModelMiddleware
                 $cut = $i;
             }
         }
+        // The band before it, as large again, where a file read is condensed rather than stubbed.
+        $band = $cut;
+        for ($i = $cut - 1; $i >= $from; --$i) {
+            if ($ratio * $this->countMessages($prompt, \array_slice($messages, $i, $cut - $i)) > $reserve) {
+                break;
+            }
+            $band = $i;
+        }
         // The cheap first tier, tried before any summarizer call: see the class docblock and `demote()`.
-        $demoted         = 0;
-        $demotedMessages = self::demote($messages, $from, $cut, $demoted);
-        if ($demoted > 0) {
+        $demoted   = 0;
+        $condensed = 0;
+        if ($cut > $from) {
+            $demotedMessages = $this->demote($messages, $from, $band, $cut, $prompt->cancel, $demoted, $condensed);
+        }
+        if ($demoted + $condensed > 0) {
             $demotedView    = null === $checkpoint ? $demotedMessages : self::view($demotedMessages, $checkpoint);
             $demotedCounted = ($this->count)(self::with($prompt, $demotedView));
             $demotedAfter   = $tokens($demotedCounted);
         } else {
             $demotedMessages = $messages;
-            $demotedView     = $view;
-            $demotedCounted  = $counted;
-            $demotedAfter    = $after;
+            $demotedView     = null === $checkpoint ? $messages : self::view($messages, $checkpoint);
+            $demotedCounted  = ($this->count)(self::with($prompt, $demotedView));
+            $demotedAfter    = $tokens($demotedCounted);
         }
-        if ($demoted > 0 && $demotedAfter <= $target) {
-            $this->log->info('Compact: demoted {demoted} old tool result(s) from {from} to {to} tokens (budget {budget}), without a checkpoint', ['demoted' => $demoted, 'from' => $after, 'to' => $demotedAfter, 'budget' => $target]);
+        if ($demoted + $condensed > 0 && $demotedAfter <= $target) {
+            $this->state = new State($this->state->calibration, $this->state->checkpoints, \array_slice([new Demotion($hashes[$cut], $cut, $band), ...$this->state->demotions], 0, self::CACHE));
+            $this->log->info('Compact: condensed {condensed} and demoted {demoted} old tool result(s), from {from} to {to} tokens (budget {budget}), without a checkpoint', ['condensed' => $condensed, 'demoted' => $demoted, 'from' => $before, 'to' => $demotedAfter, 'budget' => $target]);
 
-            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted);
+            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted, $condensed);
         }
-
         $nothing = 'Compact: the prompt is {tokens} tokens, over the budget of {budget}, but has nothing more to summarize';
         $segment = $cut > $from ? \array_slice($demotedMessages, $from, $cut - $from) : [];
         if ([] === $segment || (null !== $this->noGain && $this->countMessages($prompt, $segment) <= $this->noGain)) {
             $this->log->warning($nothing, ['tokens' => $demotedAfter, 'budget' => $target]);
 
-            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted);
+            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted, $condensed);
         }
         $previous        = null === $checkpoint ? null : \strlen($checkpoint->text);
         [$text, $finish] = $this->summarize($prompt->system, \array_slice($demotedMessages, 0, $kept), $checkpoint?->text, $segment, $prompt->cancel, $budget);
@@ -395,13 +421,13 @@ final class Compact implements ModelMiddleware
             $this->noGain = $this->countMessages($prompt, [new Message(Role::User, [new Text(self::HEADER . $text)])]);
             $this->log->warning($nothing, ['tokens' => $demotedAfter, 'budget' => $target, 'summaryBytes' => \strlen($text)]);
 
-            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted);
+            return $this->keepDemoted($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, $demoted, $condensed);
         }
         // Store it in place of the checkpoints it supersedes: those of the same conversation.
         $this->state = new State($this->state->calibration, \array_slice([$new, ...\array_filter(
             $this->state->checkpoints,
             static fn (Checkpoint $c): bool => $c->covered > $cut || $c->hash !== $hashes[$c->covered],
-        )], 0, self::CACHE));
+        )], 0, self::CACHE), $this->state->demotions);
         $after = $tokens($nextCount);
         $this->log->info('Compact: replaced {removed} messages with a checkpoint of {bytes} bytes (budget {budget} tokens, {calibration})', ['removed' => $new->removed(), 'bytes' => \strlen($text), 'budget' => $target, 'calibration' => $calibration]);
         $this->log->debug("Compact: the checkpoint of {removed} messages:\n{checkpoint}", ['removed' => $new->removed(), 'checkpoint' => $text]);
@@ -409,7 +435,7 @@ final class Compact implements ModelMiddleware
             $this->log->warning($nothing, ['tokens' => $after, 'budget' => $target]);
         }
 
-        return $this->served($prompt, $next, $nextCount, $cal, $new, $before, $after, false, $demoted);
+        return $this->served($prompt, $next, $nextCount, $cal, $new, $before, $after, false, $demoted, $condensed);
     }
 
     /**
@@ -422,13 +448,13 @@ final class Compact implements ModelMiddleware
      *
      * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: ?Compaction}
      */
-    private function keepDemoted(Prompt $prompt, array $demotedView, int $demotedCounted, ?Calibration $cal, ?Checkpoint $checkpoint, int $before, int $demotedAfter, int $demoted): array
+    private function keepDemoted(Prompt $prompt, array $demotedView, int $demotedCounted, ?Calibration $cal, ?Checkpoint $checkpoint, int $before, int $demotedAfter, int $demoted, int $condensed): array
     {
-        if (null === $checkpoint && 0 === $demoted) {
+        if (null === $checkpoint && 0 === $demoted + $condensed) {
             return $this->unchanged($prompt, $cal);
         }
 
-        return $this->served($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, null !== $checkpoint, $demoted);
+        return $this->served($prompt, $demotedView, $demotedCounted, $cal, $checkpoint, $before, $demotedAfter, null !== $checkpoint, $demoted, $condensed);
     }
 
     /** @return array{0: Prompt, 1: int, 2: ?Calibration, 3: null} */
@@ -446,7 +472,7 @@ final class Compact implements ModelMiddleware
      *
      * @return array{0: Prompt, 1: int, 2: ?Calibration, 3: Compaction}
      */
-    private function served(Prompt $prompt, array $view, int $counted, ?Calibration $cal, ?Checkpoint $checkpoint, int $before, int $after, bool $reused, int $demoted = 0): array
+    private function served(Prompt $prompt, array $view, int $counted, ?Calibration $cal, ?Checkpoint $checkpoint, int $before, int $after, bool $reused, int $demoted, int $condensed): array
     {
         $this->last = new Compaction(
             $checkpoint?->removed() ?? 0,
@@ -461,6 +487,7 @@ final class Compact implements ModelMiddleware
             $checkpoint?->finish,
             false,
             $demoted,
+            $condensed,
         );
 
         return [self::with($prompt, $view), $counted, $cal, $this->last];
@@ -640,20 +667,23 @@ final class Compact implements ModelMiddleware
      * `$messages` with old `ToolResult` bodies demoted, from index `$from` up to (not including)
      * `$until`, as Hermes Agent's `_prune_old_tool_results` does (see the class docblock). A result
      * of `Text` alone over `PRUNE_MIN_CHARS` bytes becomes a duplicate marker when an identical body
-     * comes later in the conversation (the newest copy stays whole), else a one-line stub of the
-     * call that made it. A `ToolCall`'s arguments, anything outside the range, and a result holding
-     * anything but `Text` are left as they are. `$count` is set to how many results were changed;
-     * an unmodified message keeps its original object.
+     * comes later in the conversation (the newest copy stays whole); from `$band` on, a successful
+     * result becomes what `$condense` gives for its call, when it gives something; else it becomes
+     * a one-line stub of the call that made it. A `ToolCall`'s arguments, anything outside the
+     * range, and a result holding anything but `Text` are left as they are. `$demoted` and
+     * `$condensed` are set to how many results were stubbed and condensed; an unmodified message
+     * keeps its original object.
      *
      * @param list<Message> $messages
      *
      * @return list<Message>
      */
-    private static function demote(array $messages, int $from, int $until, int &$count): array
+    private function demote(array $messages, int $from, int $band, int $until, Cancel $cancel, int &$demoted, int &$condensed): array
     {
-        $count = 0;
-        $seen  = [];
-        $calls = [];
+        $demoted   = 0;
+        $condensed = 0;
+        $seen      = [];
+        $calls     = [];
         foreach ($messages as $i => $message) {
             foreach ($message->parts as $part) {
                 if ($part instanceof ToolCall) {
@@ -670,13 +700,22 @@ final class Compact implements ModelMiddleware
                 if (!$part instanceof ToolResult || null === ($text = self::resultText($part)) || \strlen($text) <= self::PRUNE_MIN_CHARS) {
                     continue;
                 }
-                $hash      = \hash('xxh128', $text);
-                $parts[$j] = new ToolResult($part->callId, [new Text(isset($seen[$hash])
-                    ? "[Duplicate tool output \xe2\x80\x94 same content as a more recent call]"
-                    : self::stub($calls[$part->callId] ?? null, $text, $part->error))], $part->error);
+                $hash        = \hash('xxh128', $text);
+                $call        = $calls[$part->callId] ?? null;
+                $replacement = match (true) {
+                    isset($seen[$hash])                                                        => "[Duplicate tool output \xe2\x80\x94 same content as a more recent call]",
+                    $i >= $band && !$part->error && null !== $call && null !== $this->condense => ($this->condense)($call, $cancel),
+                    default                                                                    => null,
+                };
+                if (null !== $replacement && !isset($seen[$hash])) {
+                    ++$condensed;
+                } else {
+                    $replacement ??= self::stub($call, $text, $part->error);
+                    ++$demoted;
+                }
+                $parts[$j]   = new ToolResult($part->callId, [new Text($replacement)], $part->error);
                 $seen[$hash] = true;
                 $changed     = true;
-                ++$count;
             }
             if ($changed) {
                 $messages[$i] = new Message($messages[$i]->role, $parts);

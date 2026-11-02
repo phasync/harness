@@ -164,6 +164,71 @@ it('demotes old, large tool results to one-line stubs before calling the summari
         ->and($compact->last()->summary)->toBe('');
 });
 
+/** u0, then $pairs read_file steps of 1000 distinct bytes each (about 1100 bytes a pair). */
+function reads(int $pairs, int $first = 1): array
+{
+    $m = $first > 1 ? [] : [user('the task')];
+    for ($i = $first; $i < $first + $pairs; ++$i) {
+        $m[] = assistant(new ToolCall("c$i", 'read_file', ['path' => "f$i.php"]));
+        $m[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 1000))])]);
+    }
+
+    return $m;
+}
+
+it('keeps the recent quarter verbatim, condenses file reads in the quarter before it, and stubs what is older', function () {
+    $asked     = [];
+    $condense  = function (ToolCall $call, Harness\Cancel $cancel) use (&$asked): ?string {
+        $asked[] = $call->input['path'];
+
+        return "SUMMARY of {$call->input['path']}";
+    };
+    $messages  = reads(6);
+    $summaries = new Summaries();
+    $compact   = new Compact($summaries, 4000, bytesOf(...), keepRecentTokens: 1300, condense: $condense);
+    $prompt    = step($compact, $messages);
+
+    expect($summaries->prompts)->toHaveCount(0)
+        ->and($asked)->toBe(['f5.php'])
+        ->and($prompt->messages[12])->toBe($messages[12])                       // the step in flight, the recent quarter
+        ->and($prompt->messages[10]->parts[0]->content[0]->text)->toBe('SUMMARY of f5.php')
+        ->and($prompt->messages[8]->parts[0]->content[0]->text)->toBe('[read_file] path=f4.php (1,000 chars result)')
+        ->and($prompt->messages[2]->parts[0]->content[0]->text)->toBe('[read_file] path=f1.php (1,000 chars result)')
+        ->and($compact->last()->condensed)->toBe(1)
+        ->and($compact->last()->demoted)->toBe(4)
+        ->and($compact->state()->demotions)->toHaveCount(1)
+        ->and($compact->state()->demotions[0]->until)->toBe(11)
+        ->and($compact->state()->demotions[0]->condensed)->toBe(9)
+        ->and(State::fromArray(\json_decode(\json_encode($compact->state()), true))->demotions)->toEqual($compact->state()->demotions);
+});
+
+it('reuses the demotion while the prompt fits, so the prompt keeps its prefix and only grows', function () {
+    $condense = fn (ToolCall $call, Harness\Cancel $cancel): ?string => "SUMMARY of {$call->input['path']}";
+    $compact  = new Compact(new Summaries(), 4000, bytesOf(...), keepRecentTokens: 1300, condense: $condense);
+    $messages = reads(6);
+    $first    = step($compact, $messages);
+    $messages = [...$messages, ...reads(1, 7)];
+    $second   = step($compact, $messages);
+
+    // f6 has left the recent quarter but stays verbatim: the boundaries are the first step's.
+    expect(\array_slice($second->messages, 0, 13))->toEqual($first->messages)
+        ->and($second->messages[12])->toBe($messages[12])
+        ->and($compact->last()->reused)->toBeTrue()
+        ->and($compact->last()->condensed)->toBe(1)
+        ->and($compact->last()->demoted)->toBe(4)
+        ->and($compact->state()->demotions)->toHaveCount(1);
+
+    // Over the budget again: new boundaries, from the step in flight now.
+    $messages = [...$messages, ...reads(2, 8)];
+    $third    = step($compact, $messages);
+    expect($third->messages[16]->parts[0]->content[0]->text)->toBe('SUMMARY of f8.php')
+        ->and($third->messages[14]->parts[0]->content[0]->text)->toBe('[read_file] path=f7.php (1,000 chars result)')
+        ->and($third->messages[18])->toBe($messages[18])
+        ->and($compact->last()->reused)->toBeFalse()
+        ->and($compact->state()->demotions)->toHaveCount(2)
+        ->and($compact->state()->demotions[0]->until)->toBe(17);
+});
+
 it('folds the older part only when demotion alone does not reach the budget, and the summarizer sees the stubs, not the raw bodies', function () {
     $messages = [user('the task')];
     for ($i = 1; $i <= 6; ++$i) {

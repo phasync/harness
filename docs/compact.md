@@ -85,8 +85,9 @@ A continued prompt (`Prompt::$continue`) is handed on as one; its last message i
 ## Demoting old tool results
 
 Before any side call, a cheap tier tries to shrink the prompt on its own, as Hermes Agent's
-`_prune_old_tool_results` does. Within the same older part a fold would otherwise cover (between the
-kept-first messages and the step in flight):
+`_prune_old_tool_results` does. The recent part (`keepRecentTokens`, a quarter of the budget) stays
+verbatim; in the band before it, as large again, a result becomes what `$condense` gives for its
+call; older than that, between the kept-first messages and the band:
 
 - a `ToolResult` over 200 bytes becomes one line naming the call that made it, its first two
   arguments and the result's size, `[read_file] path=src/a.php (5,120 chars result)`, and for an
@@ -96,12 +97,22 @@ kept-first messages and the step in flight):
 - a `ToolCall`'s arguments are never rewritten, and a result holding anything but text (an image, say)
   is left alone, since it cannot be shrunk by text.
 
+`$condense` is `fn (ToolCall $call, Cancel $cancel): ?string`, null for a stub. With
+`Tools\Files\SummarizeFile`, a file read in the band becomes the file's summary (its declarations
+without bodies for code; see [files](files.md)), so the agent keeps the shape of what it read:
+
+```php
+$summarize = new SummarizeFile($root, $smallModel);
+$compact   = new Compact($smallModel, condense: $summarize->condense(...));
+```
+
 When that alone brings the prompt under budget, it goes on with no checkpoint and no side call at
 all. Only when it does not is the older part folded as above, and the summarizer then sees whatever
-demotion left there, not the raw bodies. Demotion is recomputed from the conversation every round
-(`Compact` never rewrites `Run::messages()`), so it is deterministic for the same messages: a reused
-checkpoint's prefix, and a provider's prompt cache, see the same bytes again. `last()->demoted`
-counts how many results this reached, set whether or not a checkpoint was also made.
+demotion left there, not the raw bodies. The boundaries are kept in `State` (`Demotion`: a content
+hash of the messages they cover, where the band starts and where it ends) and reused on every
+later step while the prompt fits: between compactions the prompt keeps its prefix and only grows,
+so the provider prefills only what is new. `last()->demoted` and `last()->condensed` count the
+results stubbed and condensed, set whether or not a checkpoint was also made.
 
 ## The side call
 
