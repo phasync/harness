@@ -173,13 +173,12 @@ instead.
 ### The context window
 
 `Options::$contextWindow` is the model's window in tokens as the host knows it. The core only
-validates it and passes it on; `Harness\Compact` takes its budget from it. The harness assumes a
+validates it and passes it on; `Harness\Compact` compacts at it less a buffer. The harness assumes a
 server that errors when the prompt exceeds the window (hosted APIs, llama.cpp without context
 shift), which ends the turn `Failed` with `ContextTooLong`. A server that evicts silently must be
 configured, because the system prompt is the first thing it drops: Ollama's default window is 4k
 tokens; raise it on the server (`OLLAMA_CONTEXT_LENGTH`, or `num_ctx` in the model's Modelfile),
-since its OpenAI endpoint takes no `num_ctx` in the request. `Compact` detects a prompt cut this way
-([docs/compact.md](docs/compact.md)).
+since its OpenAI endpoint takes no `num_ctx` in the request.
 
 ### Tools
 
@@ -488,7 +487,7 @@ Each lives in its own namespace; the core never imports one.
 | `Harness\Agents` | `AgentTool`: a sub-agent as a tool | [docs/agents.md](docs/agents.md) |
 | `Harness\Mcp` | `McpServer`: an MCP server's tools, over stdio or Streamable HTTP | [docs/mcp.md](docs/mcp.md) |
 | `Harness\Transcript` | `JsonlTranscript`, `JsonlEvents`: the conversation and the events in files | [docs/transcript.md](docs/transcript.md) |
-| `Harness\Compact` | `Compact`, `State`: keeps the prompt within a token budget with a checkpoint | [docs/compact.md](docs/compact.md) |
+| `Harness\Compact` | `Compact`, `State`: keeps the prompt within the context window with a checkpoint, opencode's compaction | [docs/compact.md](docs/compact.md) |
 | `Harness\Policy` | `Policy`, `Rule`, `Shell`, `Verdict`: allow, deny or ask by tool name, hints and parsed shell commands | [docs/policy.md](docs/policy.md) |
 | `Harness\Testing` | `FakeModel`, `FakeTransport`, `TestCall`, `TestPrompt` | [docs/testing.md](docs/testing.md) |
 | `Harness\Acp` | `Agent`: a run as an Agent Client Protocol agent over stdio, for editors | [docs/acp.md](docs/acp.md) |
@@ -498,9 +497,7 @@ third-party provider documents its own key.
 
 A thinking model spends its output tokens on reasoning first: a `Run` with a tight
 `maxOutputTokens` against a thinking-capable provider ends `Done` with finish `Length` and no text
-unless thinking is turned off explicitly, through that provider's knob in `Options::$provider`
-(`Harness\Compact`'s `summarizerOptions` does this for its side call; see
-[docs/compact.md](docs/compact.md)).
+unless thinking is turned off explicitly, through that provider's knob in `Options::$provider`.
 
 Porting a hand-written `Model` from an earlier beta, check:
 
@@ -528,7 +525,7 @@ php examples/mcp.php "task"                 # a chat with an MCP server's tools 
 php examples/search.php "question"          # web_search and web_fetch over a local SearXng instance
 php examples/web.php state.json say "hi"    # one turn per request, events as JSON lines, state in a file
 php examples/plan.php ./project "task"      # file tools plus a kept plan and a Reminder middleware
-php examples/compact.php [budget]           # a session that compacts to stay within a token budget
+php examples/compact.php [window] [keep]    # a session that compacts to stay within a small window
 php examples/policy.php ./project "task"    # the file tools under a Policy: reads run, writes ask
 php examples/acp.php [session dir]          # an ACP agent for an editor (it speaks JSON-RPC on stdio)
 ```

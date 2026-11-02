@@ -80,13 +80,8 @@ $policy = new class implements ToolMiddleware {
 };
 
 $model = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default');
-// The budget is the context window less 20 %; the summarizer's thinking is off (docs/compact.md).
-$compact = new Compact(
-    $model,
-    null,
-    summarizerOptions: new Options(provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]),
-    state: null === ($state['compact'] ?? null) ? null : State::fromArray($state['compact']),
-);
+// Compacts at the context window less 15 %, with the run's own model (docs/compact.md).
+$compact = new Compact(state: null === ($state['compact'] ?? null) ? null : State::fromArray($state['compact']));
 
 $run = new Run(
     $model,

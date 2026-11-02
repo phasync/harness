@@ -109,9 +109,9 @@ it('never reaches the host transcript: Run::messages() keeps the plain user mess
 it('works with Compact in front: the reminder reaches the model, never the checkpoint', function () {
     $plan       = new Plan();
     $plan->set(['investigate', 'fix']);
-    $summarizer = new FakeModel(says('CHECKPOINT'));
-    $counter    = fn (Prompt $p): int => \strlen(\json_encode(\array_map(static fn (Message $m): array => $m->toArray(), $p->messages)));
-    $compact    = new Compact($summarizer, 400, $counter);
+    $summarizer = new FakeModel(says("## Objective\n- Fix it, all of it\n\n## Next Move\n1. investigate"));
+    $compact    = new Compact($summarizer);
+    $compact->compactNext();
     $reminder   = new Reminder($plan);
 
     $messages = [user('Fix it')];
@@ -136,7 +136,7 @@ it('works with Compact in front: the reminder reaches the model, never the check
     $last     = $seenByModel->messages[\count($seenByModel->messages) - 1];
     $lastText = \implode('', \array_map(static fn ($part): string => $part instanceof Text ? $part->text : '', $last->parts));
     expect($compact->last())->not->toBeNull()                 // it did fold: the checkpoint is a separate side call
-        ->and($lastText)->toContain('Goal: Fix it')->toContain('Plan:')->toContain('investigate')
+        ->and($lastText)->toContain("Goal: - Fix it, all of it\n\nPlan:")->toContain('investigate')
         ->and($summarizer->prompts)->toHaveCount(1)
         ->and($summarizer->prompts[0]->messages[0]->parts[0]->text)->not->toContain('Goal:')->not->toContain('Plan:');
 });

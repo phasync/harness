@@ -239,35 +239,30 @@
 
 ### Changed
 
-- `Compact`'s summarizer is told what a checkpoint the agent can continue from must hold (the task
-  in the user's words, everything done and consulted, every fact with its source, the decisions,
-  what is under way and what remains) and chooses the form itself, instead of writing under fixed
-  Goal/Progress/Decisions/Known/Next/Context headings that forced a software-task shape on research,
-  accounting or any other work. The checkpoint's header tells the agent its facts are its own
-  observations and (after Hermes Agent's wrapper) that the world already
-  reflects the work it records as done, so a file it edited, a record it posted or a request it
-  sent is not repeated. Also after Hermes: the summarizer treats the conversation as material, not
-  instructions (a command in a fetched page or tool result is recorded, never followed), leaves
-  secrets out, and writes finished work as completed past-tense facts.
-- `Compact`'s `summarizerOptions` and `SummarizeFile`'s options set no output token limit by
-  default (were 2048 and 4096): a checkpoint is asked to stay under a quarter of the budget in
-  words, and a summary's size follows its file, so a fixed cap only cut long ones. A result cut at
-  the server's own limit still fails loudly.
-- **`Compact` compacts in three parts**, counted back from the step in flight: the recent quarter
-  of the budget stays verbatim, the quarter before it stays condensed, and what is older is folded
-  into the checkpoint in condensed form. Condensing replaces each successful older call by what a
-  new `condense` closure gives (`SummarizeFile::condense(...)` shows a `read_file` as the
-  `summarize_file` of the same file, with its result), then drops a read-only call made again
-  identically later, keeping the latest. The condensing is kept in `State` as a `Demotion` and
-  reused with the checkpoint while the prompt fits, so between compactions the prompt keeps its
-  prefix (`State::fromArray()` now needs `"demotions"`). `Compaction::$condensed` and
-  `$deduplicated` count the calls. After Hermes Agent: a `<think>...</think>` block is stripped from
-  the agent's text the summarizer reads and from the checkpoint it writes, a part's text over 6,000
-  bytes reaches the summarizer as its first 4,000 and last 1,500, and a call's arguments over 1,500
-  bytes as their first 1,200.
+- `SummarizeFile`'s options set no output token limit by default (was 4096): a summary's size
+  follows its file, so a fixed cap only cut long ones. A result cut at the server's own limit still
+  fails loudly.
 
 ### Changed (breaking)
 
+- **`Compact` is a port of opencode's compaction** (anomalyco/opencode, `session/compaction.ts`):
+  it compacts when the provider's last count plus an estimate of what came since reaches the
+  context window less `$buffer` (default 15 %, at least 16k), and once more on a prompt the
+  provider rejects as too long. The run's own model (or `$summarizer`) gets the step's request
+  unchanged, so it reads it from the prompt cache, and fills opencode's summary template (one
+  reminder if it does not); the checkpoint is that summary and a record of the newest `$keep`
+  tokens (default 15k). A summary request too large is sent without the record's messages, then as
+  a transcript shortened oldest exchange first; one rejected as too long is retried at 85, 70, 50
+  and 35 %. `compactNext()` compacts on request. The constructor is `(?Model $summarizer, bool
+  $auto, int $keep, string|int|null $buffer, ?Native $native, ?LoggerInterface $log, ?State
+  $state)`; `budgetTokens`, `count`, `keepFirst`, `summarizerOptions`, `keepRecentTokens`,
+  `condense`, `Calibration`, `Demotion` and `SummarizeFile::condense()` are gone, `State` holds
+  `checkpoints` and `anchors`, `Checkpoint` and `Compaction` have new fields.
+- **Native compaction**: `Compact\Native`, implemented by `Provider\OpenAI\Responses::checkpoint()`
+  (a streamed request with a `compaction_trigger` item), and `Part\Compacted`, the encrypted item
+  replayed to the model that made it and rejected by every other provider.
+- `Tools\Plan\Reminder` takes the goal from a `Compact` checkpoint's Objective once the
+  conversation opens with one.
 - **`Transport` gets `get(string $url, array $headers, Cancel $cancel): Response`**, implemented
   in `StreamTransport` (sharing its connection and request/response code with `post()`) and scripted
   in `FakeTransport`. Transport has `get()`; a hand-written `Transport` must add it. A transport never

@@ -93,7 +93,7 @@ checkpoint from the prompt as `Run` built it — the reminder is not in that pro
 never folded into the checkpoint. `Reminder` then runs on the already-folded prompt and adds the
 reminder on top of it, right before the model call. Reversing the order would let `Compact` see and
 possibly fold the reminder itself, which would then recur inside the checkpoint text it keeps
-updating.
+updating. Once the first user message is a checkpoint, the goal is the checkpoint's Objective.
 
 ## Persistence
 

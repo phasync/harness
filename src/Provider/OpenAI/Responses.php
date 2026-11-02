@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Harness\Provider\OpenAI;
 
+use Harness\Compact\Native;
 use Harness\Delta\Finish;
 use Harness\Delta\ReasoningDelta;
 use Harness\Delta\TextDelta;
@@ -17,6 +18,7 @@ use Harness\Http\Transport;
 use Harness\Message;
 use Harness\Model;
 use Harness\ModelException;
+use Harness\Part\Compacted;
 use Harness\Part\Media;
 use Harness\Part\Reasoning;
 use Harness\Part\Reference;
@@ -46,8 +48,11 @@ use Harness\Usage;
  * is sent with `strict: false` and streams as usual. `Options::$provider['openai']` is merged into
  * the request body last. A `Prompt::$continue` throws `UnsupportedOptionException`: the API has no
  * continuation of an assistant message.
+ *
+ * As a `Compact\Native` it compacts a conversation itself (`checkpoint()`): the encrypted
+ * `compaction` item it returns is replayed to the same model in place of the history it stands for.
  */
-final readonly class Responses implements Model
+final readonly class Responses implements Model, Native
 {
     /** Keywords strict mode does not take; a schema using one is sent non-strict. */
     private const NOT_STRICT = ['oneOf', 'allOf', 'not', 'if', 'then', 'else', 'patternProperties', 'dependentRequired', 'dependentSchemas', 'unevaluatedProperties', 'propertyNames'];
@@ -66,18 +71,8 @@ final readonly class Responses implements Model
 
     public function stream(Prompt $prompt): iterable
     {
-        $headers = ['Content-Type' => 'application/json', 'Accept' => 'text/event-stream'] + $this->headers;
-        if (null !== $this->apiKey) {
-            $headers['Authorization'] = 'Bearer ' . $this->apiKey;
-        }
         [$request, $whole] = $this->request($prompt);
-        $body              = \json_encode($request, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE);
-        $response          = $this->transport->post(\rtrim($this->baseUrl, '/') . '/responses', $headers, $body, $prompt->cancel);
-        if (200 !== $response->status || !Sse::isEventStream($response)) {
-            $text  = \implode('', [...$response->body()]);
-            $error = \json_decode($text, true)['error'] ?? null;
-            throw self::error(\is_array($error) ? (string) ($error['code'] ?? $error['type'] ?? '') : '', "The Responses API returned HTTP {$response->status}: " . \substr($text, 0, 2000), $response->status, $response->headers['retry-after'] ?? null);
-        }
+        $response          = $this->post($request, $prompt);
 
         /** @var array<string, array{call: string, name: string, streamed: bool}> $calls item id => the call */
         $calls     = [];
@@ -161,6 +156,84 @@ final readonly class Responses implements Model
             }
         }
         throw new ModelException(ErrorKind::ModelError, 'The Responses stream ended without response.completed');
+    }
+
+    /**
+     * Compacts the prompt natively: the request `stream()` would send, with a `compaction_trigger`
+     * item appended to its input, streamed; the response must hold exactly one `compaction` item,
+     * returned as the `Compacted` part that `stream()` replays to this model.
+     */
+    public function checkpoint(Prompt $prompt): Compacted
+    {
+        [$request]          = $this->request($prompt);
+        $request['input'][] = ['type' => 'compaction_trigger'];
+        $response           = $this->post($request, $prompt);
+        $items              = [];
+        foreach (Sse::parse($response->body()) as $data) {
+            $e = self::json($data);
+            switch ($e['type'] ?? null) {
+                case 'response.output_item.done':
+                    $items = self::compaction($items, $e['item']);
+                    break;
+                case 'response.completed':
+                    foreach ($e['response']['output'] ?? [] as $item) {
+                        $items = self::compaction($items, $item);
+                    }
+                    if (1 !== \count($items)) {
+                        throw new ModelException(ErrorKind::ModelError, 'Compaction response must contain exactly one checkpoint, got ' . \count($items));
+                    }
+
+                    return new Compacted('openai', $this->model, (string) \array_key_first($items), \reset($items));
+                case 'response.incomplete':
+                    throw new ModelException(ErrorKind::ModelError, 'Compaction response was incomplete: ' . \var_export($e['response']['incomplete_details']['reason'] ?? null, true));
+                case 'response.failed':
+                    $err = $e['response']['error'] ?? [];
+                    throw self::error((string) ($err['code'] ?? ''), 'The compaction failed: ' . \json_encode($err, \JSON_UNESCAPED_SLASHES), null, $response->headers['retry-after'] ?? null);
+                case 'error':
+                    throw self::error((string) ($e['code'] ?? ''), 'The compaction stream failed: ' . ($e['message'] ?? \json_encode($e, \JSON_UNESCAPED_SLASHES)), null, $response->headers['retry-after'] ?? null);
+            }
+        }
+        throw new ModelException(ErrorKind::ModelError, 'Compaction response ended without a checkpoint');
+    }
+
+    /**
+     * @param array<string, string> $items id => encrypted content
+     * @param array<string, mixed>  $item
+     *
+     * @return array<string, string>
+     */
+    private static function compaction(array $items, array $item): array
+    {
+        if ('compaction' !== ($item['type'] ?? null)) {
+            return $items;
+        }
+        $encrypted = $item['encrypted_content'] ?? null;
+        if (!\is_string($encrypted) || '' === $encrypted) {
+            throw new ModelException(ErrorKind::ModelError, 'Compaction output is missing its encrypted content');
+        }
+        if (isset($items[$item['id']]) && $items[$item['id']] !== $encrypted) {
+            throw new ModelException(ErrorKind::ModelError, 'Compaction output changed after completion');
+        }
+        $items[$item['id']] = $encrypted;
+
+        return $items;
+    }
+
+    /** @param array<string, mixed> $request */
+    private function post(array $request, Prompt $prompt): \Harness\Http\Response
+    {
+        $headers = ['Content-Type' => 'application/json', 'Accept' => 'text/event-stream'] + $this->headers;
+        if (null !== $this->apiKey) {
+            $headers['Authorization'] = 'Bearer ' . $this->apiKey;
+        }
+        $response = $this->transport->post(\rtrim($this->baseUrl, '/') . '/responses', $headers, \json_encode($request, \JSON_THROW_ON_ERROR | \JSON_UNESCAPED_SLASHES | \JSON_UNESCAPED_UNICODE), $prompt->cancel);
+        if (200 !== $response->status || !Sse::isEventStream($response)) {
+            $text  = \implode('', [...$response->body()]);
+            $error = \json_decode($text, true)['error'] ?? null;
+            throw self::error(\is_array($error) ? (string) ($error['code'] ?? $error['type'] ?? '') : '', "The Responses API returned HTTP {$response->status}: " . \substr($text, 0, 2000), $response->status, $response->headers['retry-after'] ?? null);
+        }
+
+        return $response;
     }
 
     /**
@@ -288,6 +361,13 @@ final readonly class Responses implements Model
                         }
                     }
                 }
+                continue;
+            }
+            if ($part instanceof Compacted) {
+                if ('openai' !== $part->provider || $part->model !== $this->model) {
+                    throw new UnsupportedContentException("A compaction made by {$part->provider} model {$part->model} replays only on that model, not {$this->model}");
+                }
+                $items[] = ['type' => 'compaction', 'id' => $part->id, 'encrypted_content' => $part->encrypted];
                 continue;
             }
             if ($dropped && $part instanceof ToolCall) {

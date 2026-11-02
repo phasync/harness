@@ -14,7 +14,6 @@ use Harness\Message;
 use Harness\Model;
 use Harness\Options;
 use Harness\Part\Text;
-use Harness\Part\ToolCall;
 use Harness\Prompt;
 use Harness\Result;
 use Harness\Role;
@@ -28,10 +27,6 @@ use Harness\ToolSpec;
  * summary of what it holds; each part with the range of lines it spans, so the agent can read
  * just that part with `read_file`. A summary is cached per file by its size and modification
  * time, so a file read again unchanged costs no model call.
- *
- * `condense()` serves `Compact` (its `condense` parameter): a `read_file` call older than the
- * recent part of the prompt is shown as the `summarize_file` call of the same file, with its
- * result.
  */
 final class SummarizeFile implements Tool
 {
@@ -71,22 +66,6 @@ final class SummarizeFile implements Tool
         $path = Input::string($input, 'path');
 
         return Result::text("Summary of '$path':\n\n" . $this->summary($path, new Cancel($call->isCancelled(...))));
-    }
-
-    /**
-     * For `Compact`'s `condense` parameter: for a `read_file` call of a file that still exists,
-     * the `summarize_file` call of the same file and its result; null for any other call.
-     *
-     * @return array{0: ToolCall, 1: string}|null
-     */
-    public function condense(ToolCall $call, Cancel $cancel): ?array
-    {
-        $path = $call->input['path'] ?? null;
-        if ('read_file' !== $call->name || !\is_string($path) || !\is_file($this->root->resolve($path))) {
-            return null;
-        }
-
-        return [new ToolCall($call->id, 'summarize_file', ['path' => $path]), "Summary of '$path':\n\n" . $this->summary($path, $cancel)];
     }
 
     private function summary(string $path, Cancel $cancel): string

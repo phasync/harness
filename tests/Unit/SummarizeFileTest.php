@@ -5,7 +5,6 @@ declare(strict_types=1);
 use Harness\Delta\Finish;
 use Harness\Delta\TextDelta;
 use Harness\FinishReason;
-use Harness\Part\ToolCall;
 use Harness\Testing\FakeModel;
 use Harness\Tools\Files\Root;
 use Harness\Tools\Files\SummarizeFile;
@@ -54,13 +53,4 @@ it('refuses a missing file, a directory and a binary file, and a summary cut at 
         ->and(fn () => $tool->call(['path' => 'src'], callFor()))->toThrow(RuntimeException::class, "'src' is a directory")
         ->and(fn () => $tool->call(['path' => 'bin.dat'], callFor()))->toThrow(RuntimeException::class, "'bin.dat' is not a text file")
         ->and(fn () => $tool->call(['path' => 'src/a.php'], callFor()))->toThrow(RuntimeException::class, "The summary of 'src/a.php' was cut at the summarizer's output token limit (the server's own); give SummarizeFile more output tokens");
-});
-
-it('shows a read_file call of an existing file as its summarize_file call for Compact, and nothing else', function () {
-    $tool = new SummarizeFile($this->root, new FakeModel(says('function alpha(int $x): int;')));
-    expect($tool->condense(new ToolCall('c1', 'read_file', ['path' => 'src/a.php', 'offset' => 5]), live()))
-        ->toEqual([new ToolCall('c1', 'summarize_file', ['path' => 'src/a.php']), "Summary of 'src/a.php':\n\nfunction alpha(int \$x): int;"])
-        ->and($tool->condense(new ToolCall('c2', 'read_file', ['path' => 'gone.php']), live()))->toBeNull()
-        ->and($tool->condense(new ToolCall('c3', 'shell', ['command' => 'cat src/a.php']), live()))->toBeNull()
-        ->and($tool->spec()->hints->readOnly)->toBeTrue();
 });

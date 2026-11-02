@@ -3,13 +3,14 @@
 declare(strict_types=1);
 
 /*
- * A long session within a small context budget. A Compact middleware folds the older part of the
- * conversation into a sectioned checkpoint whenever a step's prompt would exceed the budget, and
- * updates that checkpoint the next time; the run itself keeps every message. Compactions are
- * printed as they happen (the middleware logs them, the checkpoint in full at debug) and after each
- * turn (Compact::last()). The last question can only be answered from the checkpoint.
+ * A long session in a small context window. A Compact middleware replaces the older conversation
+ * with a checkpoint (a templated summary and a record of the newest messages) whenever a step's
+ * prompt reaches the window less its buffer, and updates that checkpoint the next time; the run
+ * itself keeps every message. Compactions are printed as they happen (the middleware logs them)
+ * and after each turn (Compact::last()). The last question can only be answered from the
+ * checkpoint.
  *
- *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/compact.php [budget]
+ *   HARNESS_OPENAI_URL=http://127.0.0.1:8012/v1 HARNESS_MODEL=qwen3.8 php examples/compact.php [window] [keep]
  */
 
 require __DIR__ . '/../vendor/autoload.php';
@@ -35,10 +36,11 @@ use Psr\Log\AbstractLogger;
 fiber\setup(new FiberInterop\Phasync\Adapter());
 
 $url    = \getenv('HARNESS_OPENAI_URL') ?: exit("Set HARNESS_OPENAI_URL (and HARNESS_MODEL)\n");
-$budget = (int) ($argv[1] ?? 1500);
+$window = (int) ($argv[1] ?? 8000);
+$keep   = (int) ($argv[2] ?? 300);
 $model  = new ChatCompletions(new StreamTransport(), $url, \getenv('HARNESS_MODEL') ?: 'default');
 
-// A catalogue with long entries, so a few lookups fill the budget.
+// A catalogue with long entries, so a few lookups fill the window.
 $colours = ['amber', 'teal', 'crimson', 'olive', 'indigo', 'saffron'];
 $lookup  = new ClosureTool(
     new ToolSpec('catalogue', 'Looks up one item of the catalogue by number (1-6)', ['type' => 'object', 'properties' => ['n' => ['type' => 'integer']], 'required' => ['n']], new Hints(readOnly: true)),
@@ -59,18 +61,14 @@ $log = new class extends AbstractLogger {
         echo "\n\e[35m[$level] $text\e[0m\n";
     }
 };
-// The side call gets its own options: llama.cpp and vLLM turn a thinking model's reasoning off with
-// chat_template_kwargs, so its output tokens go to the summary (drop it for a backend without it).
-// No maxOutputTokens: the checkpoint is asked to stay under a quarter of the budget, in words.
-$compact = new Compact($model, $budget, log: $log, summarizerOptions: new Options(
-    provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]],
-));
+// The run's own model writes the summary, from the same prompt prefix, so it reads it from the cache.
+$compact = new Compact(keep: $keep, log: $log);
 $run     = new Run(
     $model,
     new Tools($lookup),
     system: 'You answer questions about a catalogue. Look items up with the catalogue tool, one call per item. Be brief.',
     middleware: [$compact],
-    options: new Options(maxOutputTokens: 1500),
+    options: new Options(maxOutputTokens: 1500, contextWindow: $window),
 );
 
 $questions = [
@@ -93,7 +91,7 @@ fiber\run(function () use ($run, $compact, $questions) {
         $last = $compact->last();
         echo "\e[2m" . (null === $last
             ? 'last step: no compaction'
-            : "last step: {$last->removed} messages in the checkpoint" . ($last->reused ? ' (reused)' : '') . ", {$last->kept} kept, {$last->condensed} call(s) condensed, {$last->deduplicated} repeated dropped, {$last->before} -> {$last->after} tokens, counter ratio " . \round($last->ratio, 2) . ', offset ' . \round($last->offset))
+            : "last compaction ({$last->reason}): {$last->covered} messages in the checkpoint, {$last->before} -> {$last->after} tokens")
             . ', ' . \count($run->messages()) . " messages in the run\e[0m\n";
     }
 });

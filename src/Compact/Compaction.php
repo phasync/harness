@@ -4,38 +4,24 @@ declare(strict_types=1);
 
 namespace Harness\Compact;
 
-use Harness\FinishReason;
-
 /**
- * What `Compact` did to the prompt of a step: `removed` messages of the conversation were replaced
- * by `summary`, `kept` messages after it went on verbatim, and the prompt counted `before` and
- * `after` tokens (`ratio` times the counter's figure plus `offset`, the calibration from the
- * provider's reported input tokens; 1.0 and 0.0 before the first report). `reused` is true when
- * the summary was an earlier step's. `previousSummaryBytes` is the size of the earlier summary this
- * one replaced, null when it replaced none; `finish` is how the side call that wrote the summary
- * ended. `truncatedUpstream` is true when the provider reported under 70 % of the calibrated count:
- * the server cut the prompt. On such a step that compacted nothing, `removed` is 0, `summary` empty
- * and `before` and `after` the calibrated count. `condensed` is how many reads in the older part
- * were replaced by what `Compact`'s `condense` gave (a `read_file` by the `summarize_file` of the
- * same file), and `deduplicated` how many read-only calls made again identically later were
- * dropped with their results. Both are set whether or not a checkpoint was also made.
+ * What `Compact` did to the prompt of a step: why it compacted (`auto`: the prompt reached the
+ * ceiling; `overflow`: the provider rejected it as too long; `manual`: `compactNext()` asked), how
+ * many messages of the conversation the new checkpoint covers, and the prompt's size before and
+ * after in tokens (`before` by the provider's last count plus an estimate of what came after it,
+ * `after` estimated). A summary compaction has the `summary` and the `recent` text kept beside it;
+ * a native one has `native` true and neither.
  */
 final readonly class Compaction
 {
     public function __construct(
-        public int $removed,
-        public int $kept,
-        public string $summary,
+        public string $reason,
+        public int $covered,
         public int $before,
         public int $after,
-        public bool $reused,
-        public ?int $previousSummaryBytes = null,
-        public float $ratio = 1.0,
-        public float $offset = 0.0,
-        public ?FinishReason $finish = null,
-        public bool $truncatedUpstream = false,
-        public int $condensed = 0,
-        public int $deduplicated = 0,
+        public string $summary,
+        public string $recent,
+        public bool $native,
     ) {
     }
 }

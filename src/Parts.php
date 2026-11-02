@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Harness;
 
+use Harness\Part\Compacted;
 use Harness\Part\Media;
 use Harness\Part\Reasoning;
 use Harness\Part\Reference;
@@ -26,7 +27,8 @@ final class Parts
             'tool_result' => ToolResult::fromArray($data),
             'media'       => Media::fromArray($data),
             'reference'   => Reference::fromArray($data),
-            default       => throw new \InvalidArgumentException('Unknown part type ' . \var_export($data['type'] ?? null, true) . '; expected text, reasoning, tool_call, tool_result, media or reference'),
+            'compacted'   => Compacted::fromArray($data),
+            default       => throw new \InvalidArgumentException('Unknown part type ' . \var_export($data['type'] ?? null, true) . '; expected text, reasoning, tool_call, tool_result, media, reference or compacted'),
         };
     }
 }

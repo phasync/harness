@@ -4,57 +4,47 @@ declare(strict_types=1);
 
 namespace Harness\Compact;
 
-use Harness\FinishReason;
+use Harness\Message;
 
 /**
- * A checkpoint `Compact` wrote: `text` stands for the conversation's first `covered` messages after
- * the first `kept`, which stay verbatim before it. `hash` is a content hash of those `covered`
- * messages (of their arrays, not their identity), so a conversation rebuilt from arrays finds it again. `lifted` is the
- * index of the latest user message when the cut fell after it: that message is folded into the
- * checkpoint and also kept verbatim right after it. `previousBytes` is the size of the checkpoint
- * this one updated (null for the first), `finish` how its side call ended. A JSON value, part of
- * `State`. A conversation keeps only its most-covering checkpoint: one with a higher `covered` for
- * the same conversation (the same `hash` lineage) supersedes and evicts the rest on the next fold.
+ * A checkpoint `Compact` made: it stands for the conversation's first `covered` messages. `hash` is
+ * a content hash of those messages (of their arrays, not their identity), so a conversation rebuilt
+ * from arrays finds it again. A summary checkpoint has the `summary` and the `recent` text, the
+ * newest messages it covers as the serialized record shown beside the summary (empty when none
+ * were kept); a native one has the `window` the provider made in their place, its compacted item
+ * last. A JSON value, part of `State`.
  */
 final readonly class Checkpoint implements \JsonSerializable
 {
-    public function __construct(
-        public string $hash,
-        public int $covered,
-        public int $kept,
-        public ?int $lifted,
-        public string $text,
-        public ?int $previousBytes,
-        public FinishReason $finish,
-    ) {
-        if ($kept < 0 || $covered <= $kept) {
-            throw new \InvalidArgumentException("A checkpoint covers more messages than it keeps before it, got covered $covered, kept $kept");
-        }
-        if (null !== $lifted && ($lifted < $kept || $lifted >= $covered)) {
-            throw new \InvalidArgumentException("A checkpoint's lifted message is one it covers, got $lifted of $kept..$covered");
-        }
-        if ('' === $text) {
-            throw new \InvalidArgumentException('A checkpoint has text');
-        }
-    }
+    /** @var list<Message>|null */
+    public ?array $window;
 
-    /** How many messages the checkpoint replaces: those it covers, less the kept and the lifted one. */
-    public function removed(): int
+    /** @param list<Message>|null $window */
+    public function __construct(public string $hash, public int $covered, public string $summary, public string $recent = '', ?array $window = null)
     {
-        return $this->covered - $this->kept - (null === $this->lifted ? 0 : 1);
+        if ($covered < 1) {
+            throw new \InvalidArgumentException("A checkpoint covers at least one message, got $covered");
+        }
+        if ((null === $window) === ('' === $summary) || (null !== $window && '' !== $recent)) {
+            throw new \InvalidArgumentException('A checkpoint has a summary (and maybe recent text) or a native window, exactly one of them');
+        }
+        foreach ($window ?? [] as $m) {
+            if (!$m instanceof Message) {
+                throw new \InvalidArgumentException('A checkpoint window is Message objects, got ' . \get_debug_type($m));
+            }
+        }
+        $this->window = null === $window ? null : \array_values($window);
     }
 
-    /** @return array{hash: string, covered: int, kept: int, lifted: ?int, text: string, previousBytes: ?int, finish: string} */
+    /** @return array{hash: string, covered: int, summary: string, recent: string, window: list<array<string, mixed>>|null} */
     public function toArray(): array
     {
         return [
-            'hash'          => $this->hash,
-            'covered'       => $this->covered,
-            'kept'          => $this->kept,
-            'lifted'        => $this->lifted,
-            'text'          => $this->text,
-            'previousBytes' => $this->previousBytes,
-            'finish'        => $this->finish->value,
+            'hash'    => $this->hash,
+            'covered' => $this->covered,
+            'summary' => $this->summary,
+            'recent'  => $this->recent,
+            'window'  => null === $this->window ? null : \array_map(static fn (Message $m) => $m->toArray(), $this->window),
         ];
     }
 
@@ -67,12 +57,12 @@ final readonly class Checkpoint implements \JsonSerializable
     /** @param array<string, mixed> $data */
     public static function fromArray(array $data): self
     {
-        foreach (['hash' => 'is_string', 'covered' => 'is_int', 'kept' => 'is_int', 'text' => 'is_string', 'finish' => 'is_string'] as $key => $is) {
+        foreach (['hash' => 'is_string', 'covered' => 'is_int', 'summary' => 'is_string', 'recent' => 'is_string'] as $key => $is) {
             if (!$is($data[$key] ?? null)) {
                 throw new \InvalidArgumentException("A checkpoint array needs \"$key\" (" . \substr($is, 3) . ')');
             }
         }
 
-        return new self($data['hash'], $data['covered'], $data['kept'], $data['lifted'] ?? null, $data['text'], $data['previousBytes'] ?? null, FinishReason::from($data['finish']));
+        return new self($data['hash'], $data['covered'], $data['summary'], $data['recent'], null === ($data['window'] ?? null) ? null : \array_map(Message::fromArray(...), $data['window']));
     }
 }

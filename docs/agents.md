@@ -74,17 +74,16 @@ A child's context grows with what it reads; give the template a `Compact`, and e
 (a fork shares the template's middleware objects):
 
 ```php
-$compact  = new Compact($summarizer, 8000, log: $log);
-$explorer = new Run($model, new Tools(new ReadFile($root), new Grep($root)), middleware: [$compact]);
+$compact  = new Compact(log: $log);
+$explorer = new Run($model, new Tools(new ReadFile($root), new Grep($root)), middleware: [$compact], options: new Options(contextWindow: 128_000));
 $parent   = new Run($model, new Tools(new AgentTool($explorer, 'explorer', 'Reads the project')));
 ```
 
-One instance may serve every child, concurrent ones included: it keeps the last 8 checkpoints, each
-keyed by a content hash of the messages it covers, so each child gets, reuses and updates its own.
-The cost: beyond 8 children compacting at once a checkpoint is evicted and written again when its
-child needs it, and `last()`,
-the counter's calibration and the budget floor are the instance's, shared by all children. Give each
-template its own `Compact` for `last()` per child ([compact.md](compact.md)).
+One instance may serve every child, concurrent ones included: it keeps the last 8 checkpoints and
+provider counts, each keyed by a content hash of the messages it covers, so each child gets and
+updates its own. Beyond 8 children compacting at once a checkpoint is evicted and made again when
+its child needs it, and `last()` is the instance's, shared by all children. Give each template its
+own `Compact` for `last()` per child ([compact.md](compact.md)).
 
 ## Rendering concurrent sub-agents
 

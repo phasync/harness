@@ -17,7 +17,7 @@ use Harness\Role;
  * every call), `Reminder` appends one user-role message to a copy of the prompt's messages, never
  * `Run::messages()` (the host's transcript is untouched, as `Compact` leaves it): "Goal: " followed
  * by the first user message of the conversation (its text parts, cut at `$goalChars` with an
- * ellipsis), then, only while the plan holds steps, a blank line, "Plan:" and `Plan::render()`.
+ * ellipsis; once `Compact` has replaced it with a checkpoint, the checkpoint's Objective), then, only while the plan holds steps, a blank line, "Plan:" and `Plan::render()`.
  *
  * The message goes after the last message, where a user message may go; when the last message is
  * already a user message (the step's own turn: the user's text, or a step's tool results), the
@@ -68,7 +68,8 @@ final class Reminder implements ModelMiddleware
     }
 
     /**
-     * The text parts of the first user message in `$messages`, joined, cut at `$goalChars`.
+     * The text parts of the first user message in `$messages`, joined, cut at `$goalChars`; of a
+     * `Compact` checkpoint, its Objective section.
      *
      * @param list<Message> $messages
      */
@@ -79,6 +80,10 @@ final class Reminder implements ModelMiddleware
                 continue;
             }
             $text = \implode('', \array_map(static fn ($part): string => $part instanceof Text ? $part->text : '', $message->parts));
+            // A compacted conversation opens with Compact's checkpoint, which keeps the goal as its Objective.
+            if (\str_starts_with($text, '<conversation-checkpoint>') && 1 === \preg_match('/^## Objective\n(.*?)(?=^#|^<\/summary>)/ms', $text, $m)) {
+                $text = \trim($m[1]);
+            }
             if ('' !== $text) {
                 return \strlen($text) > $this->goalChars ? \substr($text, 0, $this->goalChars) . '…' : $text;
             }

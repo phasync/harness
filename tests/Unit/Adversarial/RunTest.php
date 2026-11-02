@@ -727,12 +727,12 @@ it('does not report the summarizer\'s own ContextTooLong as the conversation\'s'
         new Message(Role::Assistant, [new Text('found it')]),
         new Message(Role::User, [new Text('continue, please, this is the latest message')]),
     ];
-    $summarizer = new FakeModel(static function () {
+    $tooLong    = static function () {
         throw new ModelException(ErrorKind::ContextTooLong, "the summarizer's own context window is too small for this chunk");
-    });
-    // Small enough that Compact's cheap tool-result-demotion tier (tried first, see Compact's
-    // docblock) cannot bring the prompt under it alone, so the summarizer is still called.
-    $compact   = new Compact($summarizer, budgetTokens: 30, keepFirst: 0, keepRecentTokens: 5);
+    };
+    $summarizer = new FakeModel(...\array_fill(0, 5, $tooLong));
+    $compact    = new Compact($summarizer);
+    $compact->compactNext();
     $mainModel = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
     $run       = new Harness\Run($mainModel, new Tools(), messages: $messages, middleware: [$compact]);
 
@@ -766,12 +766,11 @@ it('reports a second collapsed checkpoint as the turn\'s MiddlewareError, not Mo
         new Message(Role::Assistant, [new Text('found it')]),
         new Message(Role::User, [new Text('continue, please, this is the latest message')]),
     ];
-    // Two replies, both with no Text part at all: summarize() sees '' twice and fails loudly
-    // on the second attempt, never silently folding an empty checkpoint.
+    // Two replies, both with no Text part at all: the summary and its one reminder both come back
+    // empty, and the compaction fails loudly, never sending an empty checkpoint.
     $summarizer = new FakeModel([new Finish(FinishReason::Stop)], [new Finish(FinishReason::Stop)]);
-    // Small enough that Compact's cheap tool-result-demotion tier (tried first, see Compact's
-    // docblock) cannot bring the prompt under it alone, so the summarizer is still called.
-    $compact    = new Compact($summarizer, budgetTokens: 30, keepFirst: 0, keepRecentTokens: 5);
+    $compact    = new Compact($summarizer);
+    $compact->compactNext();
     $mainModel  = new FakeModel([new TextDelta('ok'), new Usage(1, 1), new Finish(FinishReason::Stop)]);
     $run        = new Harness\Run($mainModel, new Tools(), messages: $messages, middleware: [$compact]);
 
@@ -780,8 +779,7 @@ it('reports a second collapsed checkpoint as the turn\'s MiddlewareError, not Mo
     expect($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError)
         ->and($run->ended()->error)->toBeInstanceOf(RuntimeException::class)
-        ->and($run->ended()->error->getMessage())->toContain('returned no text')
-        ->and($run->ended()->error->getMessage())->toContain('twice');
+        ->and($run->ended()->error->getMessage())->toBe('Compaction produced no summary');
 });
 
 /*
