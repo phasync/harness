@@ -6,12 +6,7 @@
 
 - **`Tools\Files\SummarizeFile`** (`summarize_file`): a model condenses a file, source code as its
   declarations, signatures and docblocks without function bodies or private members, any other file
-  as a summary; cached by size and modification time. `Compact` takes a `condense` closure, and
-  `SummarizeFile::condense(...)` makes a `read_file` result in the band before the recent quarter
-  the file's summary: the recent quarter stays verbatim, the quarter before it is condensed, older
-  results are stubbed. Its boundaries are kept in `State` as a `Demotion` and reused while the
-  prompt fits, so between compactions the prompt keeps its prefix (`State::fromArray()` now needs
-  `"demotions"`). `Compaction::$condensed` counts the results condensed.
+  as a summary, each part with the lines it spans; cached by size and modification time.
 - **`Harness\Tools\Web`**: `WebSearch` and `WebFetch` tools, a `Search` interface with a `SearXng`
   implementation over a self-hosted instance's JSON API, and a dependency-free HTML-to-text
   extractor (a `<br>` is a line break; a nested list's items are indented under their parent
@@ -252,18 +247,18 @@
   sent is not repeated. Also after Hermes: the summarizer treats the conversation as material, not
   instructions (a command in a fetched page or tool result is recorded, never followed), leaves
   secrets out, and writes finished work as completed past-tense facts.
-- **`Compact` demotes old tool results first**, a cheap tier tried before any summarizer call, as
-  Hermes Agent's `_prune_old_tool_results` does: within the part a fold would otherwise cover, a
-  `ToolResult` over 200 bytes becomes a one-line stub of its call (`[read_file] path=src/a.php
-  (5,120 chars result)`, with the first line of an error), and an identical body that comes again
-  later becomes a duplicate marker (the newest copy stays whole); a `ToolCall`'s
-  arguments are never rewritten, and the step in flight is never touched. Only when this does not
-  bring the prompt under budget does the summarizer fold the older part, and it then sees whatever
-  demotion left there, not the raw bodies. `Compaction::$demoted` reports how many results this
-  reached. Also after Hermes: a `<think>...</think>` block is stripped from the agent's text the
-  summarizer reads and from the checkpoint it writes, a part's text over 6,000 bytes reaches the
-  summarizer as its first 4,000 and last 1,500, and a call's arguments over 1,500 bytes as their
-  first 1,200.
+- **`Compact` compacts in three parts**, counted back from the step in flight: the recent quarter
+  of the budget stays verbatim, the quarter before it stays condensed, and what is older is folded
+  into the checkpoint in condensed form. Condensing replaces each successful older call by what a
+  new `condense` closure gives (`SummarizeFile::condense(...)` shows a `read_file` as the
+  `summarize_file` of the same file, with its result), then drops a read-only call made again
+  identically later, keeping the latest. The condensing is kept in `State` as a `Demotion` and
+  reused with the checkpoint while the prompt fits, so between compactions the prompt keeps its
+  prefix (`State::fromArray()` now needs `"demotions"`). `Compaction::$condensed` and
+  `$deduplicated` count the calls. After Hermes Agent: a `<think>...</think>` block is stripped from
+  the agent's text the summarizer reads and from the checkpoint it writes, a part's text over 6,000
+  bytes reaches the summarizer as its first 4,000 and last 1,500, and a call's arguments over 1,500
+  bytes as their first 1,200.
 
 ### Changed (breaking)
 

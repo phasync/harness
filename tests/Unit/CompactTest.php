@@ -132,118 +132,103 @@ it('folds everything older than the step in flight into a checkpoint when the re
         ->and($text)->not->toContain('thinking');
 });
 
-it('demotes old, large tool results to one-line stubs before calling the summarizer at all, sparing the step in flight', function () {
-    $big      = \str_repeat('x', 1000);
-    $messages = [
-        user('the task'),
-        assistant(new ToolCall('c1', 'read_file', ['path' => 'src/a.php', 'offset' => 1])),
-        new Message(Role::User, [new ToolResult('c1', [new Text($big)])]),
-        assistant(new ToolCall('c2', 'read_file', ['path' => 'src/b.php'])),
-        new Message(Role::User, [new ToolResult('c2', [new Text("no such file\n" . $big)], true)]),
-        assistant(new ToolCall('c3', 'read_file', ['path' => 'src/a.php', 'offset' => 1])),
-        new Message(Role::User, [new ToolResult('c3', [new Text($big)])]),
-    ];
-    $summaries = new Summaries();
-    $compact   = new Compact($summaries, 2000, bytesOf(...), keepRecentTokens: 100);
-    $prompt    = step($compact, $messages);
-
-    expect($summaries->prompts)->toHaveCount(0)                  // demotion alone was enough
-        ->and($prompt->messages)->toHaveCount(7)
-        ->and($prompt->messages[0])->toBe($messages[0])          // kept-first, untouched
-        ->and($prompt->messages[1])->toBe($messages[1])          // a ToolCall's arguments are never rewritten
-        ->and($prompt->messages[3])->toBe($messages[3])
-        ->and($prompt->messages[5])->toBe($messages[5])
-        ->and($prompt->messages[6])->toBe($messages[6])          // the step in flight, spared: the newest copy of its body
-        // An older identical body is a duplicate marker; another becomes a stub of its call.
-        ->and($prompt->messages[2]->parts[0]->content[0]->text)->toBe('[Duplicate tool output — same content as a more recent call]')
-        ->and($prompt->messages[4]->parts[0]->content[0]->text)->toBe('[read_file] path=src/b.php (1,013 chars result) FAILED: no such file')
-        ->and($prompt->messages[4]->parts[0]->error)->toBeTrue()
-        ->and($compact->last())->not->toBeNull()
-        ->and($compact->last()->demoted)->toBe(2)
-        ->and($compact->last()->removed)->toBe(0)
-        ->and($compact->last()->summary)->toBe('');
-});
-
-/** u0, then $pairs read_file steps of 1000 distinct bytes each (about 1100 bytes a pair). */
-function reads(int $pairs, int $first = 1): array
+/** u0, then $pairs read_file steps of 1000 distinct bytes each (about 1100 bytes a pair), of f<i>.php or the paths given. */
+function reads(int $pairs, int $first = 1, array $paths = []): array
 {
     $m = $first > 1 ? [] : [user('the task')];
     for ($i = $first; $i < $first + $pairs; ++$i) {
-        $m[] = assistant(new ToolCall("c$i", 'read_file', ['path' => "f$i.php"]));
+        $m[] = assistant(new ToolCall("c$i", 'read_file', ['path' => $paths[$i] ?? "f$i.php"]));
         $m[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) ($i % 10), 1000))])]);
     }
 
     return $m;
 }
 
-it('keeps the recent quarter verbatim, condenses file reads in the quarter before it, and stubs what is older', function () {
-    $asked     = [];
-    $condense  = function (ToolCall $call, Harness\Cancel $cancel) use (&$asked): ?string {
+/** A condense closure that shows a read_file as summarize_file, as SummarizeFile::condense() does, and counts its calls. */
+function condenser(array &$asked = []): Closure
+{
+    return function (ToolCall $call, Harness\Cancel $cancel) use (&$asked): ?array {
+        if ('read_file' !== $call->name) {
+            return null;
+        }
         $asked[] = $call->input['path'];
 
-        return "SUMMARY of {$call->input['path']}";
+        return [new ToolCall($call->id, 'summarize_file', ['path' => $call->input['path']]), "Summary of '{$call->input['path']}'"];
     };
-    $messages  = reads(6);
-    $summaries = new Summaries();
-    $compact   = new Compact($summaries, 4000, bytesOf(...), keepRecentTokens: 1300, condense: $condense);
-    $prompt    = step($compact, $messages);
+}
 
-    expect($summaries->prompts)->toHaveCount(0)
-        ->and($asked)->toBe(['f5.php'])
-        ->and($prompt->messages[12])->toBe($messages[12])                       // the step in flight, the recent quarter
-        ->and($prompt->messages[10]->parts[0]->content[0]->text)->toBe('SUMMARY of f5.php')
-        ->and($prompt->messages[8]->parts[0]->content[0]->text)->toBe('[read_file] path=f4.php (1,000 chars result)')
-        ->and($prompt->messages[2]->parts[0]->content[0]->text)->toBe('[read_file] path=f1.php (1,000 chars result)')
-        ->and($compact->last()->condensed)->toBe(1)
-        ->and($compact->last()->demoted)->toBe(4)
-        ->and($compact->state()->demotions)->toHaveCount(1)
-        ->and($compact->state()->demotions[0]->until)->toBe(11)
-        ->and($compact->state()->demotions[0]->condensed)->toBe(9)
+/** The read-only file tools' specs, which tell Compact which repeated calls it may drop. */
+function readTools(): array
+{
+    $hints = new Harness\Hints(readOnly: true, idempotent: true);
+
+    return [new ToolSpec('read_file', 'read', ['type' => 'object'], $hints), new ToolSpec('summarize_file', 'summarize', ['type' => 'object'], $hints)];
+}
+
+it('keeps the recent quarter verbatim, shows older reads as summarize_file, drops repeated reads, and folds the oldest half', function () {
+    $asked      = [];
+    $messages   = reads(6, paths: [3 => 'f1.php']);              // c3 reads f1.php again
+    $summarizer = new Summaries();
+    $compact    = new Compact($summarizer, 4000, bytesOf(...), keepRecentTokens: 1300, condense: condenser($asked));
+    $prompt     = step($compact, $messages, tools: readTools());
+    $folded     = $summarizer->asked(0);
+
+    expect($summarizer->prompts)->toHaveCount(1)
+        ->and($asked)->toBe(['f1.php', 'f2.php', 'f1.php', 'f4.php', 'f5.php'])
+        // The oldest half reaches the summarizer condensed, the repeated read once: the latest.
+        ->and($folded)->toContain("[calls summarize_file {\"path\":\"f2.php\"}]\n")->toContain("Summary of 'f2.php'")
+        ->and(\substr_count($folded, '[calls summarize_file {"path":"f1.php"}]'))->toBe(1)
+        ->and($folded)->not->toContain(\str_repeat('1', 1000))
+        ->and($folded)->not->toContain('f5.php')
+        // The quarter before the recent one stays, condensed; the recent quarter verbatim.
+        ->and($prompt->messages)->toHaveCount(6)
+        ->and($prompt->messages[1]->parts[0]->text)->toContain('S1')
+        ->and($prompt->messages[2]->parts[0])->toEqual(new ToolCall('c5', 'summarize_file', ['path' => 'f5.php']))
+        ->and($prompt->messages[3]->parts[0]->content[0]->text)->toBe("Summary of 'f5.php'")
+        ->and(\array_slice($prompt->messages, 4))->toBe(\array_slice($messages, 11))
+        ->and($compact->last()->condensed)->toBe(5)
+        ->and($compact->last()->deduplicated)->toBe(1)
+        ->and($compact->state()->demotions[0]->toArray())->toMatchArray(['until' => 11, 'end' => 13])
+        ->and($compact->state()->checkpoints[0]->covered)->toBe(9)
         ->and(State::fromArray(\json_decode(\json_encode($compact->state()), true))->demotions)->toEqual($compact->state()->demotions);
 });
 
-it('reuses the demotion while the prompt fits, so the prompt keeps its prefix and only grows', function () {
-    $condense = fn (ToolCall $call, Harness\Cancel $cancel): ?string => "SUMMARY of {$call->input['path']}";
-    $compact  = new Compact(new Summaries(), 4000, bytesOf(...), keepRecentTokens: 1300, condense: $condense);
-    $messages = reads(6);
-    $first    = step($compact, $messages);
-    $messages = [...$messages, ...reads(1, 7)];
-    $second   = step($compact, $messages);
+it('drops a repeated call only when its tool is read-only, and keeps the latest', function () {
+    $messages   = reads(6, paths: [3 => 'f1.php']);
+    $summarizer = new Summaries();
+    // No specs: Compact cannot know read_file is read-only, so both reads of f1.php stay.
+    step(new Compact($summarizer, 4000, bytesOf(...), keepRecentTokens: 1300), $messages);
+    expect(\substr_count($summarizer->asked(0), '[calls read_file {"path":"f1.php"}]'))->toBe(2);
 
-    // f6 has left the recent quarter but stays verbatim: the boundaries are the first step's.
-    expect(\array_slice($second->messages, 0, 13))->toEqual($first->messages)
-        ->and($second->messages[12])->toBe($messages[12])
-        ->and($compact->last()->reused)->toBeTrue()
-        ->and($compact->last()->condensed)->toBe(1)
-        ->and($compact->last()->demoted)->toBe(4)
-        ->and($compact->state()->demotions)->toHaveCount(1);
-
-    // Over the budget again: new boundaries, from the step in flight now.
-    $messages = [...$messages, ...reads(2, 8)];
-    $third    = step($compact, $messages);
-    expect($third->messages[16]->parts[0]->content[0]->text)->toBe('SUMMARY of f8.php')
-        ->and($third->messages[14]->parts[0]->content[0]->text)->toBe('[read_file] path=f7.php (1,000 chars result)')
-        ->and($third->messages[18])->toBe($messages[18])
-        ->and($compact->last()->reused)->toBeFalse()
-        ->and($compact->state()->demotions)->toHaveCount(2)
-        ->and($compact->state()->demotions[0]->until)->toBe(17);
+    $summarizer = new Summaries();
+    step(new Compact($summarizer, 4000, bytesOf(...), keepRecentTokens: 1300), $messages, tools: readTools());
+    expect(\substr_count($summarizer->asked(0), '[calls read_file {"path":"f1.php"}]'))->toBe(1)
+        ->and($summarizer->asked(0))->toContain("[calls read_file {\"path\":\"f1.php\"}]\n\nUSER:\n[result]\nUSER:\n" . \str_repeat('3', 1000));
 });
 
-it('folds the older part only when demotion alone does not reach the budget, and the summarizer sees the stubs, not the raw bodies', function () {
-    $messages = [user('the task')];
-    for ($i = 1; $i <= 6; ++$i) {
-        $messages[] = assistant(new Text("step $i"), new ToolCall("c$i", 'read_file', ['path' => "f$i.txt"]));
-        $messages[] = new Message(Role::User, [new ToolResult("c$i", [new Text(\str_repeat((string) $i, 1000))])]);
-    }
+it('reuses the condensing while the prompt fits, so the prompt keeps its prefix and only grows', function () {
     $summarizer = new Summaries();
-    $compact    = new Compact($summarizer, 900, bytesOf(...), keepRecentTokens: 50);
-    step($compact, $messages);
+    $compact    = new Compact($summarizer, 4000, bytesOf(...), keepRecentTokens: 1300, condense: condenser());
+    $messages   = reads(6);
+    $first      = step($compact, $messages, tools: readTools());
+    $messages   = [...$messages, ...reads(1, 7)];
+    $second     = step($compact, $messages, tools: readTools());
 
-    expect($summarizer->prompts)->toHaveCount(1)
-        ->and($summarizer->asked(0))->not->toContain(\str_repeat('1', 300))
-        ->and($summarizer->asked(0))->toContain('[read_file] path=f1.txt (1,000 chars result)')
-        ->and($compact->last()->demoted)->toBeGreaterThan(0)
-        ->and($compact->last()->removed)->toBeGreaterThan(0);
+    // f6 has left the recent quarter but stays verbatim: the condensing is the first step's.
+    expect(\array_slice($second->messages, 0, 6))->toEqual($first->messages)
+        ->and($second->messages[5])->toBe($messages[12])
+        ->and($summarizer->prompts)->toHaveCount(1)
+        ->and($compact->last()->reused)->toBeTrue()
+        ->and($compact->last()->condensed)->toBe(1);
+
+    // Over the budget again: the checkpoint is updated and the condensing moves on.
+    $messages = [...$messages, ...reads(2, 8)];
+    $third    = step($compact, $messages, tools: readTools());
+    expect($summarizer->prompts)->toHaveCount(2)
+        ->and($summarizer->asked(1))->toContain('The current checkpoint:')
+        ->and($third->messages[\count($third->messages) - 1])->toBe($messages[18])
+        ->and($compact->last()->reused)->toBeFalse()
+        ->and($compact->state()->demotions[0]->end)->toBe(19);
 });
 
 it('gives the summarizer no reasoning and no inline <think> block of the agent, as Hermes Agent does', function () {
@@ -294,11 +279,12 @@ it('keeps the most recent keepRecentTokens verbatim, cut on a boundary that keep
     $compact  = new Compact(new Summaries(), 4000, bytesOf(...), keepRecentTokens: 1200);
     $messages = agentic(8);                       // about 4.5 KB
     $prompt   = step($compact, $messages);
-    // Two pairs (about 1.1 KB) fit the reserve, a third does not; a result never starts the recent part.
-    expect(\array_slice($prompt->messages, 2))->toBe(\array_slice($messages, 13))
+    // Two pairs (about 1.1 KB) fit the reserve, a third does not; a result never starts the recent
+    // part. The band before it, as large again, stays too (condensed, had Compact a condense).
+    expect(\array_slice($prompt->messages, 2))->toBe(\array_slice($messages, 9))
         ->and($prompt->messages[2]->parts[1])->toBeInstanceOf(ToolCall::class)
-        ->and($compact->last()->removed)->toBe(12)
-        ->and($compact->last()->kept)->toBe(4)
+        ->and($compact->last()->removed)->toBe(8)
+        ->and($compact->last()->kept)->toBe(8)
         ->and(bytesOf(TestPrompt::make(null, \array_slice($messages, 13))))->toBeLessThanOrEqual(1200)
         ->and(bytesOf(TestPrompt::make(null, \array_slice($messages, 11))))->toBeGreaterThan(1200);
 
@@ -397,7 +383,7 @@ it('compacts inside a run: the model sees the checkpoint, the run keeps every me
     $read = tool('read', fn (array $in) => Harness\Result::text(\str_repeat('x', 200)), new Harness\Hints(readOnly: true));
     // No usage reported, so the counter is not calibrated.
     $quiet = fn (array $deltas) => \array_values(\array_filter($deltas, fn ($d) => !$d instanceof Harness\Usage));
-    $model = new FakeModel($quiet(calls(['c1', 'read', []])), $quiet(calls(['c2', 'read', []])), $quiet(calls(['c3', 'read', []])), $quiet(calls(['c4', 'read', []])), $quiet(says('done')));
+    $model = new FakeModel($quiet(calls(['c1', 'read', ['n' => 1]])), $quiet(calls(['c2', 'read', ['n' => 2]])), $quiet(calls(['c3', 'read', ['n' => 3]])), $quiet(calls(['c4', 'read', ['n' => 4]])), $quiet(says('done')));
     $run   = new Run($model, new Tools($read), middleware: [new Compact($summaries = new Summaries(), 1200, bytesOf(...), log: $log)]);
     turn($run, user('go'));
     $levels = \array_column($log->lines, 0);

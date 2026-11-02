@@ -58,12 +58,14 @@ When the prompt counts over the budget:
 
 - The system prompt, the tool specs and the first `$keepFirst` messages stay as they are (and a
   tool result message that answers the last of them).
-- The most recent messages that count within `keepRecentTokens` (default a quarter of the budget)
-  stay verbatim; everything between them and the kept first messages is folded into the
-  checkpoint. The cut lands on a message boundary that keeps every `ToolResult` with its `ToolCall`.
+- The prompt is compacted in three parts, counted back from the step in flight: the most recent
+  messages that count within `keepRecentTokens` (default a quarter of the budget) stay verbatim;
+  the part before them, as large again, stays condensed (see below); everything older, after the
+  kept first messages, is folded into the checkpoint. Each cut lands on a message boundary that
+  keeps every `ToolResult` with its `ToolCall`.
 - Whatever the reserve, the recent part holds the step in flight: the last assistant message and
   its results (or the latest user message when no reply follows it).
-- The latest user message stays verbatim: when the cut falls after it (a tool loop answering it
+- The latest user message stays verbatim: when the fold covers it (a tool loop answering it
   outgrew the reserve), it is folded into the checkpoint, so the task can quote it, and also kept
   right after the checkpoint, so the agent answers the current question, not an older one.
 - While the conversation keeps the prefix a checkpoint covers and the prompt fits with it, the
@@ -82,37 +84,34 @@ When the prompt counts over the budget:
 Only the prompt changes. `Run::messages()`, `Ended::$appended` and a transcript keep every message.
 A continued prompt (`Prompt::$continue`) is handed on as one; its last message is never folded.
 
-## Demoting old tool results
+## Condensing what is older than the recent part
 
-Before any side call, a cheap tier tries to shrink the prompt on its own, as Hermes Agent's
-`_prune_old_tool_results` does. The recent part (`keepRecentTokens`, a quarter of the budget) stays
-verbatim; in the band before it, as large again, a result becomes what `$condense` gives for its
-call; older than that, between the kept-first messages and the band:
+Everything older than the recent part is condensed before anything is folded:
 
-- a `ToolResult` over 200 bytes becomes one line naming the call that made it, its first two
-  arguments and the result's size, `[read_file] path=src/a.php (5,120 chars result)`, and for an
-  error also its first line (`... FAILED: no such file`);
-- a body that appears again later in the conversation becomes `[Duplicate tool output — same
-  content as a more recent call]` instead: the newest copy of a repeated result stays whole;
-- a `ToolCall`'s arguments are never rewritten, and a result holding anything but text (an image, say)
-  is left alone, since it cannot be shrunk by text.
+- each successful call is replaced by what `$condense` gives for it, the call and its result text,
+  or kept when it gives null;
+- then a call to a read-only tool (by the hints of the prompt's tool specs) that is made again,
+  identically, later in the conversation is dropped with its result: only the latest stays. A
+  repeated `shell` call is kept, since its result may differ each time.
 
-`$condense` is `fn (ToolCall $call, Cancel $cancel): ?string`, null for a stub. With
-`Tools\Files\SummarizeFile`, a file read in the band becomes the file's summary (its declarations
-without bodies for code; see [files](files.md)), so the agent keeps the shape of what it read:
+`$condense` is `fn (ToolCall $call, Cancel $cancel): ?array` returning `[ToolCall, string]`. With
+`Tools\Files\SummarizeFile` (see [files](files.md)), a `read_file` call is shown as the
+`summarize_file` call of the same file, and its result as what that tool returns: for code, the
+file's declarations without bodies, with the lines each spans. The prompt then reads as though the
+agent had asked for the summary itself, and the line ranges let it read just the part it needs.
+Several reads of the same file become the same call, so only the latest summary stays.
 
 ```php
 $summarize = new SummarizeFile($root, $smallModel);
 $compact   = new Compact($smallModel, condense: $summarize->condense(...));
 ```
 
-When that alone brings the prompt under budget, it goes on with no checkpoint and no side call at
-all. Only when it does not is the older part folded as above, and the summarizer then sees whatever
-demotion left there, not the raw bodies. The boundaries are kept in `State` (`Demotion`: a content
-hash of the messages they cover, where the band starts and where it ends) and reused on every
-later step while the prompt fits: between compactions the prompt keeps its prefix and only grows,
-so the provider prefills only what is new. `last()->demoted` and `last()->condensed` count the
-results stubbed and condensed, set whether or not a checkpoint was also made.
+The summarizer folds the oldest part in this form, so it sees the summaries, not the files, and
+decides what of them the checkpoint keeps. The condensing is kept in `State` (`Demotion`: a content
+hash of the conversation when it was made, where it ends, and the conversation's length then) and
+reused with the checkpoint on every later step while the prompt fits: between compactions the
+prompt keeps its prefix and only grows, so the provider prefills only what is new.
+`last()->condensed` and `last()->deduplicated` count the calls condensed and dropped.
 
 ## The side call
 
@@ -213,11 +212,11 @@ an instance only among conversations with the same model and fixed part.
 ## Seeing it
 
 The core has no event for compaction. Each new checkpoint is logged at `info` (messages removed,
-size, budget, counter ratio and offset) and in full at `debug`; demotion alone, when it brings the
-prompt under budget without one, is logged at `info` too. `last(): ?Compaction` tells what the last
+size, budget, counter ratio and offset, and the calls condensed and dropped) and in full at
+`debug`; condensing alone, when there is nothing to fold, is logged at `info` too. `last(): ?Compaction` tells what the last
 step did: `removed`, `kept` (messages after the checkpoint, verbatim), `summary` (the checkpoint
 text), `before` and `after` (calibrated tokens), `reused`, `previousSummaryBytes` (the checkpoint
 this one updated, null for the first), `ratio`, `offset`, `finish`, `truncatedUpstream` and
-`demoted` (how many `ToolResult`s the cheap tier shrank this step, 0 when none qualified, set
-whether or not a checkpoint was also made). It is null when the step's prompt went on unchanged and
+`condensed` and `deduplicated` (the calls condensed and dropped, set whether or not a checkpoint
+was also made). It is null when the step's prompt went on unchanged and
 was not cut upstream. [`examples/compact.php`](../examples/compact.php) prints both.

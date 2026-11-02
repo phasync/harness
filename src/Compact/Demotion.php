@@ -5,25 +5,25 @@ declare(strict_types=1);
 namespace Harness\Compact;
 
 /**
- * Where `Compact` last demoted a conversation's tool results: those before `until` (after the kept
- * first messages and any checkpoint), condensed from `condensed` on and stubbed before it. `hash`
- * is a content hash of the first `until` messages, so the same boundaries serve every later step
- * of the conversation, and the prompt keeps its prefix, until it is over the budget again. A JSON
- * value, part of `State`.
+ * How `Compact` last condensed a conversation: the results of reads before `until` (after the
+ * kept first messages and any checkpoint) replaced by `$condense`, and read-only calls repeated
+ * before `end` dropped but for the latest. `hash` is a content hash of the first `end` messages,
+ * so the same condensing serves every later step of the conversation, and the prompt keeps its
+ * prefix, until it is over the budget again. A JSON value, part of `State`.
  */
 final readonly class Demotion implements \JsonSerializable
 {
-    public function __construct(public string $hash, public int $until, public int $condensed)
+    public function __construct(public string $hash, public int $until, public int $end)
     {
-        if ($until < 1 || $condensed < 0 || $condensed > $until) {
-            throw new \InvalidArgumentException("A demotion condenses from an index at or before the one it ends at, got condensed $condensed, until $until");
+        if ($until < 1 || $end < $until) {
+            throw new \InvalidArgumentException("A demotion ends where the conversation did then, at or after what it condenses, got until $until, end $end");
         }
     }
 
-    /** @return array{hash: string, until: int, condensed: int} */
+    /** @return array{hash: string, until: int, end: int} */
     public function toArray(): array
     {
-        return ['hash' => $this->hash, 'until' => $this->until, 'condensed' => $this->condensed];
+        return ['hash' => $this->hash, 'until' => $this->until, 'end' => $this->end];
     }
 
     /** @return array<string, mixed> */
@@ -35,12 +35,12 @@ final readonly class Demotion implements \JsonSerializable
     /** @param array<string, mixed> $data */
     public static function fromArray(array $data): self
     {
-        foreach (['hash' => 'is_string', 'until' => 'is_int', 'condensed' => 'is_int'] as $key => $is) {
+        foreach (['hash' => 'is_string', 'until' => 'is_int', 'end' => 'is_int'] as $key => $is) {
             if (!$is($data[$key] ?? null)) {
                 throw new \InvalidArgumentException("A demotion array needs \"$key\" (" . \substr($is, 3) . ')');
             }
         }
 
-        return new self($data['hash'], $data['until'], $data['condensed']);
+        return new self($data['hash'], $data['until'], $data['end']);
     }
 }
