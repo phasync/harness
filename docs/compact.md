@@ -38,7 +38,8 @@ of its size, and sent once more; a second rejection is thrown. `$auto` false com
 ## The summary
 
 The model is the run's own, reached through the rest of the middleware chain, unless `$summarizer`
-is given. It gets the step's request unchanged (system prompt, tools, conversation), the same
+is given; a middleware after `Compact` that adds to every step's prompt passes the summary request
+on unchanged when `Compact::isSummaryRequest($prompt)` says it is one (`Tools\Plan\Reminder` does). It gets the step's request unchanged (system prompt, tools, conversation), the same
 prefix as the step itself, so it reads it from the prompt cache, with one user message appended:
 
 ```

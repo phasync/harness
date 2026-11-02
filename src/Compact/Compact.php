@@ -351,22 +351,27 @@ final class Compact implements ModelMiddleware
      */
     private function summary(Prompt $request, ?array $size, string $text, array $limit, \Closure $next): string
     {
-        $prompted = self::fitOutput(self::with($request, [...$request->messages, self::user($text)]), $limit, null === $size ? null : [$size[0], $size[1] + self::tokens($text)]);
-        $reply    = $this->reply($prompted, $next);
+        $prompted       = self::fitOutput(self::with($request, [...$request->messages, self::user($text)]), $limit, null === $size ? null : [$size[0], $size[1] + self::tokens($text)]);
+        [$reply, $what] = $this->reply($prompted, $next);
         if (self::filled($reply)) {
             return $reply;
         }
-        $nudged = self::fitOutput(self::with($prompted, [...$prompted->messages, self::user(self::NUDGE)]), $limit, null === $size ? null : [$size[0], $size[1] + self::tokens($text) + self::tokens(self::NUDGE)]);
-        $retry  = $this->reply($nudged, $next);
+        $nudged          = self::fitOutput(self::with($prompted, [...$prompted->messages, self::user(self::NUDGE)]), $limit, null === $size ? null : [$size[0], $size[1] + self::tokens($text) + self::tokens(self::NUDGE)]);
+        [$retry, $again] = $this->reply($nudged, $next);
         if (self::filled($retry)) {
             return $retry;
         }
 
-        throw new \RuntimeException('' !== $retry ? 'Compaction summary did not match the required template' : 'Compaction produced no summary');
+        throw new \RuntimeException(('' !== $retry ? 'Compaction summary did not match the required template' : 'Compaction produced no summary') . " (the reply: $what; after the reminder: $again)");
     }
 
-    /** The reply's text, without reasoning a model writes inline in `<think>` tags. */
-    private function reply(Prompt $prompt, \Closure $next): string
+    /**
+     * The reply's text, without reasoning a model writes inline in `<think>` tags, and how it
+     * ended, for an error: its finish reason and the tools it called.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function reply(Prompt $prompt, \Closure $next): array
     {
         $acc = new Accumulator();
         foreach (null === $this->summarizer ? $next($prompt) : $this->summarizer->stream($prompt) as $delta) {
@@ -377,14 +382,31 @@ final class Compact implements ModelMiddleware
             FinishReason::Refusal => throw new \RuntimeException('Compaction summary was blocked by the provider'),
             default               => null,
         };
-        $text = '';
+        $text  = '';
+        $calls = [];
         foreach ($acc->message()->parts as $part) {
             if ($part instanceof Text) {
                 $text .= $part->text;
+            } elseif ($part instanceof ToolCall) {
+                $calls[] = $part->name;
             }
         }
+        $text = \trim((string) \preg_replace('#<think>.*?</think>#is', '', $text));
 
-        return \trim((string) \preg_replace('#<think>.*?</think>#is', '', $text));
+        return [$text, 'finish ' . ($acc->finish()->value ?? 'none') . ', ' . \mb_strlen($text) . ' characters' . ([] === $calls ? '' : ', calling ' . \implode(', ', $calls))];
+    }
+
+    /**
+     * True for a request `Compact` makes for a summary through the rest of the chain (its prompt or
+     * its reminder last): a middleware after `Compact` that adds to each step's prompt, such as
+     * `Tools\Plan\Reminder`, passes such a request on unchanged.
+     */
+    public static function isSummaryRequest(Prompt $prompt): bool
+    {
+        $last = $prompt->messages[\count($prompt->messages) - 1] ?? null;
+        $text = Role::User === $last?->role && $last->parts[0] instanceof Text ? $last->parts[0]->text : '';
+
+        return self::NUDGE === $text || $text === self::buildPrompt(false) || $text === self::buildPrompt(true);
     }
 
     /**

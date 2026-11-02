@@ -140,3 +140,21 @@ it('works with Compact in front: the reminder reaches the model, never the check
         ->and($summarizer->prompts)->toHaveCount(1)
         ->and($summarizer->prompts[0]->messages[0]->parts[0]->text)->not->toContain('Goal:')->not->toContain('Plan:');
 });
+
+it('passes Compact\'s summary request through unchanged when Compact uses the run\'s own model', function () {
+    $plan = new Plan();
+    $plan->set(['investigate', 'fix']);
+    $model   = new FakeModel(says("## Objective\n- Fix it"), says('ok'));
+    $compact = new Compact();
+    $compact->compactNext();
+    $run = new Run($model, new Tools(), middleware: [$compact, new Reminder($plan)], messages: [user('Fix it'), new Message(Role::Assistant, [new Text('looking')])]);
+    turn($run, user('go on'));
+
+    $summaryAsk = $model->prompts[0]->messages[\count($model->prompts[0]->messages) - 1];
+    expect(Compact::isSummaryRequest($model->prompts[0]))->toBeTrue()
+        ->and($summaryAsk->parts)->toHaveCount(1)
+        ->and($summaryAsk->parts[0]->text)->toStartWith('You MUST summarize')
+        // The step itself still gets the reminder, its goal from the checkpoint's Objective.
+        ->and(Compact::isSummaryRequest($model->prompts[1]))->toBeFalse()
+        ->and($model->prompts[1]->messages[0]->parts[1]->text)->toStartWith("Goal: - Fix it\n\nPlan:");
+}); // #114

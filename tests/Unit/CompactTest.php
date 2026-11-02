@@ -211,8 +211,8 @@ it('reminds the summarizer of the template once, then fails', function (array $f
         ->toBe(['The previous response did not fill in the required summary template. Do not call tools. Return the summary as text using the exact section headings from the template.']);
 })->with([
     'then fills it' => [says('Here you go'), filled('S2'), null],
-    'skips it'      => [says('nope'), says('still nope'), 'Compaction summary did not match the required template'],
-    'empty'         => [says(''), says(''), 'Compaction produced no summary'],
+    'skips it'      => [says('nope'), says('still nope'), 'Compaction summary did not match the required template (the reply: finish stop, 4 characters; after the reminder: finish stop, 10 characters)'],
+    'empty'         => [says(''), [new Harness\Delta\ToolCallStart('c1', 'read'), new Harness\Delta\ToolInputDelta('c1', '{}'), new Harness\Delta\ToolCallEnd('c1'), new Finish(FinishReason::ToolCalls)], 'Compaction produced no summary (the reply: finish stop, 0 characters; after the reminder: finish tool_calls, 0 characters, calling read)'],
 ]);
 
 it('fails a summary cut at the output limit', function () {

@@ -779,7 +779,7 @@ it('reports a second collapsed checkpoint as the turn\'s MiddlewareError, not Mo
     expect($run->ended()->reason)->toBe(Reason::Failed)
         ->and($run->ended()->errorKind)->toBe(ErrorKind::MiddlewareError)
         ->and($run->ended()->error)->toBeInstanceOf(RuntimeException::class)
-        ->and($run->ended()->error->getMessage())->toBe('Compaction produced no summary');
+        ->and($run->ended()->error->getMessage())->toBe('Compaction produced no summary (the reply: finish stop, 0 characters; after the reminder: finish stop, 0 characters)');
 });
 
 /*

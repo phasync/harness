@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Harness\Tools\Plan;
 
+use Harness\Compact\Compact;
 use Harness\Message;
 use Harness\ModelMiddleware;
 use Harness\Part\Text;
@@ -26,7 +27,8 @@ use Harness\Role;
  *
  * Placed after `Compact` in a `Run`'s middleware (`[Compact, Reminder]`), `Reminder` sees the
  * prompt Compact already folded and adds the reminder on top of it; because the reminder never
- * reaches `Run::messages()`, a later compaction never folds it either.
+ * reaches `Run::messages()`, a later compaction never folds it either. Compact's own summary
+ * requests (`Compact::isSummaryRequest()`) pass through unchanged and are not counted.
  */
 final class Reminder implements ModelMiddleware
 {
@@ -47,6 +49,10 @@ final class Reminder implements ModelMiddleware
 
     public function stream(Prompt $prompt, \Closure $next): iterable
     {
+        // Compact's summary request is about the conversation, not a step of the plan (#114).
+        if (Compact::isSummaryRequest($prompt)) {
+            return $next($prompt);
+        }
         if (0 !== ++$this->calls % $this->every) {
             return $next($prompt);
         }

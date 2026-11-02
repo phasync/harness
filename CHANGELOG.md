@@ -45,6 +45,10 @@
 
 ### Fixed
 
+- `Tools\Plan\Reminder` no longer appends the plan to `Compact`'s summary request, which the run's
+  own model got through the chain and answered by working the plan instead of summarizing;
+  `Compact::isSummaryRequest()` names such requests. A compaction that gets no summary says how both
+  replies ended (#114).
 - `Run`: a model middleware may call the model more than once in a step (Compact's summary through
   the run's own model did): the raw stream is validated per call, not per step (#113).
 - `Run::cancel()` while a tool asks for input: the call gets a "cancelled" error result and the
