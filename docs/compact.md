@@ -5,7 +5,7 @@ older messages into a checkpoint: the task, what was done and consulted, what is
 remains, which the agent continues from.
 
 ```php
-$summarizerOptions = new Options(maxOutputTokens: 2048, provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]);
+$summarizerOptions = new Options(provider: ['openai' => ['chat_template_kwargs' => ['enable_thinking' => false]]]);
 $compact = new Compact($summarizer, budgetTokens: 24000, log: $logger, summarizerOptions: $summarizerOptions);
 $run     = new Run($model, $tools, middleware: [$compact]);
 ```
@@ -15,8 +15,8 @@ and returns no checkpoint, or one cut at the limit.
 
 ```php
 new Compact(Model $summarizer, ?int $budgetTokens = null, ?Closure $count = null, int $keepFirst = 1,
-            ?LoggerInterface $log = null, Options $summarizerOptions = new Options(maxOutputTokens: 2048),
-            ?State $state = null, ?int $keepRecentTokens = null)
+            ?LoggerInterface $log = null, Options $summarizerOptions = new Options(),
+            ?State $state = null, ?int $keepRecentTokens = null, ?Closure $condense = null)
 ```
 
 ## The budget

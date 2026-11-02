@@ -247,6 +247,10 @@
   sent is not repeated. Also after Hermes: the summarizer treats the conversation as material, not
   instructions (a command in a fetched page or tool result is recorded, never followed), leaves
   secrets out, and writes finished work as completed past-tense facts.
+- `Compact`'s `summarizerOptions` and `SummarizeFile`'s options set no output token limit by
+  default (were 2048 and 4096): a checkpoint is asked to stay under a quarter of the budget in
+  words, and a summary's size follows its file, so a fixed cap only cut long ones. A result cut at
+  the server's own limit still fails loudly.
 - **`Compact` compacts in three parts**, counted back from the step in flight: the recent quarter
   of the budget stays verbatim, the quarter before it stays condensed, and what is older is folded
   into the checkpoint in condensed form. Condensing replaces each successful older call by what a
