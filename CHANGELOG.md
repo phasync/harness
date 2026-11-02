@@ -6,7 +6,9 @@
 
 - **`Tools\Files\SummarizeFile`** (`summarize_file`): a model condenses a file, source code as its
   declarations, signatures and docblocks without function bodies or private members, any other file
-  as a summary, each part with the lines it spans; cached by size and modification time.
+  as a summary, each part with the lines it spans and each removed body replaced by a note of what
+  it does unless its docblock says so; cached by size and modification time. `read_file`'s
+  description says to read just the lines needed when known.
 - **`Harness\Tools\Web`**: `WebSearch` and `WebFetch` tools, a `Search` interface with a `SearXng`
   implementation over a self-hosted instance's JSON API, and a dependency-free HTML-to-text
   extractor (a `<br>` is a line break; a nested list's items are indented under their parent

@@ -21,7 +21,8 @@ $tools = new Tools(new ReadFile($root), new ListDir($root), new Glob($root), new
 | `summarize_file` | `path` | readOnly, idempotent |
 
 `SummarizeFile($root, $model)` has `$model` condense a file: source code as its declarations, with
-their signatures and docblocks, without function bodies or private members; any other text file as a
+their signatures and docblocks, each function body replaced by a short note of what it does (unless
+its docblock says so), private members left out; any other text file as a
 summary of what it holds, each part with the range of lines it spans, so the agent can `read_file`
 just that part. A summary is cached by the file's size and modification time, so asking again for
 an unchanged file costs no model call. The agent uses it to get to know a file cheaply; `Compact`

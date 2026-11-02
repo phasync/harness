@@ -41,7 +41,7 @@ final readonly class ReadFile implements Tool
 
     public function spec(): ToolSpec
     {
-        return new ToolSpec('read_file', "Read a file. Text comes back as numbered lines, {$this->limit} at most per call; images come back as images.", [
+        return new ToolSpec('read_file', "Read a file. Text comes back as numbered lines, {$this->limit} at most per call; images come back as images. When you know which lines you need, read just those (offset, limit).", [
             'type'       => 'object',
             'properties' => [
                 'path'   => ['type' => 'string', 'description' => 'Path relative to the root'],
