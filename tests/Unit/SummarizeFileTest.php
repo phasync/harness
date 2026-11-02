@@ -32,7 +32,7 @@ it('summarizes a file with the model and says what to keep, for code and for any
         ->and($model->prompts[0]->system)->toContain('the range of lines it spans, body included')
         ->and($model->prompts[0]->messages[0]->parts[0]->text)->toBe("The file 'src/a.php':\n\n     1\t<?php\n     2\tfunction alpha(int \$x): int { return \$x * 2; }\n")
         ->and($model->prompts[0]->tools)->toBe([])
-        ->and($model->prompts[0]->options->maxOutputTokens)->toBe(4096);
+        ->and($model->prompts[0]->options->maxOutputTokens)->toBeNull();
 });
 
 it('caches a summary by the file\'s size and modification time', function () {
@@ -52,7 +52,7 @@ it('refuses a missing file, a directory and a binary file, and a summary cut at 
     expect(fn () => $tool->call(['path' => 'nope.php'], callFor()))->toThrow(RuntimeException::class, "'nope.php' does not exist")
         ->and(fn () => $tool->call(['path' => 'src'], callFor()))->toThrow(RuntimeException::class, "'src' is a directory")
         ->and(fn () => $tool->call(['path' => 'bin.dat'], callFor()))->toThrow(RuntimeException::class, "'bin.dat' is not a text file")
-        ->and(fn () => $tool->call(['path' => 'src/a.php'], callFor()))->toThrow(RuntimeException::class, "The summary of 'src/a.php' was cut at the summarizer's output token limit (4096)");
+        ->and(fn () => $tool->call(['path' => 'src/a.php'], callFor()))->toThrow(RuntimeException::class, "The summary of 'src/a.php' was cut at the summarizer's output token limit (the server's own); give SummarizeFile more output tokens");
 });
 
 it('shows a read_file call of an existing file as its summarize_file call for Compact, and nothing else', function () {

@@ -53,7 +53,7 @@ final class SummarizeFile implements Tool
     public function __construct(
         private readonly Root $root,
         private readonly Model $model,
-        private readonly Options $options = new Options(maxOutputTokens: 4096),
+        private readonly Options $options = new Options(),
     ) {
     }
 
@@ -123,7 +123,7 @@ final class SummarizeFile implements Tool
         }
         $text = \trim((string) \preg_replace('#<think>.*?</think>#is', '', $text));
         if (FinishReason::Length === $acc->finish()) {
-            throw new \RuntimeException("The summary of '$path' was cut at the summarizer's output token limit ({$this->options->maxOutputTokens}); give SummarizeFile more output tokens");
+            throw new \RuntimeException("The summary of '$path' was cut at the summarizer's output token limit" . (null === $this->options->maxOutputTokens ? " (the server's own)" : " ({$this->options->maxOutputTokens})") . '; give SummarizeFile more output tokens');
         }
         if ('' === $text) {
             throw new \RuntimeException("The summarizer returned no summary of '$path'");
