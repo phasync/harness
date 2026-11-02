@@ -427,3 +427,16 @@ it('asks the Responses API for a compaction with a trigger item and returns its 
     expect(fn () => (new Harness\Provider\OpenAI\Responses($none, 'https://api.example/v1', 'gpt-x'))->checkpoint(TestPrompt::make(null, [user('a')])))
         ->toThrow(ModelException::class, 'exactly one checkpoint');
 });
+
+it('compacts inside a Run with the run\'s own model, the summary never reaching the turn', function () {
+    $model   = new FakeModel(says('no template'), filled('S1'), says('answer'));
+    $compact = new Compact();
+    $compact->compactNext();
+    $run    = new Harness\Run($model, new Harness\Tools(), middleware: [$compact], messages: [user('task'), said('ok')]);
+    $events = turn($run, user('more'));
+
+    expect($run->ended()->reason)->toBe(Harness\Reason::Done)
+        ->and(\array_slice($run->messages(), 2))->toEqual([user('more'), said('answer')])
+        ->and($model->prompts[2]->messages)->toEqual([user(checkpointText("## Objective\n- S1", '[User]: more'))])
+        ->and(\implode('', \array_map(fn ($e) => $e instanceof Harness\Event\TextDelta ? $e->text : '', $events)))->toBe('answer');
+}); // #113

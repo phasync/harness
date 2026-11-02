@@ -119,6 +119,24 @@ it('applies middleware in array order, outermost first', function () {
     ]);
 });
 
+it('lets a model middleware call the model more than once in a step', function () {
+    // Compact's own summary request goes through the rest of the chain before the step's.
+    $twice = new class implements ModelMiddleware {
+        public function stream(Prompt $prompt, Closure $next): iterable
+        {
+            \iterator_to_array($next($prompt), false);
+
+            return $next($prompt);
+        }
+    };
+    $model = new FakeModel(says('first'), says('second'));
+    $run   = new Run($model, new Tools(), middleware: [$twice]);
+    turn($run, user('hi'));
+
+    expect($run->ended()->reason)->toBe(Reason::Done)
+        ->and($run->messages()[1]->parts)->toEqual([new Text('second')]);
+}); // #113
+
 it('lets middleware rewrite the prompt and the result', function () {
     $model = new FakeModel(calls(['c', 't', ['v' => 1]]), says('ok'));
     $mw    = new class implements ModelMiddleware, ToolMiddleware {

@@ -61,8 +61,7 @@ final class Run
     private ?\WeakReference $generator = null; // that generator, to tell a dropped one from a kept one
     private ?\LogicException $misuse   = null; // the last turn's misuse exception, until turn() has thrown it
     private bool $cancelled            = false;
-    private Accumulator $shadow;
-    private bool $interrupted  = false;
+    private bool $interrupted          = false;
     /** The interrupted reply, as delivered when the turn's model stream stopped. */
     private ?Message $partial  = null;
     /** @var list<Message> user messages given to interject() to steer, not yet landed */
@@ -589,8 +588,7 @@ final class Run
     {
         $id = 'msg_' . \bin2hex(\random_bytes(8));
         $emit(null === $seed ? new MessageStarted($turn, $parent, $id) : new MessageResumed($turn, $parent, $id));
-        $acc          = new Accumulator($seed);
-        $this->shadow = new Accumulator($seed); // callModel() validates the raw stream with it, so a fault here is a middleware's
+        $acc = new Accumulator($seed);
         try {
             foreach ($this->modelChain(0, $prompt) as $delta) {
                 if (!$delta instanceof Delta) {
@@ -661,12 +659,15 @@ final class Run
         foreach ($prompt->tools as $spec) {
             $this->offered[$spec->name] = true;
         }
+        // Validates this call's raw stream, so a fault in the step's accumulator is a middleware's. Per
+        // call: a middleware may call the model more than once in a step (#113).
+        $shadow = new Accumulator($prompt->continue ? $prompt->messages[\count($prompt->messages) - 1] : null);
         try {
             foreach ($this->model->stream($prompt) as $delta) {
                 if (!$delta instanceof Delta) {
                     throw new \LogicException('A model yielded ' . \get_debug_type($delta) . ', not a Harness\Delta');
                 }
-                $this->shadow->add($delta); // a malformed sequence is the provider's fault; the middleware chain has not seen it yet
+                $shadow->add($delta); // a malformed sequence is the provider's fault; the middleware chain has not seen it yet
                 yield $delta;
             }
         } catch (\Throwable $e) {

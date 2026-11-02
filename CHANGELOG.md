@@ -45,6 +45,8 @@
 
 ### Fixed
 
+- `Run`: a model middleware may call the model more than once in a step (Compact's summary through
+  the run's own model did): the raw stream is validated per call, not per step (#113).
 - `Run::cancel()` while a tool asks for input: the call gets a "cancelled" error result and the
   turn ends `Cancelled`, as promised, instead of `AwaitingInput` with a stale pending call (#11).
 - `Policy\Shell`: a program spelled with an unquoted glob (`r[m]`) is denied outright (#12), and
