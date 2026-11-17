@@ -22,6 +22,6 @@ jobs:
           extensions: mbstring, zlib
           coverage: none
       - run: composer install --no-interaction --no-progress
-      - run: vendor/bin/pest --exclude-group live --exclude-group bug
+      - run: vendor/bin/pest --exclude-group=live,bug
         env:
           HARNESS_ADAPTER: ${{ matrix.adapter }}
