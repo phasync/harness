@@ -243,7 +243,16 @@ final class Run
                 // the host left the loop at TurnEnded: the turn's misuse exception surfaces from the
                 // break or the release, inside a run or after it, never from fiber\run() itself
                 if (null !== current()) {
-                    await($task);
+                    try {
+                        await($task);
+                    } catch (\FiberError $e) {
+                        if (\PHP_VERSION_ID >= 80400) {
+                            throw $e;
+                        }
+                        // PHP 8.3 forbids a fiber switch while the generator is destroyed (a `break`
+                        // releases it); the misuse exception was recorded before TurnEnded, and the
+                        // task finishes on its own inside the host's fiber\run()
+                    }
                 }
                 $this->rethrow();
             }

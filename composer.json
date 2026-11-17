@@ -4,7 +4,7 @@
     "type": "library",
     "license": "MIT",
     "require": {
-        "php": "^8.2",
+        "php": "^8.3",
         "ext-zlib": "*",
         "ext-mbstring": "*",
         "fiber-interop/api": "^0.3.1",
@@ -12,7 +12,7 @@
     },
     "require-dev": {
         "fiber-interop/phasync": "^0.4.1",
-        "fiber-interop/revolt": "dev-main",
+        "fiber-interop/revolt": "^0.3.2",
         "friendsofphp/php-cs-fixer": "^3",
         "pestphp/pest": "^3 || ^4 || ^5",
         "revolt/event-loop": "^1.0"
@@ -31,7 +31,10 @@
         "allow-plugins": {
             "pestphp/pest-plugin": true
         },
-        "sort-packages": true
+        "sort-packages": true,
+        "platform": {
+            "php": "8.3.0"
+        }
     },
     "minimum-stability": "dev",
     "prefer-stable": true,

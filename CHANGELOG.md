@@ -45,6 +45,9 @@
 
 ### Fixed
 
+- On PHP 8.3, a host that breaks out of `turn()` at `TurnEnded` gets the turn's misuse exception
+  from the `break`, as on 8.4, instead of a `FiberError` (8.3 forbids a fiber switch while the
+  generator is destroyed) (#47).
 - `Tools\Plan\Reminder` no longer appends the plan to `Compact`'s summary request, which the run's
   own model got through the chain and answered by working the plan instead of summarizing;
   `Compact::isSummaryRequest()` names such requests. A compaction that gets no summary says how both
@@ -251,6 +254,8 @@
 
 ### Changed (breaking)
 
+- Requires PHP 8.3 or later (was 8.2). The suite runs in CI on PHP 8.3, 8.4 and 8.5 with the
+  phasync and revolt adapters.
 - **`Compact` is a port of opencode's compaction** (anomalyco/opencode, `session/compaction.ts`):
   it compacts when the provider's last count plus an estimate of what came since reaches the
   context window less `$buffer` (default 15 %, at least 16k), and once more on a prompt the
